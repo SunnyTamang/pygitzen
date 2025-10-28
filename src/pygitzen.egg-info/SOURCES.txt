@@ -1,0 +1,15 @@
+LICENSE
+MANIFEST.in
+README.md
+pyproject.toml
+setup.py
+src/pygitzen/__init__.py
+src/pygitzen/__main__.py
+src/pygitzen/app.py
+src/pygitzen/git_service.py
+src/pygitzen.egg-info/PKG-INFO
+src/pygitzen.egg-info/SOURCES.txt
+src/pygitzen.egg-info/dependency_links.txt
+src/pygitzen.egg-info/entry_points.txt
+src/pygitzen.egg-info/requires.txt
+src/pygitzen.egg-info/top_level.txt

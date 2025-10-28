@@ -1,0 +1,6 @@
+textual>=0.58
+rich>=13.7
+dulwich>=0.22
+
+[:python_version < "3.11"]
+typing-extensions>=4.7

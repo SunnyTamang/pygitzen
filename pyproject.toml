@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pygitzen"
+version = "0.1.0"
+description = "A Python-native LazyGit-like TUI using Textual and dulwich"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Sunny Tamang", email = "sunny@example.com" }
+]
+maintainers = [
+  { name = "Sunny Tamang", email = "sunny@example.com" }
+]
+keywords = ["git", "tui", "terminal", "textual", "dulwich", "lazygit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Topic :: Terminals",
+]
+dependencies = [
+  "textual>=0.58",
+  "rich>=13.7",
+  "dulwich>=0.22",
+  "typing-extensions>=4.7; python_version<'3.11'"
+]
+
+[project.urls]
+Homepage = "https://github.com/SunnyTamang/pygitzen"
+Repository = "https://github.com/SunnyTamang/pygitzen"
+Issues = "https://github.com/SunnyTamang/pygitzen/issues"
+
+[project.scripts]
+pygitzen = "pygitzen.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

@@ -1,0 +1,2 @@
+[console_scripts]
+pygitzen = pygitzen.__main__:main
