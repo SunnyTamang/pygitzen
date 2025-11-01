@@ -150,4 +150,5 @@ Thumbs.db
 test_installation.py
 *.pkl
 *.pickle
+ROADMAP.md
 

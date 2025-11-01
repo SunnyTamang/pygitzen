@@ -168,29 +168,11 @@ class GitService:
         # Get remote commits to check push status
         remote_commits = self._get_remote_commits(branch)
         
-        # Get commits from base branch (main or master) to exclude shared history
-        base_branch_commits = set()
-        base_branch_names = ["main", "master"]
-        for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                # Collect all commits from base branch
-                for sha, _ in self._iter_commits(base_head, max_count=1000):
-                    base_branch_commits.add(sha.hex())
-                break  # Use first available base branch
-        
         commits: List[CommitInfo] = []
         for sha, commit in self._iter_commits(head, max_count=max_count):
-            commit_sha = sha.hex()
-            
-            # If not main/master branch, exclude commits that exist in base branch
-            if branch not in ["main", "master"] and commit_sha in base_branch_commits:
-                # This commit is shared with base branch, skip it
-                continue
-            
             author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
             summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
+            commit_sha = sha.hex()
             # Check if commit exists on remote
             is_pushed = commit_sha in remote_commits
             commits.append(
