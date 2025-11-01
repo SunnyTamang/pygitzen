@@ -166,6 +166,10 @@ class CommitsPane(ListView):
         self._last_index = None  # Track index changes
         self._last_highlighted = None  # Track highlighted changes
     
+    def set_branch(self, branch: str) -> None:
+        """Update title to show which branch commits are displayed."""
+        self.border_title = f"Commits ({branch})"
+    
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-update patch panel."""
         self._update_patch_for_index(index)
@@ -741,6 +745,10 @@ class PygitzenApp(App):
         self.command_log_pane.update_log("Repository refreshed successfully!")
 
     def load_commits(self, branch: str) -> None:
+        # Update Commits pane title to show which branch
+        self.commits_pane.set_branch(branch)
+        
+        # Load commits from the specified branch
         self.commits = self.git.list_commits(branch)
         self.commits_pane.set_commits(self.commits)
         if self.commits:
