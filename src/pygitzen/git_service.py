@@ -168,11 +168,29 @@ class GitService:
         # Get remote commits to check push status
         remote_commits = self._get_remote_commits(branch)
         
+        # Get commits from base branch (main or master) to exclude shared history
+        base_branch_commits = set()
+        base_branch_names = ["main", "master"]
+        for base_name in base_branch_names:
+            base_ref = f"refs/heads/{base_name}".encode()
+            if base_ref in self.repo.refs and base_name != branch:
+                base_head = self.repo.refs[base_ref]
+                # Collect all commits from base branch
+                for sha, _ in self._iter_commits(base_head, max_count=1000):
+                    base_branch_commits.add(sha.hex())
+                break  # Use first available base branch
+
         commits: List[CommitInfo] = []
         for sha, commit in self._iter_commits(head, max_count=max_count):
+            commit_sha = sha.hex()
+            
+            # If not main/master branch, exclude commits that exist in base branch
+            if branch not in ["main", "master"] and commit_sha in base_branch_commits:
+                # This commit is shared with base branch, skip it
+                continue
+
             author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
             summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
-            commit_sha = sha.hex()
             # Check if commit exists on remote
             is_pushed = commit_sha in remote_commits
             commits.append(
@@ -211,12 +229,30 @@ class GitService:
         
         return diff_text
 
+    def _find_in_tree(self, tree, path_parts: List[str]) -> Optional[bytes]:
+        """Recursively find file in tree and return its SHA."""
+        if not path_parts:
+            return None
+        name = path_parts[0].encode()
+        if name in tree:
+            entry = tree[name]  # entry is (mode, sha) tuple
+            mode, sha = entry
+            if len(path_parts) == 1:
+                # Last part - it's the file
+                return sha  # Return SHA
+            else:
+                # More parts - it's a directory, recurse
+                if stat.S_ISDIR(mode):
+                    subtree_obj = self.repo[sha]
+                    return self._find_in_tree(subtree_obj, path_parts[1:])
+                else:
+                    return None  # Not a directory, can't continue
+        return None
+
     def get_file_status(self) -> List[FileStatus]:
         """Get status of files in working directory."""
         from dulwich.index import Index
-        from dulwich.object_store import tree_lookup_path
         from dulwich.objects import Blob
-        import os
         
         files: List[FileStatus] = []
         
@@ -267,30 +303,9 @@ class GitService:
             # Check if staged (different from HEAD or new)
             head_sha = None
             if head_tree:
-                # Walk tree to find file
-                def find_in_tree(tree, path_parts):
-                    """Recursively find file in tree."""
-                    if not path_parts:
-                        return None
-                    name = path_parts[0].encode()
-                    if name in tree:
-                        entry = tree[name]  # entry is (mode, sha) tuple
-                        mode, sha = entry
-                        if len(path_parts) == 1:
-                            # Last part - it's the file
-                            return sha  # Return SHA
-                        else:
-                            # More parts - it's a directory, recurse
-                            if stat.S_ISDIR(mode):
-                                subtree_obj = self.repo[sha]
-                                return find_in_tree(subtree_obj, path_parts[1:])
-                            else:
-                                return None  # Not a directory, can't continue
-                    return None
-                
                 path_parts = path.split("/")
                 try:
-                    head_sha = find_in_tree(head_tree, path_parts)
+                    head_sha = self._find_in_tree(head_tree, path_parts)
                 except (KeyError, TypeError):
                     head_sha = None
             
@@ -325,31 +340,9 @@ class GitService:
                             # File not in index, check if it's tracked in HEAD or untracked
                             head_sha = None
                             if head_tree:
-                                # Walk tree to find file
-                                def find_in_tree(tree, path_parts):
-                                    """Recursively find file in tree."""
-                                    if not path_parts:
-                                        return None
-                                    name = path_parts[0].encode()
-                                    if name in tree:
-                                        entry = tree[name]  # entry is (mode, sha) tuple
-                                        mode, sha = entry
-                                        if len(path_parts) == 1:
-                                            # Last part - it's the file
-                                            return sha  # Return SHA
-                                        else:
-                                            # More parts - it's a directory, recurse
-                                            import stat
-                                            if stat.S_ISDIR(mode):
-                                                subtree_obj = self.repo[sha]
-                                                return find_in_tree(subtree_obj, path_parts[1:])
-                                            else:
-                                                return None  # Not a directory, can't continue
-                                    return None
-                                
                                 path_parts = rel_path.split("/")
                                 try:
-                                    head_sha = find_in_tree(head_tree, path_parts)
+                                    head_sha = self._find_in_tree(head_tree, path_parts)
                                 except (KeyError, TypeError):
                                     head_sha = None
                             
@@ -385,27 +378,9 @@ class GitService:
                                     # Get HEAD SHA to verify file is actually different
                                     head_sha = None
                                     if head_tree:
-                                        # Reuse find_in_tree function from above context
                                         path_parts = rel_path.split("/")
                                         try:
-                                            # Find file in HEAD tree (simplified - reuse logic)
-                                            def find_in_tree_local(tree, path_parts):
-                                                if not path_parts:
-                                                    return None
-                                                name = path_parts[0].encode()
-                                                if name in tree:
-                                                    entry = tree[name]
-                                                    mode, sha = entry
-                                                    if len(path_parts) == 1:
-                                                        return sha
-                                                    else:
-                                                        if stat.S_ISDIR(mode):
-                                                            subtree_obj = self.repo[sha]
-                                                            return find_in_tree_local(subtree_obj, path_parts[1:])
-                                                        else:
-                                                            return None
-                                                return None
-                                            head_sha = find_in_tree_local(head_tree, path_parts)
+                                            head_sha = self._find_in_tree(head_tree, path_parts)
                                         except (KeyError, TypeError):
                                             head_sha = None
                                     
