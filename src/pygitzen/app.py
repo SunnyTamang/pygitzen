@@ -217,7 +217,12 @@ class CommitsPane(ListView):
             text = Text()
             text.append(short_sha, style="cyan")
             text.append(" ", style="white")
-            text.append("ST O ", style="white")
+            
+            # Show push status
+            if commit.pushed:
+                text.append("✓ ", style="green")  # Pushed to remote
+            else:
+                text.append("↑ ", style="yellow")  # Not pushed (local only)
             
             # Wrap long commit messages
             summary = commit.summary

@@ -22,6 +22,7 @@ class CommitInfo:
     summary: str
     author: str
     timestamp: int
+    pushed: bool = False  # Whether commit exists on remote
 
 
 @dataclass
@@ -144,19 +145,43 @@ class GitService:
             yield sha, commit
             stack.extend(commit.parents)
 
+    def _get_remote_commits(self, branch: str) -> set[str]:
+        """Get set of commit SHAs that exist on remote."""
+        remote_commits = set()
+        try:
+            # Try to get remote ref (e.g., origin/main)
+            remote_ref = f"refs/remotes/origin/{branch}".encode()
+            if remote_ref in self.repo.refs:
+                remote_head = self.repo.refs[remote_ref]
+                # Collect all commits from remote
+                for sha, _ in self._iter_commits(remote_head, max_count=1000):
+                    remote_commits.add(sha.hex())
+        except Exception:
+            # Remote not available or not configured
+            pass
+        return remote_commits
+
     def list_commits(self, branch: str, max_count: int = 200) -> List[CommitInfo]:
         ref = f"refs/heads/{branch}".encode()
         head = self.repo.refs[ref]
+        
+        # Get remote commits to check push status
+        remote_commits = self._get_remote_commits(branch)
+        
         commits: List[CommitInfo] = []
         for sha, commit in self._iter_commits(head, max_count=max_count):
             author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
             summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
+            commit_sha = sha.hex()
+            # Check if commit exists on remote
+            is_pushed = commit_sha in remote_commits
             commits.append(
                 CommitInfo(
-                    sha=sha.hex(),
+                    sha=commit_sha,
                     summary=summary,
                     author=author,
                     timestamp=int(commit.commit_time),
+                    pushed=is_pushed,
                 )
             )
         return commits
