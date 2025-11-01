@@ -708,9 +708,37 @@ class PygitzenApp(App):
             self.command_log_pane.styles.display = "none"
 
     def refresh_data(self) -> None:
+        # Preserve current branch selection before refreshing
+        previous_branch = self.active_branch
+        
         self.branches = self.git.list_branches()
         if self.branches:
-            self.active_branch = self.branches[0].name
+            # Try to restore the previous branch selection if it still exists
+            if previous_branch:
+                # Check if previous branch still exists in the list
+                branch_names = [b.name for b in self.branches]
+                if previous_branch in branch_names:
+                    # Restore the previous branch
+                    self.active_branch = previous_branch
+                    # Update BranchesPane selection to match
+                    branch_index = branch_names.index(previous_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    # Ensure BranchesPane ListView selection matches (set after list is populated)
+                    self.branches_pane.index = branch_index
+                    self.branches_pane.highlighted = branch_index
+                else:
+                    # Branch was deleted, fall back to first branch
+                    self.active_branch = self.branches[0].name
+                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.index = 0
+                    self.branches_pane.highlighted = 0
+            else:
+                # No previous branch, use first branch
+                self.active_branch = self.branches[0].name
+                self.branches_pane.set_branches(self.branches, self.active_branch)
+                self.branches_pane.index = 0
+                self.branches_pane.highlighted = 0
+            
             self.load_commits(self.active_branch)
             self.update_status_info()
 
