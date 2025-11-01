@@ -165,16 +165,23 @@ class GitService:
         sha = bytes.fromhex(sha_hex)
         commit: Commit = self.repo[sha]
         parents = commit.parents
-        if not parents:
-            return "<root commit>"
-        parent = self.repo[parents[0]]
-
-        # Generate a unified diff between parent tree and commit tree
+        
         from dulwich.patch import write_tree_diff
         import io
 
         buf = io.BytesIO()
-        write_tree_diff(buf, self.repo.object_store, parent.tree, commit.tree)
+        
+        if not parents:
+            # Root commit (no parent) - show all files as additions
+            # Use empty tree (all zeros) as parent to show all files as new
+            from dulwich.objects import Tree
+            empty_tree = Tree()
+            write_tree_diff(buf, self.repo.object_store, empty_tree, commit.tree)
+        else:
+            # Regular commit - show diff between parent and commit
+            parent = self.repo[parents[0]]
+            write_tree_diff(buf, self.repo.object_store, parent.tree, commit.tree)
+        
         diff_text = buf.getvalue().decode(errors="replace")
         
         return diff_text

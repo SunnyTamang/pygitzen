@@ -273,18 +273,30 @@ class PatchPane(Static):
         from rich.console import Console
         from rich.syntax import Syntax
         from rich.console import Group
+        from datetime import datetime
+        
+        # Format timestamp as human-readable date (matching Git format)
+        commit_datetime = datetime.fromtimestamp(commit.timestamp)
+        from time import timezone
+        # Calculate timezone offset in hours
+        offset_seconds = -timezone if timezone else 0
+        offset_hours = offset_seconds // 3600
+        offset_sign = '+' if offset_hours >= 0 else '-'
+        offset_abs = abs(offset_hours)
+        offset_str = f"{offset_sign}{offset_abs:02d}00"
+        commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
         
         # Create commit header
         header_text = f"""commit {commit.sha}
 Author: {commit.author}
-Date: {commit.timestamp}
+Date: {commit_date}
 
 {commit.summary}
 
 """
         
         # Create diff content with proper colors
-        if diff_text and diff_text != "<root commit>":
+        if diff_text:
             try:
                 # Use Rich syntax highlighting for diff
                 syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
