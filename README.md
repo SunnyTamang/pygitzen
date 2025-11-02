@@ -7,6 +7,8 @@
 
 **A Python-native Terminal-Based Git Client** - Navigate and manage your Git repositories with a beautiful TUI interface inspired by LazyGit.
 
+<img width="1706" height="1225" alt="Screenshot 2025-11-02 at 11 59 31 AM" src="https://github.com/user-attachments/assets/45a54289-46db-4cc3-91a7-e9847c70cf02" />
+
 ## Features
 
 * **Terminal-Based UI**: Beautiful TUI interface built with Textual and Rich
