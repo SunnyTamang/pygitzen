@@ -1,6 +1,6 @@
 LICENSE
 MANIFEST.in
-README.md
+README_PYPI.md
 pyproject.toml
 setup.py
 src/pygitzen/__init__.py

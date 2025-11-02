@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pygitzen"
 version = "0.1.0"
 description = "A Python-native LazyGit-like TUI using Textual and dulwich"
-readme = "README.md"
+readme = "README_PYPI.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [

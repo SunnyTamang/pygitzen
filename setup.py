@@ -9,7 +9,7 @@ from setuptools import setup, find_packages
 # Read the README file
 def read_readme():
     try:
-        with open("README.md", "r", encoding="utf-8") as fh:
+        with open("README_PYPI.md", "r", encoding="utf-8") as fh:
             return fh.read()
     except FileNotFoundError:
         return ""
