@@ -2,8 +2,10 @@ Metadata-Version: 2.4
 Name: pygitzen
 Version: 0.1.0
 Summary: A Python-native LazyGit-like TUI using Textual and dulwich
-Author-email: Sunny Tamang <sunny@example.com>
-Maintainer-email: Sunny Tamang <sunny@example.com>
+Home-page: https://github.com/SunnyTamang/pygitzen
+Author: Sunny Tamang
+Author-email: Sunny Tamang <sunnysinghtamang@gmail.com>
+Maintainer-email: Sunny Tamang <sunnysinghtamang@gmail.com>
 License: MIT
 Project-URL: Homepage, https://github.com/SunnyTamang/pygitzen
 Project-URL: Repository, https://github.com/SunnyTamang/pygitzen
@@ -11,7 +13,6 @@ Project-URL: Issues, https://github.com/SunnyTamang/pygitzen/issues
 Keywords: git,tui,terminal,textual,dulwich,lazygit
 Classifier: Development Status :: 3 - Alpha
 Classifier: Intended Audience :: Developers
-Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3.9
@@ -27,38 +28,321 @@ Requires-Dist: textual>=0.58
 Requires-Dist: rich>=13.7
 Requires-Dist: dulwich>=0.22
 Requires-Dist: typing-extensions>=4.7; python_version < "3.11"
+Dynamic: author
+Dynamic: home-page
 Dynamic: license-file
+Dynamic: requires-python
 
 # pygitzen
 
-A Python-native LazyGit-like TUI for navigating Git repositories.
+**PyPI version** Python 3.9+ **License:** MIT **Code style:** black
 
-- UI: Textual + Rich
-- Git backend: dulwich (no external `git` required for core features)
+**A Python-native Terminal-Based Git Client** - Navigate and manage your Git repositories with a beautiful TUI interface inspired by LazyGit.
 
-## Install
+## Features
+
+* **Terminal-Based UI**: Beautiful TUI interface built with Textual and Rich
+* **Pure Python**: Uses dulwich library - no external `git` CLI required for core operations
+* **Real-Time Updates**: Live view of your Git repository status
+* **Multi-Panel Interface**: Status, Staged Changes, Changes, Branches, Commits, Patch, Stash, and Command Log
+* **Branch-Aware**: Shows commits specific to the selected branch
+* **Push Status**: Visual indicators for commits pushed/unpushed to remote
+* **File Status Detection**: Automatically detects modified, staged, untracked, and deleted files
+* **Gitignore Support**: Respects `.gitignore` rules automatically
+* **Dark Theme**: Easy-on-the-eyes color scheme with focus highlighting
+* **Keyboard Navigation**: Efficient vim-style navigation (j/k, h/l)
+* **Auto-Refresh**: Patch panel updates automatically when navigating commits
+* **Root Commit Support**: Shows all files in initial commits
+
+## Quick Start
+
+### Installation
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+pip install pygitzen
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/SunnyTamang/pygitzen.git
+cd pygitzen
 pip install -e .
 ```
 
-## Run
+### Basic Usage
 
-From any Git repository directory:
+Navigate to any Git repository and run:
 
 ```bash
 pygitzen
 ```
 
-Key bindings:
-- q: quit
-- r: refresh
-- Up/Down or j/k: navigate lists
-- Enter: select
+The TUI will automatically detect the repository and display your Git status.
 
-## Notes
-- Uses dulwich to read `.git` directly. Some edge cases (rebase/merge in-progress) may not yet be handled.
-- Initial version shows branches, latest commits, and diffs between selected commit and its parent.
+## Keyboard Shortcuts
 
+### Navigation
+- **j** / **↓**: Move down
+- **k** / **↑**: Move up
+- **h** / **←**: Move left
+- **l** / **→**: Move right
+- **Enter**: Select item
+
+### Actions
+- **r**: Refresh repository data
+- **q**: Quit application
+- **@**: Toggle Command Log panel
+
+### Focus Navigation
+- **Tab**: Cycle through panels
+- Click on a panel to focus it
+- Focused panels have green borders
+
+## Interface Overview
+
+pygitzen displays your Git repository in a multi-panel interface:
+
+### Left Column
+
+1. **Status Panel**
+   - Current branch name
+   - Repository name
+   - Visual status indicator
+
+2. **Staged Changes Panel**
+   - Files with staged changes (green M, A, D)
+   - Shows files ready to be committed
+   - Status indicators: M (modified), A (added), D (deleted), R (renamed), C (copied)
+
+3. **Changes Panel**
+   - Files with unstaged changes (yellow M, U)
+   - Shows working directory changes
+   - Status indicators: M (modified), U (untracked), D (deleted)
+
+4. **Branches Panel**
+   - List of all local branches
+   - Current branch highlighted with `*`
+   - Select to view branch-specific commits
+
+5. **Commits Panel**
+   - Commit history for the selected branch
+   - Shows only commits unique to the branch (excludes shared history)
+   - Push status: ✓ (green) = pushed, ↑ (yellow) = local only
+   - Auto-updates Patch panel when navigating
+
+6. **Stash Panel**
+   - Placeholder for stashed changes
+   - (Feature coming soon)
+
+### Right Column
+
+7. **Patch Panel**
+   - Shows commit diff when a commit is selected
+   - Syntax-highlighted diff view
+   - Commit header with author, date, and message
+   - Scrollable for long diffs
+
+8. **Command Log Panel**
+   - Tips and helpful messages
+   - Toggle with `@` key
+
+## File Status Indicators
+
+pygitzen uses Git-standard status letters:
+
+| Letter | Meaning | Color | Description |
+|--------|---------|-------|-------------|
+| **M** | Modified | Green (staged) / Yellow (unstaged) | File changed since last commit |
+| **A** | Added | Green | File added to staging area |
+| **U** | Untracked | Cyan | New file not yet added to Git |
+| **D** | Deleted | Red | File deleted but change not yet committed |
+| **R** | Renamed | Blue | File was renamed or moved |
+| **C** | Copied | Blue | File was copied from another tracked file |
+| **!** | Ignored | Magenta | File is ignored by .gitignore |
+| **S** | Submodule | Cyan | Submodule change |
+| **✓** | Pushed | Green | Commit exists on remote |
+| **↑** | Unpushed | Yellow | Commit is local only |
+
+## Features Explained
+
+### Branch-Specific Commits
+
+When you select a branch, pygitzen shows **only commits unique to that branch**. This means:
+- On `main`: Shows all commits from main
+- On `feature-branch`: Shows only commits that don't exist in main (unique to the branch)
+
+This makes it easy to see what's new in your feature branch without scrolling through shared history.
+
+### Push Status
+
+Each commit displays its push status:
+- **✓** (green): Commit has been pushed to remote
+- **↑** (yellow): Commit exists only locally
+
+This helps you track which commits need to be pushed.
+
+### Gitignore Support
+
+pygitzen automatically respects `.gitignore` rules:
+- Untracked files matching gitignore patterns are not shown
+- Files already tracked are shown even if in gitignore (matching Git behavior)
+
+### Auto-Updating Patch Panel
+
+The Patch panel automatically updates when you navigate commits:
+- Use arrow keys or j/k to navigate
+- Patch panel shows diff immediately (no need to press Enter)
+- Visual highlighting shows which commit is selected
+
+### Focus Indicators
+
+Panels with focus have green borders, making it clear which panel you're interacting with:
+- White borders: Not focused
+- Green borders: Currently focused
+
+## Examples
+
+### Viewing Commit History
+
+1. Launch pygitzen in a Git repository
+2. Navigate to **Commits** panel (use Tab or click)
+3. Use **j/k** or arrow keys to navigate commits
+4. **Patch** panel automatically shows the diff for selected commit
+
+### Switching Branches
+
+1. Navigate to **Branches** panel
+2. Use **j/k** or arrow keys to select a branch
+3. Press **Enter** or click to switch
+4. **Commits** panel updates to show branch-specific commits
+
+### Monitoring File Changes
+
+- **Staged Changes** panel shows files ready to commit (green indicators)
+- **Changes** panel shows files with unstaged modifications (yellow indicators)
+- Files with both staged and unstaged changes appear in **both** panels (VSCode-style)
+
+## Project Structure
+
+```
+pygitzen/
+├── src/
+│   └── pygitzen/
+│       ├── __init__.py       # Package initialization
+│       ├── __main__.py        # CLI entry point
+│       ├── app.py             # Main Textual application
+│       └── git_service.py     # Git operations using dulwich
+├── examples/                  # Example repositories (if any)
+├── tests/                     # Test suite
+├── pyproject.toml            # Package configuration
+├── setup.py                   # Setup script
+├── MANIFEST.in                # Package manifest
+├── LICENSE                    # MIT License
+└── README.md                  # This file
+```
+
+## Technical Details
+
+### Dependencies
+
+- **Textual**: Modern TUI framework for Python
+- **Rich**: Rich text and beautiful formatting
+- **dulwich**: Pure-Python Git implementation
+
+### How It Works
+
+pygitzen reads directly from the `.git` directory using dulwich:
+- No external `git` CLI calls required
+- Direct access to Git objects, refs, and index
+- Fast and efficient for most operations
+
+### Limitations
+
+* Some advanced Git operations (rebase, merge in-progress) may not be fully handled yet
+* Large repositories with thousands of commits may be slower
+* Some edge cases in complex Git workflows may need refinement
+
+## Development
+
+### Setup Development Environment
+
+```bash
+# Clone the repository
+git clone https://github.com/SunnyTamang/pygitzen.git
+cd pygitzen
+
+# Install in development mode
+pip install -e .
+
+# Run the application
+pygitzen
+```
+
+### Running Tests
+
+```bash
+python test_installation.py
+```
+
+### Project Configuration
+
+Configuration is managed through `pyproject.toml`:
+- Package metadata
+- Dependencies
+- Entry points
+- Build settings
+
+## Contributing
+
+We welcome contributions! Here's how you can help:
+
+1. **Report Issues**: Found a bug? Open an issue on GitHub
+2. **Suggest Features**: Have an idea? Share it in Discussions
+3. **Submit Pull Requests**: Improvements and bug fixes are appreciated!
+
+### Development Guidelines
+
+- Follow Python style guidelines (black formatter)
+- Add tests for new features
+- Update documentation for significant changes
+- Keep commits focused and well-described
+
+## Roadmap
+
+See `ROADMAP.md` for planned features and improvements (local file, not tracked in Git).
+
+Upcoming features include:
+- Stage/unstage files interactively
+- Commit changes with message input
+- Push/pull operations
+- Stash management
+- Branch creation and deletion
+- And more!
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+* **[Textual](https://github.com/Textualize/textual)** - Beautiful TUI framework
+* **[Rich](https://github.com/Textualize/rich)** - Rich text and terminal formatting
+* **[dulwich](https://github.com/jelmer/dulwich)** - Pure-Python Git implementation
+* **[LazyGit](https://github.com/jesseduffield/lazygit)** - Inspiration for the UI design
+
+## Support
+
+* **Documentation**: This README and inline code comments
+* **Issues**: [GitHub Issues](https://github.com/SunnyTamang/pygitzen/issues)
+* **Repository**: [GitHub](https://github.com/SunnyTamang/pygitzen)
+
+## Status
+
+**Current Version**: 0.1.0 (Alpha)
+
+This is an early version of pygitzen. Core features are working, but more functionality is planned. See the roadmap for upcoming features.
+
+---
+
+**Made with ❤️ for developers who love terminal UIs**
