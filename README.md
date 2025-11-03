@@ -1,9 +1,13 @@
 # pygitzen
 
-[![PyPI version](https://badge.fury.io/py/pygitzen.svg)](https://badge.fury.io/py/pygitzen)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI version](https://img.shields.io/pypi/v/pygitzen.svg?color=blue)](https://pypi.org/project/pygitzen/)
+[![Python version](https://img.shields.io/pypi/pyversions/pygitzen.svg)](https://pypi.org/project/pygitzen/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Downloads](https://img.shields.io/pypi/dm/pygitzen.svg?color=brightgreen)](https://pypi.org/project/pygitzen/)
+[![Build](https://img.shields.io/github/actions/workflow/status/sunny/pygitzen/python-package.yml?label=build&logo=github)](https://github.com/sunny/pygitzen/actions)
+[![Status](https://img.shields.io/pypi/status/pygitzen.svg)](https://pypi.org/project/pygitzen/)
+
 
 **A Python-native Terminal-Based Git Client** - Navigate and manage your Git repositories with a beautiful TUI interface inspired by LazyGit.
 
