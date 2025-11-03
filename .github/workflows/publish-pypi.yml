@@ -1,19 +1,94 @@
 name: Publish to PyPI
+
 on:
   release:
     types: [published]
+
 jobs:
+  validate-version:
+    name: Validate Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Extract version from release tag
+        id: extract
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION from tag: $TAG"
+
+      - name: Check version against PyPI
+        run: |
+          NEW_VERSION="${{ steps.extract.outputs.version }}"
+          
+          # Fetch latest version from PyPI
+          RESPONSE=$(curl -s https://pypi.org/pypi/pygitzen/json || echo "{}")
+          LATEST_VERSION=$(echo "$RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('info', {}).get('version', '0.0.0'))" 2>/dev/null || echo "0.0.0")
+          
+          echo "Latest version on PyPI: $LATEST_VERSION"
+          echo "New version: $NEW_VERSION"
+          
+          # Compare versions (requires packaging tool)
+          pip install packaging
+          python3 << EOF
+          from packaging import version
+          import sys
+          
+          latest = version.parse("$LATEST_VERSION")
+          new = version.parse("$NEW_VERSION")
+          
+          if new <= latest:
+              print(f"ERROR: New version {new} is not greater than latest PyPI version {latest}")
+              sys.exit(1)
+          
+          print(f"✓ Version {new} is valid (greater than {latest})")
+          EOF
+
   build-and-publish:
+    name: Build and Publish
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: |
+
+      - name: Update version in pyproject.toml
+        run: |
+          pip install tomli tomli-w
+          
+          python3 << EOF
+          import tomllib
+          import tomli_w
+          
+          version = "${{ needs.validate-version.outputs.version }}"
+          
+          with open("pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          
+          data["project"]["version"] = version
+          
+          with open("pyproject.toml", "wb") as f:
+              tomli_w.dump(data, f)
+          
+          print(f"✓ Updated version to {version}")
+          EOF
+
+      - name: Install build dependencies
+        run: |
           python -m pip install --upgrade pip
           pip install build
-          python -m build
-      - uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
