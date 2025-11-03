@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Downloads](https://img.shields.io/pypi/dm/pygitzen.svg?color=brightgreen)](https://pypi.org/project/pygitzen/)
-[![Build](https://img.shields.io/github/actions/workflow/status/sunny/pygitzen/python-package.yml?label=build&logo=github)](https://github.com/sunny/pygitzen/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/SunnyTamang/pygitzen/python-package.yml?label=build&logo=github)](https://github.com/SunnyTamang/pygitzen/actions)
 [![Status](https://img.shields.io/pypi/status/pygitzen.svg)](https://pypi.org/project/pygitzen/)
 
 
