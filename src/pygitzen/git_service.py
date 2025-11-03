@@ -133,10 +133,10 @@ class GitService:
         result.sort(key=lambda b: b.name.lower())
         return result
 
-    def _iter_commits(self, head_sha: bytes, max_count: int = 100) -> Iterable[Tuple[bytes, Commit]]:
+    def _iter_commits(self, head_sha: bytes, max_count: Optional[int] = 100) -> Iterable[Tuple[bytes, Commit]]:
         seen = set()
         stack = [head_sha]
-        while stack and len(seen) < max_count:
+        while stack and (max_count is None or len(seen) < max_count):
             sha = stack.pop(0)
             if sha in seen:
                 continue
@@ -161,7 +161,7 @@ class GitService:
             pass
         return remote_commits
 
-    def list_commits(self, branch: str, max_count: int = 200) -> List[CommitInfo]:
+    def list_commits(self, branch: str, max_count: int = 200, skip: int = 0) -> List[CommitInfo]:
         ref = f"refs/heads/{branch}".encode()
         head = self.repo.refs[ref]
         
@@ -181,12 +181,18 @@ class GitService:
                 break  # Use first available base branch
 
         commits: List[CommitInfo] = []
-        for sha, commit in self._iter_commits(head, max_count=max_count):
+        yielded = 0
+        for index, (sha, commit) in enumerate(self._iter_commits(head, max_count=None)):
             commit_sha = sha.hex()
             
             # If not main/master branch, exclude commits that exist in base branch
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
                 # This commit is shared with base branch, skip it
+                continue
+
+            # Apply skip for pagination
+            if yielded < skip:
+                yielded += 1
                 continue
 
             author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
@@ -202,7 +208,31 @@ class GitService:
                     pushed=is_pushed,
                 )
             )
+            if len(commits) >= max_count:
+                break
         return commits
+
+    def count_commits(self, branch: str) -> int:
+        """Count commits for a branch, applying the same base-branch exclusion."""
+        ref = f"refs/heads/{branch}".encode()
+        head = self.repo.refs[ref]
+
+        base_branch_commits = set()
+        base_branch_names = ["main", "master"]
+        for base_name in base_branch_names:
+            base_ref = f"refs/heads/{base_name}".encode()
+            if base_ref in self.repo.refs and base_name != branch:
+                base_head = self.repo.refs[base_ref]
+                for sha, _ in self._iter_commits(base_head, max_count=None):
+                    base_branch_commits.add(sha.hex())
+                break
+
+        count = 0
+        for sha, _ in self._iter_commits(head, max_count=None):
+            if branch not in ["main", "master"] and sha.hex() in base_branch_commits:
+                continue
+            count += 1
+        return count
 
     def get_commit_diff(self, sha_hex: str) -> str:
         sha = bytes.fromhex(sha_hex)

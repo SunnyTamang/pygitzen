@@ -152,4 +152,5 @@ test_installation.py
 *.pickle
 ROADMAP.md
 README_PYPI.md
+REDDIT_POST.md
 

@@ -255,6 +255,44 @@ class CommitsPane(ListView):
             
             self.append(ListItem(Static(text)))
 
+    def append_commits(self, commits: list[CommitInfo]) -> None:
+        for commit in commits:
+            from rich.text import Text
+            short_sha = commit.sha[:8]
+            author_short = commit.author.split('<')[0].strip()
+            
+            text = Text()
+            text.append(short_sha, style="cyan")
+            text.append(" ", style="white")
+            
+            if commit.pushed:
+                text.append("✓ ", style="green")
+            else:
+                text.append("↑ ", style="yellow")
+            
+            summary = commit.summary
+            if len(summary) > 50:
+                words = summary.split()
+                lines = []
+                current_line = ""
+                for word in words:
+                    if len(current_line + " " + word) <= 50:
+                        current_line += (" " + word) if current_line else word
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
+                for i, line in enumerate(lines):
+                    if i > 0:
+                        text.append("\n     ", style="white")
+                    text.append(line, style="white")
+            else:
+                text.append(summary, style="white")
+            
+            self.append(ListItem(Static(text)))
+
 
 class StashPane(Static):
     """Stash pane showing stashed changes."""
@@ -523,27 +561,41 @@ class PygitzenApp(App):
         min-height: 1;
     }
     
+    /* Selected/highlighted item styling for commits pane */
     #commits-pane ListItem.--highlight {
-        background: #505050;
-        color: white;
+        background: #357ABD; /* blue for strong contrast */
+        color: #ffffff;
         text-style: bold;
     }
     
     #commits-pane ListItem.--highlight:focus {
-        background: #606060;
-        color: white;
+        background: #2f6aa3; /* slightly darker when focused */
+        color: #ffffff;
         text-style: bold;
     }
     
     #commits-pane ListItem.highlighted-commit {
-        background: #505050;
-        color: white;
+        background: #357ABD;
+        color: #ffffff;
         text-style: bold;
     }
     
     #commits-pane ListItem.highlighted-commit:focus {
-        background: #606060;
-        color: white;
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+    }
+
+    /* Selected/highlighted item styling for branches pane */
+    #branches-pane ListItem.--highlight {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #branches-pane ListItem.--highlight:focus {
+        background: #2f6aa3;
+        color: #ffffff;
         text-style: bold;
     }
     
@@ -571,6 +623,20 @@ class PygitzenApp(App):
         background: #1e1e1e;
         color: #cccccc;
         text-align: left;
+    }
+
+    /* Ensure highlighted list items show blue background and readable text */
+    #commits-pane ListItem.--highlight > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+    #commits-pane ListItem.highlighted-commit > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+    #branches-pane ListItem.--highlight > Static {
+        background: transparent;
+        color: #ffffff;
     }
     
     ListView {
@@ -608,6 +674,7 @@ class PygitzenApp(App):
         Binding("c", "checkout", "Checkout"),
         Binding("b", "branch", "Branch"),
         Binding("s", "stash", "Stash"),
+        Binding("+", "load_more", "More"),
     ]
 
     active_branch: reactive[str | None] = reactive(None)
@@ -619,6 +686,9 @@ class PygitzenApp(App):
         self.branches: list[BranchInfo] = []
         self.commits: list[CommitInfo] = []
         self.repo_path = repo_dir
+        self.page_size = 200
+        self.total_commits = 0
+        self.loaded_commits = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -669,11 +739,15 @@ class PygitzenApp(App):
                 new_index = current_index + 1
                 self.commits_pane.index = new_index
                 self.commits_pane.highlighted = new_index
+                # Auto-load more when near the end of loaded commits
+                if new_index >= len(self.commits) - 5:
+                    self.load_more_commits()
         elif self.branches_pane.has_focus:
             # Get current selection and move down
             current_index = self.branches_pane.index
             if current_index is not None and current_index < len(self.branches) - 1:
                 self.branches_pane.index = current_index + 1
+                self.branches_pane.highlighted = current_index + 1
                 # Auto-update commits for the new branch
                 if current_index + 1 < len(self.branches):
                     self.active_branch = self.branches[current_index + 1].name
@@ -694,6 +768,7 @@ class PygitzenApp(App):
             current_index = self.branches_pane.index
             if current_index is not None and current_index > 0:
                 self.branches_pane.index = current_index - 1
+                self.branches_pane.highlighted = current_index - 1
                 # Auto-update commits for the new branch
                 if current_index - 1 >= 0:
                     self.active_branch = self.branches[current_index - 1].name
@@ -775,10 +850,12 @@ class PygitzenApp(App):
     def load_commits(self, branch: str) -> None:
          # Update Commits pane title to show which branch
         self.commits_pane.set_branch(branch)
-        
-        # Load commits from the specified branch
-        self.commits = self.git.list_commits(branch)
+        # Reset paging and load first page
+        self.total_commits = self.git.count_commits(branch)
+        self.commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        self.loaded_commits = len(self.commits)
         self.commits_pane.set_commits(self.commits)
+        self._update_commits_title()
         if self.commits:
             self.selected_commit_index = 0
             # Reset the last index tracker so the first commit shows
@@ -789,6 +866,23 @@ class PygitzenApp(App):
             # Apply highlighting to first item
             self.commits_pane._update_highlighting(0)
             self.show_commit_diff(0)
+
+    def _update_commits_title(self) -> None:
+        if self.active_branch:
+            self.commits_pane.border_title = f"Commits ({self.active_branch}) {len(self.commits)} of {self.total_commits}"
+
+    def load_more_commits(self) -> None:
+        if not self.active_branch:
+            return
+        if self.loaded_commits >= self.total_commits:
+            return
+        next_batch = self.git.list_commits(self.active_branch, max_count=self.page_size, skip=self.loaded_commits)
+        if not next_batch:
+            return
+        self.commits.extend(next_batch)
+        self.loaded_commits = len(self.commits)
+        self.commits_pane.append_commits(next_batch)
+        self._update_commits_title()
 
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
@@ -806,6 +900,9 @@ class PygitzenApp(App):
         elif event.list_view is self.commits_pane:
             self.selected_commit_index = event.index
             self.show_commit_diff(event.index)
+
+    def action_load_more(self) -> None:
+        self.load_more_commits()
 
 
 def run_textual(repo_dir: str = ".") -> None:
