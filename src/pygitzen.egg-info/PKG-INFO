@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: pygitzen
-Version: 0.1.0
+Version: 0.1.2
 Summary: A Python-native LazyGit-like TUI using Textual and dulwich
 Home-page: https://github.com/SunnyTamang/pygitzen
 Author: Sunny Tamang
