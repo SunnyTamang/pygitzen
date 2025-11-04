@@ -682,13 +682,18 @@ class PygitzenApp(App):
 
     def __init__(self, repo_dir: str = ".") -> None:
         super().__init__()
-        self.git = GitService(repo_dir)
-        self.branches: list[BranchInfo] = []
-        self.commits: list[CommitInfo] = []
-        self.repo_path = repo_dir
-        self.page_size = 200
-        self.total_commits = 0
-        self.loaded_commits = 0
+        from dulwich.errors import NotGitRepository
+        try:
+            self.git = GitService(repo_dir)
+            self.branches: list[BranchInfo] = []
+            self.commits: list[CommitInfo] = []
+            self.repo_path = repo_dir
+            self.page_size = 200
+            self.total_commits = 0
+            self.loaded_commits = 0
+        except NotGitRepository:
+            # Re-raise to be handled by run_textual()
+            raise
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -906,7 +911,32 @@ class PygitzenApp(App):
 
 
 def run_textual(repo_dir: str = ".") -> None:
-    app = PygitzenApp(repo_dir)
-    app.run()
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+    from dulwich.errors import NotGitRepository
+    
+    try:
+        app = PygitzenApp(repo_dir)
+        app.run()
+    except NotGitRepository:
+        console = Console()
+        message = Text()
+        message.append("The directory you specified is not a Git repository.\n", style="yellow")
+        message.append(f"\nPath: ", style="dim")
+        message.append(f"{repo_dir}", style="cyan")
+        message.append("\n\nPlease navigate to a directory that contains a ", style="dim")
+        message.append(".git", style="cyan")
+        message.append(" folder, or initialize a new Git repository:\n", style="dim")
+        message.append("\n  git init", style="green")
+        
+        panel = Panel(
+            message,
+            title="[bold red]❌ Git Repository Not Found[/bold red]",
+            border_style="red",
+            padding=(1, 2),
+        )
+        console.print(panel)
+        raise SystemExit(1)
 
 
