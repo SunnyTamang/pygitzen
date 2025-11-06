@@ -294,7 +294,7 @@ jobs:
     if: |
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
       (github.event_name == 'release') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.version != '' && github.event.inputs.publish == true))
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' && github.event.inputs.publish != false)
     runs-on: ubuntu-latest
     steps:
       - name: Download all wheels
