@@ -251,8 +251,11 @@ jobs:
             
             # The .pyx file will be in the package directory: pygitzen-VERSION/git_service_cython.pyx
             # Check for the file anywhere in the tarball path
-            if tar -tzf "$SDIST_FILE" 2>/dev/null | grep -q "git_service_cython\.pyx"; then
+            # List all files and check if .pyx is present
+            TARBALL_LIST=$(tar -tzf "$SDIST_FILE" 2>/dev/null)
+            if echo "$TARBALL_LIST" | grep -q "git_service_cython.pyx"; then
               echo "✅ Cython source (.pyx) found in source distribution!"
+              echo "   File path: $(echo "$TARBALL_LIST" | grep "git_service_cython.pyx")"
             else
               echo "❌ Cython source (.pyx) NOT found in source distribution!"
               echo "Checking MANIFEST.in..."
@@ -260,9 +263,7 @@ jobs:
               echo "Checking if .pyx file exists..."
               ls -la git_service_cython.pyx || echo ".pyx file not found in repo"
               echo "Debug: Listing all .pyx files in tarball:"
-              tar -tzf "$SDIST_FILE" 2>/dev/null | grep "\.pyx" || echo "No .pyx files found"
-              echo "Debug: Full tarball listing (first 100 lines):"
-              tar -tzf "$SDIST_FILE" 2>/dev/null | head -100
+              echo "$TARBALL_LIST" | grep "\.pyx" || echo "No .pyx files found"
               exit 1
             fi
           else
