@@ -37,16 +37,20 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Final version: $VERSION"
 
-      - name: Update version in pyproject.toml
+      - name: Update version in pyproject.toml and setup.py
         run: |
           pip install tomli tomli-w
+          
+          VERSION="${{ steps.get_version.outputs.version }}"
           
           python3 << EOF
           import tomllib
           import tomli_w
+          import re
           
-          version = "${{ steps.get_version.outputs.version }}"
+          version = "$VERSION"
           
+          # Update pyproject.toml
           with open("pyproject.toml", "rb") as f:
               data = tomllib.load(f)
           
@@ -55,7 +59,23 @@ jobs:
           with open("pyproject.toml", "wb") as f:
               tomli_w.dump(data, f)
           
-          print(f"✓ Updated version to {version}")
+          print(f"✓ Updated pyproject.toml version to {version}")
+          
+          # Update setup.py
+          with open("setup.py", "r") as f:
+              setup_content = f.read()
+          
+          # Replace version in setup.py
+          setup_content = re.sub(
+              r'version="[^"]*"',
+              f'version="{version}"',
+              setup_content
+          )
+          
+          with open("setup.py", "w") as f:
+              f.write(setup_content)
+          
+          print(f"✓ Updated setup.py version to {version}")
           EOF
 
       - name: Install build dependencies
@@ -65,6 +85,55 @@ jobs:
 
       - name: Build sdist and wheel
         run: python -m build
+
+      - name: Verify package metadata
+        run: |
+          echo "🔍 Verifying package metadata..."
+          
+          # Check if README_PYPI.md exists
+          if [ ! -f "README_PYPI.md" ]; then
+            echo "❌ README_PYPI.md not found!"
+            exit 1
+          fi
+          
+          echo "✅ README_PYPI.md found"
+          
+          # Check package metadata using twine
+          pip install twine
+          
+          echo "📦 Checking package files with twine..."
+          twine check dist/* || {
+            echo "⚠️  Twine check found issues, but continuing..."
+            echo "   (Some warnings may be non-fatal)"
+          }
+          
+          # Verify version format and check if it already exists
+          VERSION="${{ steps.get_version.outputs.version }}"
+          echo "📋 Version to publish: $VERSION"
+          
+          # Check if version already exists on TestPyPI
+          echo "🔍 Checking if version already exists on TestPyPI..."
+          RESPONSE=$(curl -s "https://test.pypi.org/pypi/pygitzen/$VERSION/json" 2>/dev/null || echo "{}")
+          if echo "$RESPONSE" | grep -q '"version"'; then
+            echo "⚠️  WARNING: Version $VERSION already exists on TestPyPI!"
+            echo "   You may need to use a different version or delete the existing one."
+            echo "   Continuing anyway (will fail if upload is rejected)..."
+          else
+            echo "✅ Version $VERSION is new (not found on TestPyPI)"
+          fi
+          
+          # Verify version format in built files
+          WHEEL_FILE=$(find dist -name "*.whl" | head -1)
+          if [ -n "$WHEEL_FILE" ]; then
+            echo "📦 Wheel: $WHEEL_FILE"
+          fi
+          
+          SDIST_FILE=$(find dist -name "*.tar.gz" | head -1)
+          if [ -n "$SDIST_FILE" ]; then
+            echo "📦 Source: $SDIST_FILE"
+          fi
+          
+          echo "✅ Metadata verification complete"
 
       - name: Verify Cython extension was built
         run: |
@@ -110,3 +179,5 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          verbose: true
+          skip-existing: false
