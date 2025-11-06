@@ -7,6 +7,7 @@ from textual.reactive import reactive
 from textual import events
 from textual.binding import Binding
 from textual.message import Message
+from textual import work
 from rich.text import Text
 from rich.console import Console
 from rich.syntax import Syntax
@@ -14,6 +15,13 @@ from rich.panel import Panel
 
 from .git_service import GitService, BranchInfo, CommitInfo, FileStatus
 
+# Try to import Cython version for better performance
+try:
+    from git_service_cython import GitServiceCython
+    CYTHON_AVAILABLE = True
+except ImportError:
+    CYTHON_AVAILABLE = False
+    GitServiceCython = None
 
 class StatusPane(Static):
     """Status pane showing current branch and repo info."""
@@ -680,17 +688,28 @@ class PygitzenApp(App):
     active_branch: reactive[str | None] = reactive(None)
     selected_commit_index: reactive[int] = reactive(0)
 
-    def __init__(self, repo_dir: str = ".") -> None:
+    def __init__(self, repo_dir: str = ".", use_cython: bool = True) -> None:
         super().__init__()
         from dulwich.errors import NotGitRepository
         try:
-            self.git = GitService(repo_dir)
+            # self.git = GitService(repo_dir)
+            # Use Cython version if available and requested, otherwise use Python version
+            if use_cython and CYTHON_AVAILABLE:
+                self.git = GitServiceCython(repo_dir)
+                self.git_python = self.git  # Use Cython for file operations too (now optimized!)
+                self._using_cython = True
+            else:
+                self.git = GitService(repo_dir)
+                self.git_python = self.git  # Same instance
+                self._using_cython = False
             self.branches: list[BranchInfo] = []
             self.commits: list[CommitInfo] = []
             self.repo_path = repo_dir
             self.page_size = 200
             self.total_commits = 0
             self.loaded_commits = 0
+            self._loading_commits = False
+            self._loading_file_status = False
         except NotGitRepository:
             # Re-raise to be handled by run_textual()
             raise
@@ -730,10 +749,12 @@ class PygitzenApp(App):
     def on_mount(self) -> None:
         # Set parent app reference for commits pane
         self.commits_pane._parent_app = self
-        self.refresh_data()
+        # self.refresh_data()
+        self.refresh_data_fast()
 
     def action_refresh(self) -> None:
-        self.refresh_data()
+        # self.refresh_data()
+        self.refresh_data_fast()
 
     def action_down(self) -> None:
         if self.commits_pane.has_focus:
@@ -756,8 +777,15 @@ class PygitzenApp(App):
                 # Auto-update commits for the new branch
                 if current_index + 1 < len(self.branches):
                     self.active_branch = self.branches[current_index + 1].name
-                    self.load_commits(self.active_branch)
-                    self.update_status_info()
+                    # self.load_commits(self.active_branch)
+                    # self.update_status_info()
+                    self.load_commits_fast(self.active_branch)
+                    # Update status pane immediately
+                    if self.active_branch:
+                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                    # Load heavy operations in background
+                    self.load_commits_count_background(self.active_branch)
+                    self.load_file_status_background()
 
     def action_up(self) -> None:
         if self.commits_pane.has_focus:
@@ -777,8 +805,15 @@ class PygitzenApp(App):
                 # Auto-update commits for the new branch
                 if current_index - 1 >= 0:
                     self.active_branch = self.branches[current_index - 1].name
-                    self.load_commits(self.active_branch)
-                    self.update_status_info()
+                    # self.load_commits(self.active_branch)
+                    # self.update_status_info()
+                    self.load_commits_fast(self.active_branch)
+                    # Update status pane immediately
+                    if self.active_branch:
+                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                    # Load heavy operations in background
+                    self.load_commits_count_background(self.active_branch)
+                    self.load_file_status_background()
 
     def action_toggle_command_log(self) -> None:
         """Toggle command log pane visibility."""
@@ -786,6 +821,62 @@ class PygitzenApp(App):
             self.command_log_pane.styles.display = "block"
         else:
             self.command_log_pane.styles.display = "none"
+
+    def refresh_data_fast(self) -> None:
+        """Load UI immediately with minimal data (fast, non-blocking)."""
+        # Preserve current branch selection before refreshing
+        previous_branch = self.active_branch
+        
+        # Load branches immediately (fast, ~0.1s)
+        self.branches = self.git.list_branches()
+        if self.branches:
+            # Try to restore the previous branch selection if it still exists
+            if previous_branch:
+                # Check if previous branch still exists in the list
+                branch_names = [b.name for b in self.branches]
+                if previous_branch in branch_names:
+                    # Restore the previous branch
+                    self.active_branch = previous_branch
+                    # Update BranchesPane selection to match
+                    branch_index = branch_names.index(previous_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    # Ensure BranchesPane ListView selection matches (set after list is populated)
+                    self.branches_pane.index = branch_index
+                    self.branches_pane.highlighted = branch_index
+                else:
+                    # Branch was deleted, fall back to first branch
+                    self.active_branch = self.branches[0].name
+                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.index = 0
+                    self.branches_pane.highlighted = 0
+            else:
+                # No previous branch, use first branch
+                self.active_branch = self.branches[0].name
+                self.branches_pane.set_branches(self.branches, self.active_branch)
+                self.branches_pane.index = 0
+                self.branches_pane.highlighted = 0
+
+            # Load first page of commits immediately (fast, ~0.02s)
+            # Don't block on count_commits - load it in background
+            self.load_commits_fast(self.active_branch)
+            
+            # Update status pane immediately (fast)
+            if self.active_branch:
+                self.status_pane.update_status(self.active_branch, self.repo_path)
+            
+            # Show loading placeholders for file status
+            self.staged_pane.update_files([])
+            self.changes_pane.update_files([])
+            from rich.text import Text
+            loading_text = Text("Loading file status...", style="dim white")
+            self.staged_pane.append(ListItem(Static(loading_text)))
+            self.changes_pane.append(ListItem(Static(loading_text)))
+            
+            # Load heavy operations in background (non-blocking)
+            # Store branch for background workers
+            self._pending_branch = self.active_branch
+            self.load_commits_count_background(self.active_branch)
+            self.load_file_status_background()
 
     def refresh_data(self) -> None:
         # Preserve current branch selection before refreshing
@@ -829,7 +920,9 @@ class PygitzenApp(App):
         
         # Update staged and changes panes with actual file status
         try:
-            files = self.git.get_file_status()
+            # files = self.git.get_file_status()
+            files = self.git_python.get_file_status()
+
             # Filter out files that are up to date with the branch (no changes)
             files_with_changes = [
                 f for f in files
@@ -850,7 +943,180 @@ class PygitzenApp(App):
         self.stash_pane.update_stash(0)
         
         # Update command log
-        self.command_log_pane.update_log("Repository refreshed successfully!")
+        # self.command_log_pane.update_log("Repository refreshed successfully!")
+        # Update command log
+        version_info = " (Cython)" if self._using_cython else " (Python)"
+        self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info}")
+
+    def load_commits_fast(self, branch: str) -> None:
+        """Load first page of commits immediately (fast, non-blocking)."""
+        # Update Commits pane title to show which branch
+        self.commits_pane.set_branch(branch)
+        
+        # Load first page immediately (fast, ~0.02s)
+        # Don't block on count_commits - load it in background
+        self.commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        self.loaded_commits = len(self.commits)
+        
+        # Show placeholder count (will be updated when count loads)
+        self.total_commits = 0  # Will be updated in background
+        self.commits_pane.set_commits(self.commits)
+        self._update_commits_title()  # Use helper to show "..." when count is 0
+        
+        if self.commits:
+            self.selected_commit_index = 0
+            # Reset the last index tracker so the first commit shows
+            self.commits_pane._last_index = None
+            # Ensure the ListView selection and highlighting match our index
+            self.commits_pane.index = 0
+            self.commits_pane.highlighted = 0
+            # Apply highlighting to first item
+            self.commits_pane._update_highlighting(0)
+            
+            self.show_commit_diff(0)
+    
+    def load_commits_count_background(self, branch: str) -> None:
+        """Load commit count in background (non-blocking)."""
+        if self._loading_commits:
+            return
+        self._loading_commits = True
+        
+        # Start the async handler (Textual will handle async execution)
+        # Use Textual's async support - schedule the async function
+        import asyncio
+        async def run_worker():
+            await self._handle_commit_count_worker(branch)
+        
+        # Get the event loop from Textual
+        try:
+            loop = asyncio.get_event_loop()
+            loop.create_task(run_worker())
+        except RuntimeError:
+            # If no event loop, schedule it for next event loop iteration
+            self.set_timer(0.0, lambda: asyncio.create_task(run_worker()))
+    
+    async def _handle_commit_count_worker(self, branch: str) -> None:
+        """Handle commit count worker completion."""
+        @work(exclusive=True, thread=True)
+        def count_commits() -> int:
+            try:
+                count = self.git.count_commits(branch)
+                return count if count > 0 else 0
+            except Exception as e:
+                # Log error but don't crash
+                print(f"Error counting commits: {e}")
+                return 0
+        
+        try:
+            worker = count_commits()
+            count = await worker
+            # Only update if we got a valid count
+            if count > 0:
+                self.total_commits = count
+                self._update_commits_title()
+            else:
+                # If count is 0, try to get it synchronously as fallback
+                try:
+                    count = self.git.count_commits(branch)
+                    if count > 0:
+                        self.total_commits = count
+                        self._update_commits_title()
+                except Exception:
+                    pass  # Keep showing "..." if we can't get count
+            self._loading_commits = False
+        except Exception as e:
+            # If worker fails, try synchronous fallback
+            print(f"Worker error: {e}")
+            try:
+                count = self.git.count_commits(branch)
+                if count > 0:
+                    self.total_commits = count
+                    self._update_commits_title()
+            except Exception:
+                pass  # Keep showing "..." if we can't get count
+            self._loading_commits = False
+    
+    def load_file_status_background(self) -> None:
+        """Load file status in background (non-blocking)."""
+        if self._loading_file_status:
+            return
+        
+        self._loading_file_status = True
+        
+        # Use a thread to load files asynchronously without blocking the UI
+        # This ensures commits can display immediately while files load in background
+        import threading
+        
+        def load_files_in_thread():
+            """Load files in background thread (non-blocking)."""
+            try:
+                files = self.git_python.get_file_status()
+                # Filter out files that are up to date with the branch (no changes)
+                files_with_changes = [
+                    f for f in files
+                    if f.staged or f.unstaged or f.status in ["modified", "staged", "untracked", "deleted", "renamed", "copied"]
+                ]
+                
+                # Update UI from main thread (Textual requires UI updates on main thread)
+                # Use call_from_thread to safely update UI from background thread
+                try:
+                    self.call_from_thread(self._update_file_status_ui, files_with_changes)
+                except (AttributeError, RuntimeError):
+                    # Fallback: schedule update on next event loop iteration
+                    self.set_timer(0.0, lambda: self._update_file_status_ui(files_with_changes))
+            except Exception as e:
+                # Log error to file
+                try:
+                    with open("debug_file_status.log", "a") as f:
+                        f.write(f"Error loading file status: {e}\n")
+                        import traceback
+                        f.write(traceback.format_exc())
+                except:
+                    pass
+                
+                # Update UI from main thread on error
+                try:
+                    self.call_from_thread(self._update_file_status_ui, [])
+                except (AttributeError, RuntimeError):
+                    self.set_timer(0.0, lambda: self._update_file_status_ui([]))
+        
+        # Start thread immediately - doesn't block UI
+        thread = threading.Thread(target=load_files_in_thread, daemon=True)
+        thread.start()
+    
+    def _update_file_status_ui(self, files_with_changes: list) -> None:
+        """Update file status UI (called from main thread)."""
+        try:
+            # Clear loading placeholder
+            self.staged_pane.clear()
+            self.changes_pane.clear()
+            
+            # Update with actual files
+            self.staged_pane.update_files(files_with_changes)
+            self.changes_pane.update_files(files_with_changes)
+            
+            self._loading_file_status = False
+            
+            # Update command log
+            version_info = " (Cython)" if self._using_cython else " (Python)"
+            file_count = len(files_with_changes)
+            self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info} ({file_count} files)")
+        except Exception as e:
+            # Log error to file
+            try:
+                with open("debug_file_status.log", "a") as f:
+                    f.write(f"Error updating file status UI: {e}\n")
+                    import traceback
+                    f.write(traceback.format_exc())
+            except:
+                pass
+            
+            # Show empty on error
+            self.staged_pane.clear()
+            self.changes_pane.clear()
+            self.staged_pane.update_files([])
+            self.changes_pane.update_files([])
+            self._loading_file_status = False
 
     def load_commits(self, branch: str) -> None:
          # Update Commits pane title to show which branch

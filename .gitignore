@@ -5,6 +5,10 @@ __pycache__/
 
 # C extensions
 *.so
+# Cython generated files
+*.c                    # C source generated from .pyx
+*.html                  # Cython annotation files (cython -a)
+*.pyd                   # Windows compiled extensions
 
 # Distribution / packaging
 .Python
@@ -153,4 +157,6 @@ test_installation.py
 ROADMAP.md
 README_PYPI.md
 REDDIT_POST.md
-
+CYTHON_PUBLISH.md
+previous_builds/
+git_service_cython.c
