@@ -39,6 +39,7 @@ jobs:
 
       - name: Extract version from tag, release, or manual input
         id: get_version
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ -n "${{ github.event.inputs.version }}" ]; then
@@ -111,7 +112,11 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build Cython auditwheel
+          pip install build Cython
+      
+      - name: Install auditwheel (Linux only)
+        if: runner.os == 'Linux'
+        run: pip install auditwheel
 
       - name: Build wheel
         run: python -m build --wheel
@@ -122,6 +127,7 @@ jobs:
 
       - name: Repair Linux wheel with auditwheel (if Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           echo "🔧 Repairing Linux wheel for manylinux compatibility..."
           WHEEL_FILE=$(find dist -name "*linux*.whl" | head -1)
@@ -153,6 +159,7 @@ jobs:
 
       - name: Verify package metadata
         if: steps.get_version.outputs.publish == 'true'
+        shell: bash
         run: |
           echo "🔍 Verifying package metadata..."
           
@@ -203,6 +210,7 @@ jobs:
 
       - name: Verify Cython extension was built
         if: steps.get_version.outputs.publish == 'true'
+        shell: bash
         run: |
           echo "🔍 Checking if Cython extension was built..."
           
@@ -280,6 +288,7 @@ jobs:
           merge-multiple: true
       
       - name: List artifacts
+        shell: bash
         run: |
           echo "📦 Built artifacts:"
           find dist -name "*.whl" -o -name "*.tar.gz" | sort
