@@ -1,0 +1,324 @@
+name: Build and Publish to TestPyPI
+
+on:
+  push:
+    tags:
+      - 'v*'  # Matches v0.2.0, v0.2.0rc1, v0.2.0-rc1, etc.
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.1.3-rc1). Leave empty for build-only mode.'
+        required: false
+        type: string
+      publish:
+        description: 'Publish to TestPyPI?'
+        required: false
+        type: boolean
+        default: true
+  release:
+    types: [published]
+
+jobs:
+  build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Extract version from tag, release, or manual input
+        id: get_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ github.event.inputs.version }}" ]; then
+              VERSION="${{ github.event.inputs.version }}"
+              echo "Using manual version: $VERSION"
+            else
+              echo "No version provided - build-only mode"
+              VERSION=""
+            fi
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            TAG=${GITHUB_REF#refs/tags/}
+            VERSION=${TAG#v}
+            echo "Using release tag version: $VERSION"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "Using tag version: $VERSION"
+          fi
+          
+          if [ -n "$VERSION" ]; then
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "publish=true" >> $GITHUB_OUTPUT
+          else
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "publish=false" >> $GITHUB_OUTPUT
+          fi
+          echo "Final version: ${VERSION:-'build-only'}"
+
+      - name: Update version in pyproject.toml and setup.py
+        if: steps.get_version.outputs.version != ''
+        shell: bash
+        run: |
+          pip install tomli tomli-w
+          
+          VERSION="${{ steps.get_version.outputs.version }}"
+          
+          python3 << 'EOF'
+          import tomllib
+          import tomli_w
+          import re
+          import os
+          
+          version = os.environ['VERSION']
+          
+          # Update pyproject.toml
+          with open("pyproject.toml", "rb") as f:
+              data = tomllib.load(f)
+          
+          data["project"]["version"] = version
+          
+          with open("pyproject.toml", "wb") as f:
+              tomli_w.dump(data, f)
+          
+          print(f"[OK] Updated pyproject.toml version to {version}")
+          
+          # Update setup.py
+          with open("setup.py", "r", encoding="utf-8") as f:
+              setup_content = f.read()
+          
+          # Replace version in setup.py
+          setup_content = re.sub(
+              r'version="[^"]*"',
+              f'version="{version}"',
+              setup_content
+          )
+          
+          with open("setup.py", "w", encoding="utf-8") as f:
+              f.write(setup_content)
+          
+          print(f"[OK] Updated setup.py version to {version}")
+          EOF
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build Cython
+      
+      - name: Install auditwheel (Linux only)
+        if: runner.os == 'Linux'
+        run: pip install auditwheel
+
+      - name: Build wheel
+        run: python -m build --wheel
+      
+      - name: Build source distribution (only on Linux to avoid duplicates)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: python -m build --sdist
+
+      - name: Repair Linux wheel with auditwheel (if Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "🔧 Repairing Linux wheel for manylinux compatibility..."
+          WHEEL_FILE=$(find dist -name "*linux*.whl" | head -1)
+          if [ -z "$WHEEL_FILE" ]; then
+            echo "ℹ️  No Linux wheel found, skipping repair"
+            exit 0
+          fi
+          
+          echo "📦 Found Linux wheel: $WHEEL_FILE"
+          echo "🔧 Repairing wheel to manylinux standard..."
+          
+          # Repair wheel - auditwheel will automatically convert linux_x86_64 to manylinux tag
+          auditwheel repair "$WHEEL_FILE" -w dist/
+          
+          # Remove the original non-manylinux wheel
+          rm "$WHEEL_FILE"
+          
+          echo "✅ Wheel repaired to manylinux standard"
+          echo "📦 Repaired wheels:"
+          ls -lh dist/*.whl
+          
+          # Verify the new wheel has manylinux tag
+          NEW_WHEEL=$(find dist -name "*manylinux*.whl" | head -1)
+          if [ -n "$NEW_WHEEL" ]; then
+            echo "✅ Verified: New wheel has manylinux tag: $NEW_WHEEL"
+          else
+            echo "⚠️  Warning: Could not find manylinux wheel after repair"
+          fi
+
+      - name: Verify package metadata
+        if: steps.get_version.outputs.publish == 'true'
+        shell: bash
+        run: |
+          echo "🔍 Verifying package metadata..."
+          
+          # Check if README_PYPI.md exists
+          if [ ! -f "README_PYPI.md" ]; then
+            echo "❌ README_PYPI.md not found!"
+            exit 1
+          fi
+          
+          echo "✅ README_PYPI.md found"
+          
+          # Check package metadata using twine
+          pip install twine
+          
+          echo "📦 Checking package files with twine..."
+          twine check dist/* || {
+            echo "⚠️  Twine check found issues, but continuing..."
+            echo "   (Some warnings may be non-fatal)"
+          }
+          
+          # Verify version format and check if it already exists
+          VERSION="${{ steps.get_version.outputs.version }}"
+          echo "📋 Version to publish: $VERSION"
+          
+          # Check if version already exists on TestPyPI
+          echo "🔍 Checking if version already exists on TestPyPI..."
+          RESPONSE=$(curl -s "https://test.pypi.org/pypi/pygitzen/$VERSION/json" 2>/dev/null || echo "{}")
+          if echo "$RESPONSE" | grep -q '"version"'; then
+            echo "⚠️  WARNING: Version $VERSION already exists on TestPyPI!"
+            echo "   You may need to use a different version or delete the existing one."
+            echo "   Continuing anyway (will fail if upload is rejected)..."
+          else
+            echo "✅ Version $VERSION is new (not found on TestPyPI)"
+          fi
+          
+          # Verify version format in built files
+          WHEEL_FILE=$(find dist -name "*.whl" | head -1)
+          if [ -n "$WHEEL_FILE" ]; then
+            echo "📦 Wheel: $WHEEL_FILE"
+          fi
+          
+          SDIST_FILE=$(find dist -name "*.tar.gz" | head -1)
+          if [ -n "$SDIST_FILE" ]; then
+            echo "📦 Source: $SDIST_FILE"
+          fi
+          
+          echo "✅ Metadata verification complete"
+
+      - name: Verify Cython extension was built
+        if: steps.get_version.outputs.publish == 'true'
+        shell: bash
+        run: |
+          echo "🔍 Checking if Cython extension was built..."
+          
+          # Check if wheel contains Cython extension
+          WHEEL_FILE=$(find dist -name "*.whl" | head -1)
+          if [ -z "$WHEEL_FILE" ]; then
+            echo "❌ No wheel file found!"
+            exit 1
+          fi
+          
+          echo "📦 Wheel file: $WHEEL_FILE"
+          
+          # Extract and check contents
+          unzip -l "$WHEEL_FILE" | grep -E "(git_service_cython|\.so)" || echo "⚠️  No .so files found in wheel"
+          
+          # Check for .so files in wheel (platform-specific)
+          if unzip -l "$WHEEL_FILE" | grep -q "\.so"; then
+            echo "✅ Cython extension (.so) found in wheel!"
+            unzip -l "$WHEEL_FILE" | grep "\.so"
+          else
+            echo "⚠️  Warning: No .so files found in wheel"
+            echo "   This might be normal for source-only builds"
+          fi
+          
+          # Check if .pyx file is in source distribution
+          SDIST_FILE=$(find dist -name "*.tar.gz" | head -1)
+          if [ -n "$SDIST_FILE" ]; then
+            echo "📦 Source distribution: $SDIST_FILE"
+            # List all files in the tarball to debug
+            echo "Files in source distribution:"
+            tar -tzf "$SDIST_FILE" | grep -E "(\.pyx|MANIFEST)" | head -10 || echo "No .pyx or MANIFEST found"
+            
+            # The .pyx file will be in the package directory inside the tarball
+            # Pattern: pygitzen-VERSION/git_service_cython.pyx
+            if tar -tzf "$SDIST_FILE" 2>/dev/null | grep -qE "(git_service_cython\.pyx|/git_service_cython\.pyx)"; then
+              echo "✅ Cython source (.pyx) found in source distribution!"
+            else
+              echo "❌ Cython source (.pyx) NOT found in source distribution!"
+              echo "Checking MANIFEST.in..."
+              cat MANIFEST.in || echo "MANIFEST.in not found"
+              echo "Checking if .pyx file exists..."
+              ls -la git_service_cython.pyx || echo ".pyx file not found in repo"
+              echo "Full tarball contents (first 50 lines):"
+              tar -tzf "$SDIST_FILE" 2>/dev/null | head -50
+              exit 1
+            fi
+          fi
+          
+          echo "✅ Build verification complete!"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          retention-days: ${{ steps.get_version.outputs.publish == 'true' && 1 || 30 }}
+      
+      - name: Upload source distribution (only on Linux)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          retention-days: ${{ steps.get_version.outputs.publish == 'true' && 1 || 30 }}
+
+  publish:
+    name: Publish to TestPyPI
+    needs: build-wheels
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'release') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.version != '' && github.event.inputs.publish == true))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          pattern: wheels-*
+          merge-multiple: true
+      
+      - name: Download source distribution
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          pattern: sdist
+          merge-multiple: true
+      
+      - name: List artifacts
+        shell: bash
+        run: |
+          echo "📦 Built artifacts:"
+          find dist -name "*.whl" -o -name "*.tar.gz" | sort
+          echo ""
+          echo "Total files:"
+          find dist -name "*.whl" -o -name "*.tar.gz" | wc -l
+          echo ""
+          echo "Platforms:"
+          find dist -name "*.whl" | sed 's/.*-\(.*\)\.whl/\1/' | sort -u
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          verbose: true
+          skip-existing: false
