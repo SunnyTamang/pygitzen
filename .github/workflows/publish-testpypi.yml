@@ -240,6 +240,8 @@ jobs:
           fi
           
           # Check if .pyx file is in source distribution
+          # NOTE: Source distribution is only built for Python 3.12 on Linux to avoid duplicates
+          # So this check only runs when source distribution exists
           SDIST_FILE=$(find dist -name "*.tar.gz" | head -1)
           if [ -n "$SDIST_FILE" ]; then
             echo "📦 Source distribution: $SDIST_FILE"
@@ -257,6 +259,9 @@ jobs:
               ls -la git_service_cython.pyx || echo ".pyx file not found in repo"
               exit 1
             fi
+          else
+            echo "ℹ️  No source distribution found (only built for Python 3.12 on Linux)"
+            echo "   Skipping source distribution verification"
           fi
           
           echo "✅ Build verification complete!"
