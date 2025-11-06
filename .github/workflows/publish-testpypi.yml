@@ -92,10 +92,10 @@ jobs:
           with open("pyproject.toml", "wb") as f:
               tomli_w.dump(data, f)
           
-          print(f"✓ Updated pyproject.toml version to {version}")
+          print(f"[OK] Updated pyproject.toml version to {version}")
           
           # Update setup.py
-          with open("setup.py", "r") as f:
+          with open("setup.py", "r", encoding="utf-8") as f:
               setup_content = f.read()
           
           # Replace version in setup.py
@@ -105,10 +105,10 @@ jobs:
               setup_content
           )
           
-          with open("setup.py", "w") as f:
+          with open("setup.py", "w", encoding="utf-8") as f:
               f.write(setup_content)
           
-          print(f"✓ Updated setup.py version to {version}")
+          print(f"[OK] Updated setup.py version to {version}")
           EOF
         env:
           VERSION: ${{ steps.get_version.outputs.version }}
@@ -249,7 +249,9 @@ jobs:
             echo "Files in source distribution:"
             tar -tzf "$SDIST_FILE" | grep -E "(\.pyx|MANIFEST)" | head -10 || echo "No .pyx or MANIFEST found"
             
-            if tar -tzf "$SDIST_FILE" 2>/dev/null | grep -q "git_service_cython.pyx"; then
+            # The .pyx file will be in the package directory: pygitzen-VERSION/git_service_cython.pyx
+            # Check for the file anywhere in the tarball path
+            if tar -tzf "$SDIST_FILE" 2>/dev/null | grep -q "git_service_cython\.pyx"; then
               echo "✅ Cython source (.pyx) found in source distribution!"
             else
               echo "❌ Cython source (.pyx) NOT found in source distribution!"
@@ -257,6 +259,10 @@ jobs:
               cat MANIFEST.in || echo "MANIFEST.in not found"
               echo "Checking if .pyx file exists..."
               ls -la git_service_cython.pyx || echo ".pyx file not found in repo"
+              echo "Debug: Listing all .pyx files in tarball:"
+              tar -tzf "$SDIST_FILE" 2>/dev/null | grep "\.pyx" || echo "No .pyx files found"
+              echo "Debug: Full tarball listing (first 100 lines):"
+              tar -tzf "$SDIST_FILE" 2>/dev/null | head -100
               exit 1
             fi
           else
