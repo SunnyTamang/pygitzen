@@ -81,10 +81,41 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build Cython
+          pip install build Cython auditwheel
 
       - name: Build sdist and wheel
         run: python -m build
+
+      - name: Repair Linux wheel with auditwheel (if Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "🔧 Repairing Linux wheel for manylinux compatibility..."
+          WHEEL_FILE=$(find dist -name "*linux*.whl" | head -1)
+          if [ -z "$WHEEL_FILE" ]; then
+            echo "ℹ️  No Linux wheel found, skipping repair"
+            exit 0
+          fi
+          
+          echo "📦 Found Linux wheel: $WHEEL_FILE"
+          echo "🔧 Repairing wheel to manylinux standard..."
+          
+          # Repair wheel - auditwheel will automatically convert linux_x86_64 to manylinux tag
+          auditwheel repair "$WHEEL_FILE" -w dist/
+          
+          # Remove the original non-manylinux wheel
+          rm "$WHEEL_FILE"
+          
+          echo "✅ Wheel repaired to manylinux standard"
+          echo "📦 Repaired wheels:"
+          ls -lh dist/*.whl
+          
+          # Verify the new wheel has manylinux tag
+          NEW_WHEEL=$(find dist -name "*manylinux*.whl" | head -1)
+          if [ -n "$NEW_WHEEL" ]; then
+            echo "✅ Verified: New wheel has manylinux tag: $NEW_WHEEL"
+          else
+            echo "⚠️  Warning: Could not find manylinux wheel after repair"
+          fi
 
       - name: Verify package metadata
         run: |
