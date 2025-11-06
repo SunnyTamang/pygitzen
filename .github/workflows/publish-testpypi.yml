@@ -43,29 +43,42 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             if [ -n "${{ github.event.inputs.version }}" ]; then
+              # Remove 'v' prefix if present (user might enter v0.1.3-rc2)
               VERSION="${{ github.event.inputs.version }}"
-              echo "Using manual version: $VERSION"
+              VERSION="${VERSION#v}"  # Remove leading 'v' if present
+              echo "Using manual version: $VERSION (from input: ${{ github.event.inputs.version }})"
+              PUBLISH_FLAG="${{ github.event.inputs.publish }}"
+              echo "Publish flag: $PUBLISH_FLAG"
             else
               echo "No version provided - build-only mode"
               VERSION=""
+              PUBLISH_FLAG="false"
             fi
           elif [ "${{ github.event_name }}" = "release" ]; then
             TAG=${GITHUB_REF#refs/tags/}
             VERSION=${TAG#v}
+            PUBLISH_FLAG="true"
             echo "Using release tag version: $VERSION"
           else
             VERSION=${GITHUB_REF#refs/tags/v}
+            PUBLISH_FLAG="true"
             echo "Using tag version: $VERSION"
           fi
           
           if [ -n "$VERSION" ]; then
             echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "publish=true" >> $GITHUB_OUTPUT
+            # Set publish based on flag (default to true if version provided)
+            if [ "$PUBLISH_FLAG" = "false" ]; then
+              echo "publish=false" >> $GITHUB_OUTPUT
+            else
+              echo "publish=true" >> $GITHUB_OUTPUT
+            fi
           else
             echo "version=" >> $GITHUB_OUTPUT
             echo "publish=false" >> $GITHUB_OUTPUT
           fi
           echo "Final version: ${VERSION:-'build-only'}"
+          echo "Will publish: ${PUBLISH_FLAG:-'true'}"
 
       - name: Update version in pyproject.toml and setup.py
         if: steps.get_version.outputs.version != ''
@@ -292,11 +305,21 @@ jobs:
     name: Publish to TestPyPI
     needs: build-wheels
     if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-      (github.event_name == 'release') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' && github.event.inputs.publish != false)
+      needs.build-wheels.result == 'success' &&
+      (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'release') ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' && github.event.inputs.publish != 'false')
+      )
     runs-on: ubuntu-latest
     steps:
+      - name: Debug publish conditions
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Version input: '${{ github.event.inputs.version }}'"
+          echo "Publish input: '${{ github.event.inputs.publish }}'"
+          echo "Publish input type: $(echo '${{ github.event.inputs.publish }}' | od -c | head -1)"
+          echo "Ref: ${{ github.ref }}"
       - name: Download all wheels
         uses: actions/download-artifact@v4
         with:
