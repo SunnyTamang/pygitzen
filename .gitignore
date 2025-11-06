@@ -155,7 +155,6 @@ test_installation.py
 *.pkl
 *.pickle
 ROADMAP.md
-README_PYPI.md
 REDDIT_POST.md
 CYTHON_PUBLISH.md
 previous_builds/
