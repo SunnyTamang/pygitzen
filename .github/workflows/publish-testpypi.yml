@@ -69,17 +69,19 @@ jobs:
 
       - name: Update version in pyproject.toml and setup.py
         if: steps.get_version.outputs.version != ''
+        shell: bash
         run: |
           pip install tomli tomli-w
           
           VERSION="${{ steps.get_version.outputs.version }}"
           
-          python3 << EOF
+          python3 << 'EOF'
           import tomllib
           import tomli_w
           import re
+          import os
           
-          version = "$VERSION"
+          version = os.environ['VERSION']
           
           # Update pyproject.toml
           with open("pyproject.toml", "rb") as f:
@@ -108,6 +110,8 @@ jobs:
           
           print(f"✓ Updated setup.py version to {version}")
           EOF
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
 
       - name: Install build dependencies
         run: |
@@ -239,10 +243,18 @@ jobs:
           SDIST_FILE=$(find dist -name "*.tar.gz" | head -1)
           if [ -n "$SDIST_FILE" ]; then
             echo "📦 Source distribution: $SDIST_FILE"
-            if tar -tzf "$SDIST_FILE" | grep -q "git_service_cython.pyx"; then
+            # List all files in the tarball to debug
+            echo "Files in source distribution:"
+            tar -tzf "$SDIST_FILE" | grep -E "(\.pyx|MANIFEST)" | head -10 || echo "No .pyx or MANIFEST found"
+            
+            if tar -tzf "$SDIST_FILE" 2>/dev/null | grep -q "git_service_cython.pyx"; then
               echo "✅ Cython source (.pyx) found in source distribution!"
             else
               echo "❌ Cython source (.pyx) NOT found in source distribution!"
+              echo "Checking MANIFEST.in..."
+              cat MANIFEST.in || echo "MANIFEST.in not found"
+              echo "Checking if .pyx file exists..."
+              ls -la git_service_cython.pyx || echo ".pyx file not found in repo"
               exit 1
             fi
           fi
