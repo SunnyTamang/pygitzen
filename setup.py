@@ -48,7 +48,7 @@ setup(
             "initializedcheck": False,
         },
     ) if CYTHON_AVAILABLE else [],
-    version="0.1.3-rc1",
+    version="0.1.3",
     author="Sunny Tamang",
     author_email="sunnysinghtamang@gmail.com",
     description="A Python-native LazyGit-like TUI using Textual and dulwich",

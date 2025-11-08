@@ -1176,14 +1176,14 @@ class PygitzenApp(App):
         self.load_more_commits()
 
 
-def run_textual(repo_dir: str = ".") -> None:
+def run_textual(repo_dir: str = ".", use_cython: bool = True) -> None:
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
     from dulwich.errors import NotGitRepository
     
     try:
-        app = PygitzenApp(repo_dir)
+        app = PygitzenApp(repo_dir, use_cython=use_cython)
         app.run()
     except NotGitRepository:
         console = Console()
