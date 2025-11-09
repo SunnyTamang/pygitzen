@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
-from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable
+from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input
 from textual.reactive import reactive
 from textual import events
 from textual.binding import Binding
@@ -316,6 +316,15 @@ class StashPane(Static):
         self.update(text)
 
 
+class CommitSearchInput(Input):
+    """Search input for filtering commits by message."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.placeholder = "Search commits... (fuzzy search)"
+        self.border_title = "Search"
+
+
 class PatchPane(Static):
     """Patch pane showing commit details and diff."""
     
@@ -502,6 +511,21 @@ class PygitzenApp(App):
     
     #commits-pane:focus {
         border: solid green;
+    }
+    
+    #commit-search-input {
+        height: 3;
+        border: solid white;
+        background: #1e1e1e;
+        min-height: 3;
+    }
+    
+    #commit-search-input:focus {
+        border: solid green;
+    }
+    
+    Input {
+        color: white;
     }
     
     #stash-pane {
@@ -704,12 +728,14 @@ class PygitzenApp(App):
                 self._using_cython = False
             self.branches: list[BranchInfo] = []
             self.commits: list[CommitInfo] = []
+            self.all_commits: list[CommitInfo] = []  # Store all commits for search
             self.repo_path = repo_dir
             self.page_size = 200
             self.total_commits = 0
             self.loaded_commits = 0
             self._loading_commits = False
             self._loading_file_status = False
+            self._search_query: str = ""
         except NotGitRepository:
             # Re-raise to be handled by run_textual()
             raise
@@ -724,6 +750,7 @@ class PygitzenApp(App):
                 self.changes_pane = ChangesPane(id="changes-pane")
                 self.branches_pane = BranchesPane(id="branches-pane")
                 self.commits_pane = CommitsPane(id="commits-pane")
+                self.search_input = CommitSearchInput(id="commit-search-input")
                 self.stash_pane = StashPane(id="stash-pane")
                 
                 yield self.status_pane
@@ -735,6 +762,7 @@ class PygitzenApp(App):
                 
                 yield self.branches_pane
                 yield self.commits_pane
+                yield self.search_input
                 yield self.stash_pane
             
             with Container(id="right-column"):
@@ -948,6 +976,73 @@ class PygitzenApp(App):
         version_info = " (Cython)" if self._using_cython else " (Python)"
         self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info}")
 
+    def _fuzzy_match(self, query: str, text: str) -> float:
+        """Simple fuzzy matching algorithm. Returns a score between 0 and 1."""
+        if not query:
+            return 1.0
+        
+        query = query.lower()
+        text_lower = text.lower()
+        
+        # Exact match gets highest score
+        if query in text_lower:
+            # Score based on position - earlier matches are better
+            pos = text_lower.find(query)
+            position_score = 1.0 - (pos / max(len(text_lower), 1)) * 0.3
+            return position_score
+        
+        # Check if all characters in query appear in order in text
+        query_idx = 0
+        for char in text_lower:
+            if query_idx < len(query) and char == query[query_idx]:
+                query_idx += 1
+        
+        if query_idx == len(query):
+            # All characters found in order, but not contiguous
+            # Score based on how close together they are
+            return 0.5
+        
+        # Check substring matches (partial)
+        max_match = 0
+        for i in range(len(text_lower) - len(query) + 1):
+            match_count = 0
+            for j, q_char in enumerate(query):
+                if i + j < len(text_lower) and text_lower[i + j] == q_char:
+                    match_count += 1
+            max_match = max(max_match, match_count)
+        
+        if max_match > 0:
+            return 0.2 * (max_match / len(query))
+        
+        return 0.0
+    
+    def _filter_commits_by_search(self, commits: list[CommitInfo], query: str) -> list[CommitInfo]:
+        """Filter commits using fuzzy search on commit messages."""
+        if not query or not query.strip():
+            return commits
+        
+        query = query.strip()
+        scored_commits = []
+        
+        for commit in commits:
+            # Search in commit summary (message)
+            score = self._fuzzy_match(query, commit.summary)
+            # Also search in author name
+            author_score = self._fuzzy_match(query, commit.author) * 0.5
+            # Also search in SHA
+            sha_score = self._fuzzy_match(query, commit.sha) * 0.3
+            
+            total_score = max(score, author_score, sha_score)
+            
+            if total_score > 0:
+                scored_commits.append((total_score, commit))
+        
+        # Sort by score (highest first)
+        scored_commits.sort(key=lambda x: x[0], reverse=True)
+        
+        # Return just the commits (without scores)
+        return [commit for _, commit in scored_commits]
+    
     def load_commits_fast(self, branch: str) -> None:
         """Load first page of commits immediately (fast, non-blocking)."""
         # Update Commits pane title to show which branch
@@ -955,7 +1050,15 @@ class PygitzenApp(App):
         
         # Load first page immediately (fast, ~0.02s)
         # Don't block on count_commits - load it in background
-        self.commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        loaded_commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        self.all_commits = loaded_commits.copy()  # Store all commits for search
+        
+        # Apply search filter if there's a search query
+        if self._search_query:
+            self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+        else:
+            self.commits = loaded_commits
+        
         self.loaded_commits = len(self.commits)
         
         # Show placeholder count (will be updated when count loads)
@@ -1123,7 +1226,15 @@ class PygitzenApp(App):
         self.commits_pane.set_branch(branch)
         # Reset paging and load first page
         self.total_commits = self.git.count_commits(branch)
-        self.commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        loaded_commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        self.all_commits = loaded_commits.copy()  # Store all commits for search
+        
+        # Apply search filter if there's a search query
+        if self._search_query:
+            self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+        else:
+            self.commits = loaded_commits
+        
         self.loaded_commits = len(self.commits)
         self.commits_pane.set_commits(self.commits)
         self._update_commits_title()
@@ -1145,11 +1256,15 @@ class PygitzenApp(App):
     def load_more_commits(self) -> None:
         if not self.active_branch:
             return
+        # If searching, don't load more - we're filtering existing commits
+        if self._search_query:
+            return
         if self.loaded_commits >= self.total_commits:
             return
         next_batch = self.git.list_commits(self.active_branch, max_count=self.page_size, skip=self.loaded_commits)
         if not next_batch:
             return
+        self.all_commits.extend(next_batch)
         self.commits.extend(next_batch)
         self.loaded_commits = len(self.commits)
         self.commits_pane.append_commits(next_batch)
@@ -1174,6 +1289,35 @@ class PygitzenApp(App):
 
     def action_load_more(self) -> None:
         self.load_more_commits()
+    
+    def on_input_changed(self, event: events.Input.Changed) -> None:
+        """Handle search input changes - filter commits in real-time."""
+        if event.input == self.search_input:
+            self._search_query = event.value
+            # Filter commits from all_commits
+            if self.all_commits:
+                if self._search_query:
+                    self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+                else:
+                    # No search query, show all commits (but only loaded ones)
+                    self.commits = self.all_commits.copy()
+                
+                # Update the commits pane
+                self.commits_pane.set_commits(self.commits)
+                self._update_commits_title()
+                
+                # Reset selection to first commit
+                if self.commits:
+                    self.commits_pane.index = 0
+                    self.commits_pane.highlighted = 0
+                    self.commits_pane._last_index = None
+                    self.commits_pane._update_highlighting(0)
+                    self.selected_commit_index = 0
+                    self.show_commit_diff(0)
+                else:
+                    # No results, clear selection
+                    self.commits_pane.index = None
+                    self.commits_pane.highlighted = None
 
 
 def run_textual(repo_dir: str = ".", use_cython: bool = True) -> None:
