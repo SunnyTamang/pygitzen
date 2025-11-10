@@ -46,4 +46,10 @@ pygitzen = "pygitzen.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools]
+ext-modules = [
+    {name = "git_service_cython", sources = ["git_service_cython.pyx"]}
+]
+cmdclass = { build_ext = "Cython.Build.build_ext" }
+
 

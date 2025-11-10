@@ -76,15 +76,17 @@ cdef class GitServiceCython:
         remote_commits = set()
         try:
             remote_ref = f"refs/remotes/origin/{branch}".encode()
-            if remote_ref in self.repo.refs:
+            try:
                 remote_head = self.repo.refs[remote_ref]
                 for sha, _ in self._iter_commits_optimized(remote_head, 1000):
                     remote_commits.add(sha.hex())
+            except (KeyError, AttributeError, TypeError):
+                pass
         except Exception:
             pass
         return remote_commits
     
-    def list_commits(self, str branch, int max_count=200, int skip=0):
+    def list_commits(self, str branch, int max_count=200, int skip=0, show_full_history=False):
         """Optimized Cython version of list_commits."""
         ref = f"refs/heads/{branch}".encode()
         head = self.repo.refs[ref]
@@ -92,17 +94,64 @@ cdef class GitServiceCython:
         # Get remote commits to check push status
         remote_commits = self._get_remote_commits(branch)
         
+        # Determine if we should show full history
+        if show_full_history and branch not in ["main", "master"]:
+            # For feature branches with full history, find merge-base and show all commits from there
+            base_branch_names = ["main", "master"]
+            merge_base_sha = None
+            for base_name in base_branch_names:
+                merge_base_sha = self.get_merge_base(branch, base_name)
+                if merge_base_sha:
+                    break
+            
+            commits = []
+            yielded = 0
+            merge_base_bytes = bytes.fromhex(merge_base_sha) if merge_base_sha else None
+            
+            for index, (sha, commit) in enumerate(self._iter_commits_optimized(head, -1)):
+                commit_sha = sha.hex()
+                
+                # Stop at merge-base (don't include merge-base itself, only commits after it)
+                if merge_base_bytes and sha == merge_base_bytes:
+                    break
+                
+                # Apply skip for pagination
+                if yielded < skip:
+                    yielded += 1
+                    continue
+                
+                author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
+                summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
+                is_pushed = commit_sha in remote_commits
+                
+                commits.append(
+                    CommitInfo(
+                        sha=commit_sha,
+                        summary=summary,
+                        author=author,
+                        timestamp=int(commit.commit_time),
+                        pushed=is_pushed,
+                    )
+                )
+                if len(commits) >= max_count:
+                    break
+            return commits
+        
+        # Original behavior: exclude commits that exist in base branch
         # Get commits from base branch (main or master) to exclude shared history
         base_branch_commits = set()
         base_branch_names = ["main", "master"]
         
         for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                for sha, _ in self._iter_commits_optimized(base_head, 1000):
-                    base_branch_commits.add(sha.hex())
-                break
+            if base_name != branch:
+                base_ref = f"refs/heads/{base_name}".encode()
+                try:
+                    base_head = self.repo.refs[base_ref]
+                    for sha, _ in self._iter_commits_optimized(base_head, 1000):
+                        base_branch_commits.add(sha.hex())
+                    break
+                except (KeyError, AttributeError, TypeError):
+                    continue
         
         commits = []
         yielded = 0
@@ -197,12 +246,15 @@ cdef class GitServiceCython:
         base_branch_names = ["main", "master"]
         
         for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                for sha, _ in self._iter_commits_optimized(base_head, -1):
-                    base_branch_commits.add(sha.hex())
-                break
+            if base_name != branch:
+                base_ref = f"refs/heads/{base_name}".encode()
+                try:
+                    base_head = self.repo.refs[base_ref]
+                    for sha, _ in self._iter_commits_optimized(base_head, -1):
+                        base_branch_commits.add(sha.hex())
+                    break
+                except (KeyError, AttributeError, TypeError):
+                    continue
         
         count = 0
         for sha, _ in self._iter_commits_optimized(head, -1):
@@ -232,6 +284,191 @@ cdef class GitServiceCython:
             return branch.name.lower()
         
         result.sort(key=get_branch_name)
+        return result
+    
+    def get_merge_base(self, str branch, str base_branch="main"):
+        """Find the merge-base (common ancestor) between branch and base_branch."""
+        import subprocess
+        import os
+        
+        if base_branch == branch:
+            return None
+        
+        # Check if base branch exists
+        base_ref = f"refs/heads/{base_branch}".encode()
+        try:
+            _ = self.repo.refs[base_ref]
+        except (KeyError, AttributeError, TypeError):
+            # Try master if main doesn't exist
+            if base_branch == "main":
+                base_branch = "master"
+                base_ref = f"refs/heads/{base_branch}".encode()
+                try:
+                    _ = self.repo.refs[base_ref]
+                except (KeyError, AttributeError, TypeError):
+                    return None
+            else:
+                return None
+        
+        # Check if branch exists
+        branch_ref = f"refs/heads/{branch}".encode()
+        try:
+            _ = self.repo.refs[branch_ref]
+        except (KeyError, AttributeError, TypeError):
+            return None
+        
+        try:
+            original_cwd = os.getcwd()
+            os.chdir(str(self.repo_path))
+            try:
+                # Use git merge-base command for reliable results
+                result = subprocess.run(
+                    ['git', 'merge-base', base_branch, branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    merge_base_sha = result.stdout.strip()
+                    return merge_base_sha
+            finally:
+                os.chdir(original_cwd)
+        except Exception:
+            # Fallback: find common ancestor manually using dulwich
+            try:
+                base_head = self.repo.refs[base_ref]
+                branch_head = self.repo.refs[branch_ref]
+                
+                # Get all ancestors of base branch
+                base_ancestors = set()
+                for sha, _ in self._iter_commits_optimized(base_head, 1000):
+                    base_ancestors.add(sha)
+                
+                # Walk branch history to find first common ancestor
+                for sha, _ in self._iter_commits_optimized(branch_head, 1000):
+                    if sha in base_ancestors:
+                        return sha.hex()
+            except Exception:
+                pass
+        
+        return None
+    
+    def get_commit_refs(self, str commit_sha):
+        """Get branch references and metadata for a commit."""
+        result = {
+            "branches": [],  # Local branches pointing to this commit
+            "remote_branches": [],  # Remote branches pointing to this commit
+            "tags": [],  # Tags pointing to this commit
+            "is_head": False,  # Whether this is HEAD
+            "is_merge": False,  # Whether this is a merge commit
+            "merge_parents": [],  # Parent commits if merge
+        }
+        
+        commit_bytes = bytes.fromhex(commit_sha)
+        
+        # Check local branches - use keys() iteration instead of as_dict()
+        # as_dict() causes segfault in Cython, so we iterate keys directly
+        try:
+            refs_prefix = b"refs/heads/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            branch_name = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["branches"].append(branch_name)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check remote branches
+        try:
+            refs_prefix = b"refs/remotes/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            remote_branch = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["remote_branches"].append(remote_branch)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check tags
+        try:
+            refs_prefix = b"refs/tags/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            tag_name = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["tags"].append(tag_name)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check if merge commit
+        try:
+            commit = self.repo[commit_bytes]
+            if len(commit.parents) > 1:
+                result["is_merge"] = True
+                result["merge_parents"] = [p.hex() for p in commit.parents]
+        except Exception:
+            pass
+        
+        return result
+    
+    def get_branch_info(self, str branch):
+        """Get information about a branch."""
+        result = {
+            "name": branch,
+            "head_sha": None,
+            "remote_tracking": None,  # e.g., "origin/main"
+            "upstream": None,  # Upstream branch name
+            "is_current": False,  # Whether this is the current branch
+        }
+        
+        try:
+            branch_ref = f"refs/heads/{branch}".encode()
+            try:
+                result["head_sha"] = self.repo.refs[branch_ref].hex()
+            except (KeyError, AttributeError, TypeError):
+                pass
+        except Exception:
+            pass
+        
+        # Check if current branch
+        try:
+            from dulwich import refs as dulwich_refs
+            # Use dulwich's follow to resolve symbolic refs safely
+            try:
+                head_ref = dulwich_refs.follow(self.repo, b"HEAD")
+                if head_ref and isinstance(head_ref, bytes) and head_ref.startswith(b"refs/heads/"):
+                    current_branch = head_ref.decode().split("/heads/")[-1]
+                    result["is_current"] = (current_branch == branch)
+            except (KeyError, AttributeError, TypeError, ValueError):
+                pass
+        except Exception:
+            pass
+        
+        # Check remote tracking
+        try:
+            remote_ref = f"refs/remotes/origin/{branch}".encode()
+            try:
+                # Try to access the ref - if it exists, we'll get it, otherwise KeyError
+                _ = self.repo.refs[remote_ref]
+                result["remote_tracking"] = f"origin/{branch}"
+                result["upstream"] = branch
+            except (KeyError, AttributeError, TypeError):
+                pass
+        except Exception:
+            pass
+        
         return result
     
     def get_commit_diff(self, str sha_hex):
@@ -503,9 +740,17 @@ cdef class GitServiceCython:
         
         # Get HEAD commit and tree
         try:
-            head_ref = self.repo.refs[b"HEAD"]
-            head_commit = self.repo[head_ref]
-            head_tree = self.repo[head_commit.tree]
+            from dulwich import refs as dulwich_refs
+            # Use dulwich's read_ref which safely handles symbolic refs
+            try:
+                head_sha = dulwich_refs.read_ref(self.repo, b"HEAD")
+                if head_sha and len(head_sha) == 20:
+                    head_commit = self.repo[head_sha]
+                    head_tree = self.repo[head_commit.tree]
+                else:
+                    head_tree = None
+            except (KeyError, AttributeError, TypeError, ValueError):
+                head_tree = None
         except Exception:
             head_tree = None
         

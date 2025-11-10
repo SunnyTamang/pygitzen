@@ -160,15 +160,119 @@ class GitService:
             # Remote not available or not configured
             pass
         return remote_commits
+    
+    def get_merge_base(self, branch: str, base_branch: str = "main") -> str | None:
+        """Find the merge-base (common ancestor) between branch and base_branch."""
+        import subprocess
+        import os
+        
+        if base_branch == branch:
+            return None
+        
+        # Check if base branch exists
+        base_ref = f"refs/heads/{base_branch}".encode()
+        if base_ref not in self.repo.refs:
+            # Try master if main doesn't exist
+            if base_branch == "main":
+                base_branch = "master"
+                base_ref = f"refs/heads/{base_branch}".encode()
+                if base_ref not in self.repo.refs:
+                    return None
+            else:
+                return None
+        
+        # Check if branch exists
+        branch_ref = f"refs/heads/{branch}".encode()
+        if branch_ref not in self.repo.refs:
+            return None
+        
+        try:
+            original_cwd = os.getcwd()
+            os.chdir(str(self.repo_path))
+            try:
+                # Use git merge-base command for reliable results
+                result = subprocess.run(
+                    ['git', 'merge-base', base_branch, branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    merge_base_sha = result.stdout.strip()
+                    return merge_base_sha
+            finally:
+                os.chdir(original_cwd)
+        except Exception:
+            # Fallback: find common ancestor manually using dulwich
+            try:
+                base_head = self.repo.refs[base_ref]
+                branch_head = self.repo.refs[branch_ref]
+                
+                # Get all ancestors of base branch
+                base_ancestors = set()
+                for sha, _ in self._iter_commits(base_head, max_count=1000):
+                    base_ancestors.add(sha)
+                
+                # Walk branch history to find first common ancestor
+                for sha, _ in self._iter_commits(branch_head, max_count=1000):
+                    if sha in base_ancestors:
+                        return sha.hex()
+            except Exception:
+                pass
+        
+        return None
 
-    def list_commits(self, branch: str, max_count: int = 200, skip: int = 0) -> List[CommitInfo]:
+    def list_commits(self, branch: str, max_count: int = 200, skip: int = 0, show_full_history: bool = False) -> List[CommitInfo]:
         ref = f"refs/heads/{branch}".encode()
         head = self.repo.refs[ref]
         
         # Get remote commits to check push status
         remote_commits = self._get_remote_commits(branch)
         
-        # Get commits from base branch (main or master) to exclude shared history
+        # Determine if we should show full history
+        if show_full_history and branch not in ["main", "master"]:
+            # For feature branches with full history, find merge-base and show all commits from there
+            base_branch_names = ["main", "master"]
+            merge_base_sha = None
+            for base_name in base_branch_names:
+                merge_base_sha = self.get_merge_base(branch, base_name)
+                if merge_base_sha:
+                    break
+            
+            commits: List[CommitInfo] = []
+            yielded = 0
+            merge_base_bytes = bytes.fromhex(merge_base_sha) if merge_base_sha else None
+            
+            for index, (sha, commit) in enumerate(self._iter_commits(head, max_count=None)):
+                commit_sha = sha.hex()
+                
+                # Stop at merge-base (don't include merge-base itself, only commits after it)
+                if merge_base_bytes and sha == merge_base_bytes:
+                    break
+                
+                # Apply skip for pagination
+                if yielded < skip:
+                    yielded += 1
+                    continue
+
+                author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
+                summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
+                # Check if commit exists on remote
+                is_pushed = commit_sha in remote_commits
+                commits.append(
+                    CommitInfo(
+                        sha=commit_sha,
+                        summary=summary,
+                        author=author,
+                        timestamp=int(commit.commit_time),
+                        pushed=is_pushed,
+                    )
+                )
+                if len(commits) >= max_count:
+                    break
+            return commits
+        
+        # Original behavior: exclude commits that exist in base branch
         base_branch_commits = set()
         base_branch_names = ["main", "master"]
         for base_name in base_branch_names:
@@ -258,6 +362,105 @@ class GitService:
         diff_text = buf.getvalue().decode(errors="replace")
         
         return diff_text
+    
+    def get_commit_refs(self, commit_sha: str) -> dict:
+        """Get branch references and metadata for a commit."""
+        result = {
+            "branches": [],  # Local branches pointing to this commit
+            "remote_branches": [],  # Remote branches pointing to this commit
+            "tags": [],  # Tags pointing to this commit
+            "is_head": False,  # Whether this is HEAD
+            "is_merge": False,  # Whether this is a merge commit
+            "merge_parents": [],  # Parent commits if merge
+        }
+        
+        commit_bytes = bytes.fromhex(commit_sha)
+        
+        # Check if this is HEAD
+        try:
+            # Safely resolve HEAD - handle both symbolic and direct refs
+            head_ref = self.repo.refs.get(b"HEAD")
+            if head_ref:
+                # If it's a symbolic ref (starts with refs/), resolve it
+                if isinstance(head_ref, bytes) and len(head_ref) > 10 and head_ref.startswith(b"refs/heads/"):
+                    head_sha = self.repo.refs.get(head_ref)
+                    if head_sha and head_sha == commit_bytes:
+                        result["is_head"] = True
+                elif isinstance(head_ref, bytes) and len(head_ref) == 20:
+                    # Direct SHA (20 bytes)
+                    if head_ref == commit_bytes:
+                        result["is_head"] = True
+        except Exception:
+            pass
+        
+        # Check local branches
+        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/heads").items():
+            if ref_sha == commit_bytes:
+                branch_name = ref_name.decode().split("/heads/")[-1]
+                result["branches"].append(branch_name)
+        
+        # Check remote branches
+        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/remotes").items():
+            if ref_sha == commit_bytes:
+                # Extract remote/branch name (e.g., "origin/main" -> "origin/main")
+                remote_branch = ref_name.decode().replace("refs/remotes/", "")
+                result["remote_branches"].append(remote_branch)
+        
+        # Check tags
+        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/tags").items():
+            if ref_sha == commit_bytes:
+                tag_name = ref_name.decode().split("/tags/")[-1]
+                result["tags"].append(tag_name)
+        
+        # Check if merge commit
+        try:
+            commit = self.repo[commit_bytes]
+            if len(commit.parents) > 1:
+                result["is_merge"] = True
+                result["merge_parents"] = [p.hex() for p in commit.parents]
+        except Exception:
+            pass
+        
+        return result
+    
+    def get_branch_info(self, branch: str) -> dict:
+        """Get information about a branch."""
+        result = {
+            "name": branch,
+            "head_sha": None,
+            "remote_tracking": None,  # e.g., "origin/main"
+            "upstream": None,  # Upstream branch name
+            "is_current": False,  # Whether this is the current branch
+        }
+        
+        try:
+            branch_ref = f"refs/heads/{branch}".encode()
+            if branch_ref in self.repo.refs:
+                result["head_sha"] = self.repo.refs[branch_ref].hex()
+        except Exception:
+            pass
+        
+        # Check if current branch
+        try:
+            head_ref = self.repo.refs[b"HEAD"]
+            # HEAD can be either a symbolic ref (b"refs/heads/main") or a SHA (40 bytes)
+            # Check if it's a symbolic ref by checking length and prefix
+            if isinstance(head_ref, bytes) and len(head_ref) > 10 and head_ref.startswith(b"refs/heads/"):
+                current_branch = head_ref.decode().split("/heads/")[-1]
+                result["is_current"] = (current_branch == branch)
+        except Exception:
+            pass
+        
+        # Check remote tracking
+        try:
+            remote_ref = f"refs/remotes/origin/{branch}".encode()
+            if remote_ref in self.repo.refs:
+                result["remote_tracking"] = f"origin/{branch}"
+                result["upstream"] = branch
+        except Exception:
+            pass
+        
+        return result
 
     def _find_in_tree(self, tree, path_parts: List[str]) -> Optional[bytes]:
         """Recursively find file in tree and return its SHA."""
@@ -301,9 +504,25 @@ class GitService:
         
         # Get HEAD tree
         try:
-            head_ref = self.repo.refs[b"HEAD"]
-            head_commit = self.repo[head_ref]
-            head_tree = self.repo[head_commit.tree]
+            # Safely resolve HEAD - handle both symbolic and direct refs
+            head_ref = self.repo.refs.get(b"HEAD")
+            if head_ref:
+                # If it's a symbolic ref (starts with refs/), resolve it
+                if isinstance(head_ref, bytes) and len(head_ref) > 10 and head_ref.startswith(b"refs/heads/"):
+                    head_sha = self.repo.refs.get(head_ref)
+                elif isinstance(head_ref, bytes) and len(head_ref) == 20:
+                    # Direct SHA (20 bytes)
+                    head_sha = head_ref
+                else:
+                    head_sha = None
+                
+                if head_sha:
+                    head_commit = self.repo[head_sha]
+                    head_tree = self.repo[head_commit.tree]
+                else:
+                    head_tree = None
+            else:
+                head_tree = None
         except Exception:
             head_tree = None
         

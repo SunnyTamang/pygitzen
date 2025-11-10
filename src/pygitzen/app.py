@@ -325,6 +325,145 @@ class CommitSearchInput(Input):
         self.border_title = "Search"
 
 
+class LogPane(Static):
+    """Log pane showing commit graph/log for a branch."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.border_title = "Log"
+    
+    def show_branch_log(self, branch: str, commits: list[CommitInfo], branch_info: dict, git_service) -> None:
+        """Display commit log/graph for a branch."""
+        from rich.text import Text
+        from rich.console import Group
+        from datetime import datetime
+        from time import timezone
+        
+        if not commits:
+            empty_text = Text()
+            empty_text.append(f"No commits found for branch '{branch}'", style="dim white")
+            self.update(empty_text)
+            return
+        
+        # Build log content
+        log_lines = []
+        
+        # Branch header with info
+        header = Text()
+        header.append(f"Branch: ", style="dim white")
+        header.append(f"{branch}", style="cyan bold")
+        
+        if branch_info.get("remote_tracking"):
+            header.append(f" → ", style="dim white")
+            header.append(f"{branch_info['remote_tracking']}", style="yellow")
+        
+        if branch_info.get("is_current"):
+            header.append(f" (HEAD)", style="green bold")
+        
+        log_lines.append(header)
+        log_lines.append(Text())  # Empty line
+        
+        # Display commits with graph-like structure
+        for i, commit in enumerate(commits):
+            commit_line = Text()
+            
+            # Graph indicator (simple vertical line)
+            if i < len(commits) - 1:
+                commit_line.append("│ ", style="dim white")
+            else:
+                commit_line.append("  ", style="dim white")
+            
+            # Commit SHA (short)
+            short_sha = commit.sha[:8]
+            commit_line.append(short_sha, style="yellow")
+            commit_line.append(" ", style="white")
+            
+            # Get commit refs to show branch info
+            try:
+                # Add defensive check - catch any errors from Cython extension
+                try:
+                    commit_refs = git_service.get_commit_refs(commit.sha)
+                except Exception as e:
+                    # If get_commit_refs fails (e.g., segfault in Cython), use empty dict
+                    import sys
+                    import traceback
+                    error_msg = f"Error in get_commit_refs for commit {commit.sha[:8]}: {type(e).__name__}: {e}\n"
+                    error_msg += f"Traceback:\n{traceback.format_exc()}\n"
+                    # Log to both stderr and file
+                    print(error_msg, file=sys.stderr)
+                    try:
+                        with open("debug_commit_refs.log", "a", encoding="utf-8") as f:
+                            f.write(error_msg)
+                    except Exception:
+                        pass
+                    commit_refs = {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []}
+                
+                # Show branch references
+                refs_parts = []
+                if commit_refs.get("is_head"):
+                    refs_parts.append(("HEAD", "green bold"))
+                
+                # Add local branches (excluding current branch if it's the only one)
+                local_branches = [b for b in commit_refs.get("branches", []) if b != branch]
+                if local_branches:
+                    refs_parts.append((f"{', '.join(local_branches)}", "cyan"))
+                
+                # Add remote branches
+                remote_branches = commit_refs.get("remote_branches", [])
+                if remote_branches:
+                    # Filter to show only origin/branch_name format
+                    origin_branches = [rb for rb in remote_branches if rb.startswith("origin/")]
+                    if origin_branches:
+                        refs_parts.append((f"{', '.join(origin_branches)}", "yellow"))
+                
+                # Add tags
+                tags = commit_refs.get("tags", [])
+                if tags:
+                    refs_parts.append((f"tag: {', '.join(tags)}", "magenta"))
+                
+                # Merge indicator
+                if commit_refs.get("is_merge"):
+                    merge_parents = commit_refs.get("merge_parents", [])
+                    if merge_parents:
+                        short_parents = [p[:8] for p in merge_parents]
+                        refs_parts.append((f"Merge: {', '.join(short_parents)}", "blue"))
+                
+                # Format references
+                if refs_parts:
+                    commit_line.append("(", style="dim white")
+                    for idx, (ref_text, style) in enumerate(refs_parts):
+                        if idx > 0:
+                            commit_line.append(", ", style="dim white")
+                        commit_line.append(ref_text, style=style)
+                    commit_line.append(") ", style="dim white")
+            except Exception:
+                pass
+            
+            # Commit message
+            commit_line.append(commit.summary, style="white")
+            
+            # Author and date
+            commit_datetime = datetime.fromtimestamp(commit.timestamp)
+            offset_seconds = -timezone if timezone else 0
+            offset_hours = offset_seconds // 3600
+            offset_sign = '+' if offset_hours >= 0 else '-'
+            offset_abs = abs(offset_hours)
+            offset_str = f"{offset_sign}{offset_abs:02d}00"
+            commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
+            
+            commit_line.append("\n", style="white")
+            commit_line.append("│ " if i < len(commits) - 1 else "  ", style="dim white")
+            commit_line.append(f"Author: {commit.author}", style="dim white")
+            commit_line.append(f" | Date: {commit_date}", style="dim white")
+            
+            log_lines.append(commit_line)
+            log_lines.append(Text())  # Empty line between commits
+        
+        # Combine all lines
+        full_content = Group(*log_lines)
+        self.update(full_content)
+
+
 class PatchPane(Static):
     """Patch pane showing commit details and diff."""
     
@@ -555,6 +694,11 @@ class PygitzenApp(App):
         min-height: 100%;
     }
     
+    #log-pane {
+        background: #1e1e1e;
+        min-height: 100%;
+    }
+    
     #command-log-pane {
         height: 6;
         border: solid white;
@@ -719,9 +863,28 @@ class PygitzenApp(App):
             # self.git = GitService(repo_dir)
             # Use Cython version if available and requested, otherwise use Python version
             if use_cython and CYTHON_AVAILABLE:
-                self.git = GitServiceCython(repo_dir)
-                self.git_python = self.git  # Use Cython for file operations too (now optimized!)
-                self._using_cython = True
+                try:
+                    self.git = GitServiceCython(repo_dir)
+                    self.git_python = self.git  # Use Cython for file operations too (now optimized!)
+                    self._using_cython = True
+                    # Log successful Cython initialization
+                    import sys
+                    print(f"[DEBUG] Cython extension initialized successfully", file=sys.stderr)
+                except Exception as e:
+                    # If Cython initialization fails, fall back to Python
+                    import sys
+                    import traceback
+                    error_msg = f"Error initializing Cython extension, falling back to Python: {type(e).__name__}: {e}\n"
+                    error_msg += f"Traceback:\n{traceback.format_exc()}\n"
+                    print(error_msg, file=sys.stderr)
+                    try:
+                        with open("debug_cython_init.log", "a", encoding="utf-8") as f:
+                            f.write(error_msg)
+                    except Exception:
+                        pass
+                    self.git = GitService(repo_dir)
+                    self.git_python = self.git
+                    self._using_cython = False
             else:
                 self.git = GitService(repo_dir)
                 self.git_python = self.git  # Same instance
@@ -736,6 +899,7 @@ class PygitzenApp(App):
             self._loading_commits = False
             self._loading_file_status = False
             self._search_query: str = ""
+            self._view_mode: str = "patch"  # "patch" or "log"
         except NotGitRepository:
             # Re-raise to be handled by run_textual()
             raise
@@ -768,7 +932,9 @@ class PygitzenApp(App):
             with Container(id="right-column"):
                 with ScrollableContainer(id="patch-scroll-container"):
                     self.patch_pane = PatchPane(id="patch-pane")
+                    self.log_pane = LogPane(id="log-pane")
                     yield self.patch_pane
+                    yield self.log_pane
                 self.command_log_pane = CommandLogPane(id="command-log-pane")
                 yield self.command_log_pane
         
@@ -777,6 +943,11 @@ class PygitzenApp(App):
     def on_mount(self) -> None:
         # Set parent app reference for commits pane
         self.commits_pane._parent_app = self
+        # Initialize view mode - will be set by refresh_data_fast
+        self._view_mode = "log"  # Default to log view (branch view)
+        # Show startup message with version info
+        version_info = " (Cython)" if self._using_cython else " (Python)"
+        self.command_log_pane.update_log(f"pygitzen started{version_info}")
         # self.refresh_data()
         self.refresh_data_fast()
 
@@ -805,9 +976,12 @@ class PygitzenApp(App):
                 # Auto-update commits for the new branch
                 if current_index + 1 < len(self.branches):
                     self.active_branch = self.branches[current_index + 1].name
-                    # self.load_commits(self.active_branch)
-                    # self.update_status_info()
-                    self.load_commits_fast(self.active_branch)
+                    # Switch to log view when branch is selected
+                    self._view_mode = "log"
+                    self.patch_pane.styles.display = "none"
+                    self.log_pane.styles.display = "block"
+                    # Load commits with full history for feature branches
+                    self.load_commits_for_log(self.active_branch)
                     # Update status pane immediately
                     if self.active_branch:
                         self.status_pane.update_status(self.active_branch, self.repo_path)
@@ -833,9 +1007,12 @@ class PygitzenApp(App):
                 # Auto-update commits for the new branch
                 if current_index - 1 >= 0:
                     self.active_branch = self.branches[current_index - 1].name
-                    # self.load_commits(self.active_branch)
-                    # self.update_status_info()
-                    self.load_commits_fast(self.active_branch)
+                    # Switch to log view when branch is selected
+                    self._view_mode = "log"
+                    self.patch_pane.styles.display = "none"
+                    self.log_pane.styles.display = "block"
+                    # Load commits with full history for feature branches
+                    self.load_commits_for_log(self.active_branch)
                     # Update status pane immediately
                     if self.active_branch:
                         self.status_pane.update_status(self.active_branch, self.repo_path)
@@ -886,7 +1063,11 @@ class PygitzenApp(App):
 
             # Load first page of commits immediately (fast, ~0.02s)
             # Don't block on count_commits - load it in background
-            self.load_commits_fast(self.active_branch)
+            # On initial load, show log view for the selected branch
+            self._view_mode = "log"
+            self.patch_pane.styles.display = "none"
+            self.log_pane.styles.display = "block"
+            self.load_commits_for_log(self.active_branch)
             
             # Update status pane immediately (fast)
             if self.active_branch:
@@ -1043,6 +1224,66 @@ class PygitzenApp(App):
         # Return just the commits (without scores)
         return [commit for _, commit in scored_commits]
     
+    def load_commits_for_log(self, branch: str) -> None:
+        """Load commits for log view with full history."""
+        # Update Commits pane title to show which branch
+        self.commits_pane.set_branch(branch)
+        
+        # Load commits with full history for feature branches
+        show_full = branch not in ["main", "master"]
+        loaded_commits = self.git.list_commits(branch, max_count=self.page_size, skip=0, show_full_history=show_full)
+        self.all_commits = loaded_commits.copy()  # Store all commits for search
+        
+        # Apply search filter if there's a search query
+        if self._search_query:
+            self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+        else:
+            self.commits = loaded_commits
+        
+        self.loaded_commits = len(self.commits)
+        
+        # Update commits pane
+        self.commits_pane.set_commits(self.commits)
+        
+        # Get branch info and show log
+        try:
+            branch_info = self.git.get_branch_info(branch)
+        except Exception as e:
+            # Log error if get_branch_info fails
+            import sys
+            import traceback
+            error_msg = f"Error in get_branch_info for branch {branch}: {type(e).__name__}: {e}\n"
+            error_msg += f"Traceback:\n{traceback.format_exc()}\n"
+            print(error_msg, file=sys.stderr)
+            try:
+                with open("debug_branch_info.log", "a", encoding="utf-8") as f:
+                    f.write(error_msg)
+            except Exception:
+                pass
+            # Use empty branch info as fallback
+            branch_info = {"name": branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
+        
+        try:
+            self.log_pane.show_branch_log(branch, self.commits, branch_info, self.git)
+        except Exception as e:
+            # Log error if show_branch_log fails
+            import sys
+            import traceback
+            error_msg = f"Error in show_branch_log for branch {branch}: {type(e).__name__}: {e}\n"
+            error_msg += f"Traceback:\n{traceback.format_exc()}\n"
+            print(error_msg, file=sys.stderr)
+            try:
+                with open("debug_show_log.log", "a", encoding="utf-8") as f:
+                    f.write(error_msg)
+            except Exception:
+                pass
+        
+        # Don't auto-select first commit when in log view
+        # Clear selection
+        self.commits_pane.index = None
+        self.commits_pane.highlighted = None
+        self.selected_commit_index = -1
+    
     def load_commits_fast(self, branch: str) -> None:
         """Load first page of commits immediately (fast, non-blocking)."""
         # Update Commits pane title to show which branch
@@ -1076,7 +1317,9 @@ class PygitzenApp(App):
             # Apply highlighting to first item
             self.commits_pane._update_highlighting(0)
             
-            self.show_commit_diff(0)
+            # Only show patch if in patch mode
+            if self._view_mode == "patch":
+                self.show_commit_diff(0)
     
     def load_commits_count_background(self, branch: str) -> None:
         """Load commit count in background (non-blocking)."""
@@ -1247,7 +1490,9 @@ class PygitzenApp(App):
             self.commits_pane.highlighted = 0
             # Apply highlighting to first item
             self.commits_pane._update_highlighting(0)
-            self.show_commit_diff(0)
+            # Only show patch if in patch mode
+            if self._view_mode == "patch":
+                self.show_commit_diff(0)
 
     def _update_commits_title(self) -> None:
         if self.active_branch:
@@ -1281,9 +1526,18 @@ class PygitzenApp(App):
             index = event.index
             if 0 <= index < len(self.branches):
                 self.active_branch = self.branches[index].name
-                self.load_commits(self.active_branch)
+                # Switch to log view when branch is selected
+                self._view_mode = "log"
+                self.patch_pane.styles.display = "none"
+                self.log_pane.styles.display = "block"
+                # Load commits with full history for feature branches
+                self.load_commits_for_log(self.active_branch)
                 self.update_status_info()
         elif event.list_view is self.commits_pane:
+            # Switch to patch view when commit is selected
+            self._view_mode = "patch"
+            self.log_pane.styles.display = "none"
+            self.patch_pane.styles.display = "block"
             self.selected_commit_index = event.index
             self.show_commit_diff(event.index)
 
