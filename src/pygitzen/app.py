@@ -2100,7 +2100,7 @@ class PygitzenApp(App):
     
     def _check_commits_pane_scroll(self) -> None:
         """Periodically check if we need to load more commits in commits pane (fallback if scroll events don't fire)."""
-        if not self.active_branch or self._search_query:
+        if self._search_query:
             return  # Don't auto-load if searching (filtering existing commits)
         
         try:
@@ -2430,6 +2430,12 @@ class PygitzenApp(App):
                 self.branches_pane.index = 0
                 self.branches_pane.highlighted = 0
 
+            # Load commits for commits pane (left side) - shows all commits from all branches
+            commits_load_start = time.perf_counter()
+            self.load_commits(self.active_branch)
+            commits_load_elapsed = time.perf_counter() - commits_load_start
+            _log_timing_message(f"load_commits: {commits_load_elapsed:.4f}s")
+            
             # Load first page of commits immediately (fast, ~0.02s)
             # Don't block on count_commits - load it in background
             # On initial load, show log view for the selected branch
@@ -2605,9 +2611,8 @@ class PygitzenApp(App):
         log_start = time.perf_counter()
         _log_timing_message(f"--- load_commits_for_log START (branch: {branch}, reset: {reset}) ---")
         
-        # Update Commits pane title to show which branch (only on reset, preserve title when loading more)
-        if reset:
-            self.commits_pane.set_branch(branch)
+        # NOTE: We don't update the commits pane title here because it should always show "All Branches"
+        # The commits pane is managed by load_commits() which shows all commits from all branches
         
         # Reset pagination if this is a new branch or reset requested
         if reset or self.active_branch != branch:
@@ -2615,33 +2620,9 @@ class PygitzenApp(App):
             self.log_pane._total_commits_count = 0
             self.log_pane._cached_commits = []  # Clear old cached commits
         
-        # Load commits for commits pane (left side) - still needed for that pane
-        # But for log pane (right side), we use native git log directly (much faster)
-        list_start = time.perf_counter()
-        skip = 0
-        max_count = self.log_initial_size if reset else self.page_size
-        
-        # Load commits for commits pane only (left side)
-        if hasattr(self.git, 'list_commits_native'):
-            try:
-                loaded_commits = self.git.list_commits_native(branch, max_count=max_count, skip=skip, show_full_history=False, timeout=10)
-            except Exception as e:
-                loaded_commits = self.git.list_commits(branch, max_count=max_count, skip=skip, show_full_history=False)
-        else:
-            loaded_commits = self.git.list_commits(branch, max_count=max_count, skip=skip, show_full_history=False)
-        list_elapsed = time.perf_counter() - list_start
-        _log_timing_message(f"  list_commits for commits pane: {list_elapsed:.4f}s ({len(loaded_commits)} commits)")
-        
-        # Update commits pane (left side)
-        if reset:
-            self.all_commits = loaded_commits.copy()
-            if self._search_query:
-                self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
-            else:
-                self.commits = loaded_commits.copy()
-            self.loaded_commits = len(self.commits)
-            self.commits_pane.set_commits(self.commits)
-            self._update_commits_title()
+        # NOTE: We no longer update the commits pane here because it should show ALL commits from all branches
+        # The commits pane is managed separately by load_commits() which uses git log --all
+        # This method only handles the log pane (right side) which shows branch-specific git log --graph
         
         # Show native git log in log pane (right side) - much faster, no dulwich needed
         basic_branch_info = {"name": branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
@@ -2882,6 +2863,8 @@ class PygitzenApp(App):
             # Skip if we're using native git log (it handles its own updates)
             if self.log_pane._native_git_log_lines:
                 return
+            
+            # Update count for the current branch (matching lazygit behavior)
             
             # Only update if we're still viewing this branch
             if self.active_branch == branch and count > 0:
@@ -3313,12 +3296,258 @@ class PygitzenApp(App):
             pass  # Silently fail if branch changed
 
     def load_commits(self, branch: str) -> None:
-         # Update Commits pane title to show which branch
-        self.commits_pane.set_branch(branch)
-        # Reset paging and load first page
-        self.total_commits = self.git.count_commits(branch)
-        loaded_commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+        """Load all commits from all branches (not branch-specific)."""
+        import subprocess
+        from datetime import datetime
+        
+        # Debug: log that function was called
+        _log_timing_message(f"[DEBUG] load_commits CALLED with branch={branch}")
+        print(f"[DEBUG] load_commits CALLED with branch={branch}")
+        
+        # Update Commits pane title to show current branch (matching lazygit)
+        self.commits_pane.border_title = f"Commits ({branch})" if branch else "Commits (HEAD)"
+        
+        # Get commits for the current branch (matching lazygit behavior)
+        # LazyGit shows commits for the current branch by default, not all branches
+        commits: list[CommitInfo] = []
+        repo_path = None
+        try:
+            # Build git log command for the current branch (matching lazygit)
+            # Format matches lazygit's format: +%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s
+            # Fields: + prefix, SHA, timestamp, author name, author email, parents, merge status, refs, subject
+            # Use branch name or HEAD if branch is not available
+            ref_spec = branch if branch else "HEAD"
+            cmd = [
+                "git", "log",
+                ref_spec,  # Current branch (matching lazygit - shows branch-specific commits)
+                "--oneline",  # Match lazygit
+                f"--max-count={self.page_size}",  # Keep our limit of 200
+                "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
+                "--abbrev=40",  # Match lazygit (40-char abbreviated SHA)
+                "--no-show-signature",  # Match lazygit
+            ]
+            
+            # Get repo_path - try multiple methods
+            repo_path = getattr(self, 'repo_path', None)
+            if not repo_path:
+                try:
+                    repo_path = getattr(self.git, 'repo_path', None)
+                except:
+                    pass
+            if not repo_path:
+                try:
+                    if hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
+                        repo_path = self.git.repo.path
+                except:
+                    pass
+            if not repo_path:
+                repo_path = "."
+            
+            # Convert to string if it's a Path object
+            repo_path_str = str(repo_path) if repo_path else "."
+            
+            # Debug: log repo_path and command
+            _log_timing_message(f"[DEBUG] load_commits: repo_path={repo_path_str}, cmd={cmd}")
+            print(f"[DEBUG] load_commits: repo_path={repo_path_str}")
+            
+            # Run git log with timeout
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=repo_path_str
+            )
+            
+            # Debug: log result
+            _log_timing_message(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
+            print(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
+            if result.returncode != 0:
+                print(f"[DEBUG] load_commits: git log stderr={result.stderr}")
+            
+            if result.returncode == 0:
+                # Parse output and deduplicate by SHA (git log --all shouldn't have duplicates, but be safe)
+                # Format: +%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s
+                # Fields: + prefix, SHA, timestamp, author name, author email, parents, merge status, refs, subject
+                seen_shas = set()
+                output_lines = result.stdout.strip().split("\n")
+                for line in output_lines:
+                    if not line:
+                        continue
+                    
+                    # Skip the '+' prefix (lazygit format)
+                    if line.startswith('+'):
+                        line = line[1:]
+                    
+                    parts = line.split("\x00")
+                    # LazyGit format has 8 fields: SHA, timestamp, author name, author email, parents, merge, refs, subject
+                    if len(parts) >= 8:
+                        sha = parts[0].strip()
+                        
+                        # Skip if we've already seen this commit SHA (deduplicate)
+                        if sha in seen_shas:
+                            continue
+                        seen_shas.add(sha)
+                        
+                        timestamp_str = parts[1].strip()
+                        author_name = parts[2].strip()
+                        author_email = parts[3].strip()
+                        # parts[4] = parents (not used)
+                        # parts[5] = merge status (not used)
+                        # parts[6] = refs (not used)
+                        summary = parts[7].strip()
+                        
+                        # Combine author name and email
+                        author = f"{author_name} <{author_email}>" if author_email else author_name
+                        
+                        # Parse timestamp
+                        try:
+                            timestamp = int(timestamp_str)
+                        except ValueError:
+                            timestamp = 0
+                        
+                        commits.append(
+                            CommitInfo(
+                                sha=sha,
+                                summary=summary,
+                                author=author,
+                                timestamp=timestamp,
+                                pushed=False,  # Can't easily determine for all branches
+                            )
+                        )
+                    elif len(parts) >= 5:
+                        # Fallback: try to parse with old format if new format fails
+                        sha = parts[0].strip()
+                        if sha in seen_shas:
+                            continue
+                        seen_shas.add(sha)
+                        
+                        # Try old format: %H%x00%an%x00%ae%x00%at%x00%s
+                        if len(parts) >= 5:
+                            author_name = parts[1].strip()
+                            author_email = parts[2].strip()
+                            timestamp_str = parts[3].strip()
+                            summary = parts[4].strip()
+                            
+                            author = f"{author_name} <{author_email}>" if author_email else author_name
+                            
+                            try:
+                                timestamp = int(timestamp_str)
+                            except ValueError:
+                                timestamp = 0
+                            
+                            commits.append(
+                                CommitInfo(
+                                    sha=sha,
+                                    summary=summary,
+                                    author=author,
+                                    timestamp=timestamp,
+                                    pushed=False,
+                                )
+                            )
+            else:
+                # Log error for debugging
+                error_msg = f"git log failed: {result.stderr}"
+                _log_timing_message(f"[ERROR] load_commits: {error_msg}")
+                print(f"[ERROR] load_commits: {error_msg}")
+            
+            # Get remote commits to check push status (matching lazygit behavior)
+            remote_commits = set()
+            try:
+                # For HEAD, try to get the current branch name first
+                if ref_spec == "HEAD":
+                    # Get current branch name
+                    branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                    branch_result = subprocess.run(
+                        branch_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    if branch_result.returncode == 0:
+                        ref_spec = branch_result.stdout.strip()
+                
+                # Try to get remote ref (e.g., origin/branch)
+                if ref_spec and ref_spec != "HEAD":
+                    remote_ref = f"origin/{ref_spec}"
+                    # First check if remote branch exists
+                    check_cmd = ["git", "ls-remote", "--heads", "origin", ref_spec]
+                    check_result = subprocess.run(
+                        check_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    if check_result.returncode == 0 and check_result.stdout.strip():
+                        # Remote branch exists, get commits
+                        remote_cmd = ["git", "rev-list", "--max-count=200", remote_ref]
+                        remote_result = subprocess.run(
+                            remote_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            cwd=repo_path_str
+                        )
+                        if remote_result.returncode == 0:
+                            # Parse all commit SHAs from remote
+                            for sha in remote_result.stdout.strip().split("\n"):
+                                if sha.strip():
+                                    remote_commits.add(sha.strip())
+            except Exception:
+                # Remote not available or not configured - that's okay
+                pass
+            
+            # Update pushed status for all commits
+            for commit in commits:
+                commit.pushed = commit.sha in remote_commits
+            
+            # Get total count for the current branch (matching lazygit)
+            try:
+                count_cmd = ["git", "rev-list", "--count", ref_spec]
+                count_result = subprocess.run(
+                    count_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=repo_path_str
+                )
+                if count_result.returncode == 0:
+                    self.total_commits = int(count_result.stdout.strip())
+                else:
+                    self.total_commits = len(commits)  # Fallback to loaded count
+            except Exception as count_e:
+                _log_timing_message(f"[ERROR] load_commits count: {type(count_e).__name__}: {count_e}")
+                self.total_commits = len(commits)  # Fallback to loaded count
+                
+        except Exception as e:
+            # Log error for debugging
+            error_msg = f"load_commits exception: {type(e).__name__}: {e}"
+            _log_timing_message(f"[ERROR] {error_msg}")
+            print(f"[ERROR] {error_msg}")
+            
+            # Fallback: try to use existing methods if available
+            try:
+                # Try to get commits from current branch as fallback
+                if hasattr(self.git, 'list_commits_native'):
+                    commits = self.git.list_commits_native(branch, max_count=self.page_size, skip=0, timeout=10)
+                else:
+                    commits = self.git.list_commits(branch, max_count=self.page_size, skip=0)
+                self.total_commits = len(commits)  # Approximate
+            except Exception as fallback_e:
+                error_msg = f"load_commits fallback exception: {type(fallback_e).__name__}: {fallback_e}"
+                _log_timing_message(f"[ERROR] {error_msg}")
+                print(f"[ERROR] {error_msg}")
+                commits = []
+                self.total_commits = 0
+        
+        loaded_commits = commits
         self.all_commits = loaded_commits.copy()  # Store all commits for search
+        
+        # Debug: log how many commits were loaded
+        _log_timing_message(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches")
+        print(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches, total_commits={self.total_commits}")
         
         # Apply search filter if there's a search query
         if self._search_query:
@@ -3327,6 +3556,11 @@ class PygitzenApp(App):
             self.commits = loaded_commits
         
         self.loaded_commits = len(self.commits)
+        
+        # Debug: log before setting commits
+        _log_timing_message(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
+        print(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
+        
         self.commits_pane.set_commits(self.commits)
         self._update_commits_title()
         if self.commits:
@@ -3343,21 +3577,207 @@ class PygitzenApp(App):
                 self.show_commit_diff(0)
 
     def _update_commits_title(self) -> None:
-        if self.active_branch:
-            # Use log_pane._total_commits_count as fallback if total_commits is 0
-            # This ensures the count shows correctly even when count_commits hasn't finished loading
-            total_count = self.total_commits if self.total_commits > 0 else (self.log_pane._total_commits_count if hasattr(self.log_pane, '_total_commits_count') and self.log_pane._total_commits_count > 0 else 0)
-            self.commits_pane.border_title = f"Commits ({self.active_branch}) {len(self.commits)} of {total_count}"
+        # Show current branch (matching lazygit behavior)
+        branch_name = self.active_branch if self.active_branch else "HEAD"
+        total_count = self.total_commits if self.total_commits > 0 else len(self.commits)
+        self.commits_pane.border_title = f"Commits ({branch_name}) {len(self.commits)} of {total_count}"
 
     def load_more_commits(self) -> None:
-        if not self.active_branch:
-            return
+        """Load more commits for the current branch (matching lazygit behavior)."""
+        import subprocess
+        
         # If searching, don't load more - we're filtering existing commits
         if self._search_query:
             return
+        if not self.active_branch:
+            return
         if self.loaded_commits >= self.total_commits:
             return
-        next_batch = self.git.list_commits(self.active_branch, max_count=self.page_size, skip=self.loaded_commits)
+        
+        # Get more commits for the current branch (matching lazygit format)
+        next_batch: list[CommitInfo] = []
+        try:
+            # Build git log command for the current branch (matching lazygit)
+            # Format matches lazygit's format: +%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s
+            ref_spec = self.active_branch if self.active_branch else "HEAD"
+            cmd = [
+                "git", "log",
+                ref_spec,  # Current branch (matching lazygit - shows branch-specific commits)
+                "--oneline",  # Match lazygit
+                f"--max-count={self.page_size}",
+                f"--skip={self.loaded_commits}",
+                "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
+                "--abbrev=40",  # Match lazygit (40-char abbreviated SHA)
+                "--no-show-signature",  # Match lazygit
+            ]
+            
+            # Get repo_path - try multiple methods
+            repo_path = getattr(self, 'repo_path', None)
+            if not repo_path:
+                try:
+                    repo_path = getattr(self.git, 'repo_path', None)
+                except:
+                    pass
+            if not repo_path:
+                try:
+                    if hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
+                        repo_path = self.git.repo.path
+                except:
+                    pass
+            if not repo_path:
+                repo_path = "."
+            
+            # Convert to string if it's a Path object
+            repo_path_str = str(repo_path) if repo_path else "."
+            
+            # Run git log with timeout
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=repo_path_str
+            )
+            
+            if result.returncode == 0:
+                # Parse output (lazygit format: +%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s)
+                seen_shas = set()
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    
+                    # Skip the '+' prefix (lazygit format)
+                    if line.startswith('+'):
+                        line = line[1:]
+                    
+                    parts = line.split("\x00")
+                    # LazyGit format has 8 fields: SHA, timestamp, author name, author email, parents, merge, refs, subject
+                    if len(parts) >= 8:
+                        sha = parts[0].strip()
+                        
+                        # Skip if we've already seen this commit SHA (deduplicate)
+                        if sha in seen_shas:
+                            continue
+                        seen_shas.add(sha)
+                        
+                        timestamp_str = parts[1].strip()
+                        author_name = parts[2].strip()
+                        author_email = parts[3].strip()
+                        # parts[4] = parents (not used)
+                        # parts[5] = merge status (not used)
+                        # parts[6] = refs (not used)
+                        summary = parts[7].strip()
+                        
+                        # Combine author name and email
+                        author = f"{author_name} <{author_email}>" if author_email else author_name
+                        
+                        # Parse timestamp
+                        try:
+                            timestamp = int(timestamp_str)
+                        except ValueError:
+                            timestamp = 0
+                        
+                        next_batch.append(
+                            CommitInfo(
+                                sha=sha,
+                                summary=summary,
+                                author=author,
+                                timestamp=timestamp,
+                                pushed=False,  # Will be updated below
+                            )
+                        )
+                    elif len(parts) >= 5:
+                        # Fallback: try to parse with old format if new format fails
+                        sha = parts[0].strip()
+                        if sha in seen_shas:
+                            continue
+                        seen_shas.add(sha)
+                        
+                        # Try old format: %H%x00%an%x00%ae%x00%at%x00%s
+                        author_name = parts[1].strip()
+                        author_email = parts[2].strip()
+                        timestamp_str = parts[3].strip()
+                        summary = parts[4].strip()
+                        
+                        author = f"{author_name} <{author_email}>" if author_email else author_name
+                        
+                        try:
+                            timestamp = int(timestamp_str)
+                        except ValueError:
+                            timestamp = 0
+                        
+                        next_batch.append(
+                            CommitInfo(
+                                sha=sha,
+                                summary=summary,
+                                author=author,
+                                timestamp=timestamp,
+                                pushed=False,  # Will be updated below
+                            )
+                        )
+                
+                # Get remote commits to check push status (matching lazygit behavior)
+                remote_commits = set()
+                try:
+                    # For HEAD, try to get the current branch name first
+                    if ref_spec == "HEAD":
+                        # Get current branch name
+                        branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                        branch_result = subprocess.run(
+                            branch_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=repo_path_str
+                        )
+                        if branch_result.returncode == 0:
+                            ref_spec = branch_result.stdout.strip()
+                    
+                    # Try to get remote ref (e.g., origin/branch)
+                    if ref_spec and ref_spec != "HEAD":
+                        remote_ref = f"origin/{ref_spec}"
+                        # First check if remote branch exists
+                        check_cmd = ["git", "ls-remote", "--heads", "origin", ref_spec]
+                        check_result = subprocess.run(
+                            check_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=repo_path_str
+                        )
+                        if check_result.returncode == 0 and check_result.stdout.strip():
+                            # Remote branch exists, get commits
+                            remote_cmd = ["git", "rev-list", "--max-count=200", remote_ref]
+                            remote_result = subprocess.run(
+                                remote_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                                cwd=repo_path_str
+                            )
+                            if remote_result.returncode == 0:
+                                # Parse all commit SHAs from remote
+                                for sha in remote_result.stdout.strip().split("\n"):
+                                    if sha.strip():
+                                        remote_commits.add(sha.strip())
+                except Exception:
+                    # Remote not available or not configured - that's okay
+                    pass
+                
+                # Update pushed status for all commits in this batch
+                for commit in next_batch:
+                    commit.pushed = commit.sha in remote_commits
+        except Exception:
+            # Fallback: try to use existing methods if available
+            if self.active_branch:
+                try:
+                    if hasattr(self.git, 'list_commits_native'):
+                        next_batch = self.git.list_commits_native(self.active_branch, max_count=self.page_size, skip=self.loaded_commits, timeout=10)
+                    else:
+                        next_batch = self.git.list_commits(self.active_branch, max_count=self.page_size, skip=self.loaded_commits)
+                except Exception:
+                    pass
+        
         if not next_batch:
             return
         self.all_commits.extend(next_batch)
@@ -3393,7 +3813,9 @@ class PygitzenApp(App):
                 self._view_mode = "log"
                 self.patch_pane.styles.display = "none"
                 self.log_pane.styles.display = "block"
-                # Load commits with full history for feature branches
+                # Load commits for the selected branch (matching lazygit - shows branch-specific commits)
+                self.load_commits(self.active_branch)
+                # Load commits with full history for feature branches (for log pane)
                 self.load_commits_for_log(self.active_branch)
                 self.update_status_info()
         elif event.list_view is self.commits_pane:
