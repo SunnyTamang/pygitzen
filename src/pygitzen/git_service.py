@@ -23,6 +23,7 @@ class CommitInfo:
     author: str
     timestamp: int
     pushed: bool = False  # Whether commit exists on remote
+    merged: bool = False  # Whether commit exists on main/master branch
 
 
 @dataclass
