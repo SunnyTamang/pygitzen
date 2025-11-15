@@ -542,6 +542,32 @@ class GitService:
     def get_commit_diff(self, sha_hex: str) -> str:
         """Get diff for a commit using git-native command (avoids dulwich hex_to_sha issues)."""
         import subprocess
+        import re
+        
+        # Normalize SHA to ensure it's a proper 40-character hex string
+        # Handle various formats (bytes, wrong length, etc.)
+        if isinstance(sha_hex, bytes):
+            if len(sha_hex) == 20:
+                # Binary SHA, convert to hex
+                sha_hex = sha_hex.hex()
+            elif len(sha_hex) == 40:
+                # Hex string as bytes, decode it
+                sha_hex = sha_hex.decode('ascii')
+            else:
+                sha_hex = sha_hex.decode('ascii', errors='replace')
+        
+        sha_hex = str(sha_hex).strip()
+        
+        # Validate and fix SHA format
+        if len(sha_hex) != 40 or not all(c in '0123456789abcdefABCDEF' for c in sha_hex):
+            # Try to extract valid hex
+            hex_match = re.search(r'[0-9a-fA-F]{40}', sha_hex)
+            if hex_match:
+                sha_hex = hex_match.group(0).lower()
+            else:
+                return f"Error: Invalid SHA format: {sha_hex[:20]}...\n"
+        
+        sha_hex = sha_hex.lower()
         
         try:
             # Use git show to get the diff (handles root commits automatically)
@@ -563,7 +589,22 @@ class GitService:
                     return output[diff_start:]
                 # If no diff separator found, return everything (might be root commit or special case)
                 return output
+            else:
+                # git show failed, log the error
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                try:
+                    with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                        f.write(f"git show failed for {sha_hex}: returncode={result.returncode}, stderr={error_msg}\n")
+                except:
+                    pass
+                # Return a helpful error message instead of trying dulwich fallback
+                return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
         except subprocess.TimeoutExpired:
+            try:
+                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                    f.write(f"Timeout in git show for {sha_hex}\n")
+            except:
+                pass
             return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
         except Exception as e:
             # Log error but continue to dulwich fallback
@@ -573,46 +614,56 @@ class GitService:
             except:
                 pass
         
-        # Fallback to dulwich (original implementation) if git command fails
-        try:
-            sha = bytes.fromhex(sha_hex)
-            commit: Commit = self.repo[sha]
-            parents = commit.parents
-            
-            from dulwich.patch import write_tree_diff
-            from dulwich.objects import Tree
-            import io
-
-            buf = io.BytesIO()
-            
-            # Get Tree objects from tree SHAs (commit.tree and parent.tree are binary SHAs)
-            commit_tree = self.repo[commit.tree] if commit.tree else None
-            
-            if not parents:
-                # Root commit (no parent) - show all files as additions
-                # Use empty tree (all zeros) as parent to show all files as new
-                empty_tree = Tree()
-                if commit_tree:
-                    write_tree_diff(buf, self.repo.object_store, empty_tree, commit_tree)
-            else:
-                # Regular commit - show diff between parent and commit
-                parent = self.repo[parents[0]]
-                parent_tree = self.repo[parent.tree] if parent.tree else Tree()
-                if commit_tree:
-                    write_tree_diff(buf, self.repo.object_store, parent_tree, commit_tree)
-            
-            diff_text = buf.getvalue().decode(errors="replace")
-            return diff_text
-        except Exception as e:
-            # If dulwich also fails, return error message
-            try:
-                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                    f.write(f"Error in dulwich fallback get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
-                    import traceback
-                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
-            except:
-                pass
-            return f"Error: Could not get diff for commit {sha_hex[:8]}\n"
+        # Fallback to dulwich is disabled because it causes AssertionError with hex_to_sha
+        # The error has already been returned above if git show failed
+        # This code should never be reached, but kept for safety
+        return f"Error: Could not get diff for commit {sha_hex[:8]}. Both git show and dulwich fallback failed.\n"
+        
+        # OLD DULWICH FALLBACK (DISABLED - causes AssertionError)
+        # try:
+        #     # Ensure sha_hex is valid before converting to bytes
+        #     if len(sha_hex) != 40 or not all(c in '0123456789abcdef' for c in sha_hex):
+        #         return f"Error: Invalid SHA format for dulwich fallback: {sha_hex[:20]}...\n"
+        #     
+        #     sha = bytes.fromhex(sha_hex)
+        #     commit: Commit = self.repo[sha]
+        #     parents = commit.parents
+        #     
+        #     from dulwich.patch import write_tree_diff
+        #     from dulwich.objects import Tree
+        #     import io
+        #
+        #     buf = io.BytesIO()
+        #     
+        #     # Get Tree objects from tree SHAs (commit.tree and parent.tree are binary SHAs)
+        #     # These need to be converted to Tree objects, not passed as binary SHAs
+        #     commit_tree = self.repo[commit.tree] if commit.tree else None
+        #     
+        #     if not parents:
+        #         # Root commit (no parent) - show all files as additions
+        #         # Use empty tree (all zeros) as parent to show all files as new
+        #         empty_tree = Tree()
+        #         if commit_tree and isinstance(commit_tree, Tree):
+        #             write_tree_diff(buf, self.repo.object_store, empty_tree, commit_tree)
+        #     else:
+        #         # Regular commit - show diff between parent and commit
+        #         parent = self.repo[parents[0]]
+        #         parent_tree = self.repo[parent.tree] if parent.tree else Tree()
+        #         if commit_tree and isinstance(commit_tree, Tree) and isinstance(parent_tree, Tree):
+        #             write_tree_diff(buf, self.repo.object_store, parent_tree, commit_tree)
+        #     
+        #     diff_text = buf.getvalue().decode(errors="replace")
+        #     return diff_text
+        # except Exception as e:
+        #     # If dulwich also fails, return error message
+        #     try:
+        #         with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+        #             f.write(f"Error in dulwich fallback get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
+        #             import traceback
+        #             f.write(f"Traceback:\n{traceback.format_exc()}\n")
+        #     except:
+        #         pass
+        #     return f"Error: Could not get diff for commit {sha_hex[:8]}\n"
     
     def get_commit_refs_from_git_log(self, branch: str, commit_shas: List[str]) -> dict[str, dict]:
         """
@@ -794,6 +845,45 @@ class GitService:
                 result["is_merge"] = True
                 result["merge_parents"] = [p.hex() for p in commit.parents]
         except Exception:
+            pass
+        
+        return result
+    
+    def get_commit_message_full(self, commit_sha: str) -> dict:
+        """
+        Get full commit message and parse Signed-off-by lines.
+        Returns dict with 'message' (full body) and 'signed_off_by' (list of signers).
+        """
+        import subprocess
+        result = {
+            "message": "",
+            "signed_off_by": []
+        }
+        
+        try:
+            # Use git show to get full commit message
+            process = subprocess.run(
+                ['git', 'show', '--format=%B', '--no-patch', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                full_message = process.stdout.strip()
+                result["message"] = full_message
+                
+                # Parse Signed-off-by lines
+                lines = full_message.split('\n')
+                for line in lines:
+                    line_stripped = line.strip()
+                    if line_stripped.startswith('Signed-off-by:'):
+                        # Extract signer info (name and email)
+                        signer = line_stripped[len('Signed-off-by:'):].strip()
+                        result["signed_off_by"].append(signer)
+        except Exception:
+            # If git command fails, return empty
             pass
         
         return result

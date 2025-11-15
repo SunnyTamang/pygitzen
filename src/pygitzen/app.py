@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import queue
 from functools import wraps
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
@@ -32,6 +33,53 @@ def _get_timing_log_file():
             # If we can't open the file, return None and timing will be skipped
             pass
     return _TIMING_LOG_FILE
+
+def _normalize_commit_sha(sha) -> str:
+    """
+    Normalize commit SHA to a proper 40-character hex string.
+    Handles various formats including hex-encoded ASCII (80 chars).
+    """
+    if isinstance(sha, bytes):
+        return sha.hex()
+    elif not isinstance(sha, str):
+        sha = str(sha)
+    
+    sha = sha.strip()
+    
+    # Special case: If it's 80 characters, it might be hex-encoded ASCII codes
+    # Pattern: Each pair of hex digits represents the ASCII code of a hex character
+    # Example: '7' (0x37) 'f' (0x66) '2' (0x32) -> "376632" -> "7f2"
+    if len(sha) == 80:
+        try:
+            hex_chars = []
+            for i in range(0, len(sha), 2):
+                if i + 1 < len(sha):
+                    try:
+                        ascii_code = int(sha[i:i+2], 16)  # Parse as hex
+                        if 48 <= ascii_code <= 102:  # '0'-'9' (48-57) or 'a'-'f' (97-102)
+                            hex_chars.append(chr(ascii_code))
+                    except ValueError:
+                        break
+            # If we got 40 characters and they're all hex, this is the fix
+            if len(hex_chars) == 40:
+                potential_sha = ''.join(hex_chars).lower()
+                if all(c in '0123456789abcdef' for c in potential_sha):
+                    return potential_sha
+        except Exception:
+            pass
+    
+    # Validate it's a proper hex string
+    if len(sha) == 40 and all(c in '0123456789abcdefABCDEF' for c in sha):
+        return sha.lower()
+    
+    # Try to extract valid hex from the string
+    import re
+    hex_match = re.search(r'[0-9a-fA-F]{40}', str(sha))
+    if hex_match:
+        return hex_match.group(0).lower()
+    
+    # Last resort: return as-is (will be logged as error)
+    return sha
 
 def _log_timing_message(message: str):
     """Log timing message to file (non-blocking, won't interfere with TUI)."""
@@ -306,7 +354,10 @@ class CommitsPane(ListView):
         
         for commit in commits_to_render:
             from rich.text import Text
-            short_sha = commit.sha[:8]
+            
+            # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
+            commit_sha = _normalize_commit_sha(commit.sha)
+            short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
             author_short = commit.author.split('<')[0].strip()
             
             text = Text()
@@ -349,7 +400,10 @@ class CommitsPane(ListView):
     def append_commits(self, commits: list[CommitInfo]) -> None:
         for commit in commits:
             from rich.text import Text
-            short_sha = commit.sha[:8]
+            
+            # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
+            commit_sha = _normalize_commit_sha(commit.sha)
+            short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
             author_short = commit.author.split('<')[0].strip()
             
             text = Text()
@@ -419,6 +473,8 @@ class LogPane(Static):
         self._cached_branch: str = ""
         self._cached_branch_info: dict = {}
         self._cached_commit_refs_map: dict = {}
+        self._cached_graph_prefixes: dict = {}  # sha -> plain graph prefix
+        self._cached_graph_prefixes_colored: dict = {}  # sha -> colored graph prefix (with ANSI codes)
         self._last_render_time = 0.0
         self._pending_update = False
         self._pending_branch_info: dict = {}
@@ -431,130 +487,137 @@ class LogPane(Static):
         self._max_rendered_commits = 999999  # Render all commits (no limit for testing)
         import time
         self._time = time
+        # Native git log virtual scrolling
+        self._native_git_log_lines: list = []  # Cached lines from git log
+        self._native_git_log_count = 50  # Current limit for git log
+        self._native_git_log_loading = False  # Prevent concurrent loads
+        # Start with blank log - don't update here, let it be empty initially
     
     def show_branch_log(self, branch: str, commits: list[CommitInfo], branch_info: dict, git_service, append: bool = False, total_commits_count_override: int = None) -> None:
         """
-        Display commit log/graph for a branch (optimized with incremental updates and debouncing).
-        Only rebuilds if commits or branch changed, otherwise updates incrementally.
-        
-        Args:
-            append: If True, append commits to existing log instead of replacing.
+        Display native git log --graph --color=always output for a branch.
+        Only loads when user clicks on a branch.
         """
         from rich.text import Text
-        from rich.console import Group
-        from datetime import datetime
-        from time import timezone
+        from pathlib import Path
         
-        # Store pending updates for debouncing
-        if branch_info:
-            self._pending_branch_info = branch_info.copy()
+        # Only show native git log if we have git_service with repo_path
         if git_service is not None:
-            self._pending_git_service = git_service
-        
-        # Debounce: Wait 100ms before rendering to batch rapid updates
-        # This allows branch_info and commit_refs to arrive before we render
-        current_time = self._time.perf_counter()
-        time_since_last_render = current_time - self._last_render_time
-        
-        # If updates are coming in rapid succession, defer rendering
-        if time_since_last_render < 0.1:  # 100ms debounce window
-            self._pending_update = True
-            # Schedule a delayed render
-            if hasattr(self, '_debounce_timer'):
-                # Cancel previous timer if exists
-                pass
-            return
-        
-        # Throttle: Don't re-render more than once every 50ms (20fps max)
-        if time_since_last_render < 0.05:  # 50ms throttle
-            self._pending_update = True
-            return
-        
-        # Use pending data if available
-        if self._pending_branch_info:
-            branch_info = self._pending_branch_info
-        if self._pending_git_service is not None:
-            git_service = self._pending_git_service
-        
-        self._pending_update = False
-        self._last_render_time = current_time
-        
-        # If appending, merge with cached commits
-        if append and self._cached_commits and self._cached_branch == branch:
-            # Merge commits (avoid duplicates)
-            existing_shas = {c.sha for c in self._cached_commits}
-            new_commits = [c for c in commits if c.sha not in existing_shas]
-            if new_commits:
-                commits = self._cached_commits + new_commits
-            else:
-                commits = self._cached_commits  # No new commits, keep existing
-        
-        # CRITICAL: Store total count BEFORE limiting (needed for "more commits" message)
-        # Use override if provided (for cases where commits is already limited), otherwise use len(commits)
-        total_commits_count = total_commits_count_override if total_commits_count_override is not None else len(commits)
-        
-        # DISABLED FOR TESTING: Skip virtual scrolling limit - render all commits
-        # max_rendered = self._max_rendered_commits
-        # if len(commits) > max_rendered:
-        #     _log_timing_message(f"[TIMING]   show_branch_log: Limiting {len(commits)} commits to {max_rendered} (virtual scroll)")
-        #     commits = commits[:max_rendered]
-        
-        if not commits:
-            empty_text = Text()
-            empty_text.append(f"No commits found for branch '{branch}'", style="dim white")
-            self.update(empty_text)
-            self._cached_commits = []
-            self._cached_branch = ""
-            return
-        
-        # Check if we can do incremental update
-        commits_changed = (
-            self._cached_branch != branch or
-            len(self._cached_commits) != len(commits) or
-            any(cached.sha != new.sha for cached, new in zip(self._cached_commits, commits))
-        )
-        
-        branch_info_changed = (
-            self._cached_branch_info.get("remote_tracking") != branch_info.get("remote_tracking") or
-            self._cached_branch_info.get("is_current") != branch_info.get("is_current")
-        )
-        
-        # If only branch_info changed and commits are the same, we can update just the header
-        if not commits_changed and branch_info_changed and git_service is None:
-            # Just update header, keep commit lines
-            header = self._build_header(branch, branch_info)
-            # Rebuild with new header but cached commit lines
-            # Pass total_commits_count so we can show "more commits" message
-            log_lines = self._build_log_lines_cached(commits, git_service, branch, total_commits_count)
-            log_lines[0] = header  # Replace header
-            full_content = Group(*log_lines)
-            self.update(full_content)
-            self._cached_branch_info = branch_info.copy()
-            return
-        
-        # Always rebuild (Rich doesn't support incremental DOM updates easily)
-        # But we optimize by batching updates and throttling
-        # DISABLED FOR TESTING: Don't reset virtual scrolling limit
-        # if not append or self._cached_branch != branch:
-        #     self._max_rendered_commits = 50  # Start with 50 rendered commits
-        
-        # Build log lines with virtual scrolling (only first N commits)
-        # Pass total_commits_count so we can show "more commits" message
-        log_lines = self._build_log_lines(commits, branch_info, git_service, branch, total_commits_count)
-        
-        # Update UI (this is also expensive with Rich)
-        update_start = self._time.perf_counter()
-        full_content = Group(*log_lines)
-        self.update(full_content)
-        update_elapsed = self._time.perf_counter() - update_start
-        _log_timing_message(f"[TIMING]   show_branch_log update(): {update_elapsed:.4f}s")
-        
-        # Update cache
-        self._cached_commits = commits.copy()
-        self._cached_branch = branch
-        self._cached_branch_info = branch_info.copy()
-        if git_service and hasattr(git_service, 'refs_map'):
-            self._cached_commit_refs_map = git_service.refs_map.copy()
+            # Check if git_service has repo_path attribute
+            repo_path = None
+            try:
+                # Debug: log what we're receiving
+                try:
+                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                        f.write(f"DEBUG show_branch_log: Received git_service type={type(git_service)} for branch={branch}\n")
+                        f.write(f"git_service type name: {type(git_service).__name__}\n")
+                        f.write(f"hasattr repo_path: {hasattr(git_service, 'repo_path')}\n")
+                        # Try to get repo_path to see if it exists
+                        try:
+                            test_repo_path = getattr(git_service, 'repo_path', 'NOT_FOUND')
+                            f.write(f"getattr repo_path: {test_repo_path}\n")
+                        except Exception as e:
+                            f.write(f"getattr repo_path failed: {e}\n")
+                except:
+                    pass
+                
+                # Try multiple ways to get repo_path (works for both cython and non-cython)
+                # Method 1: Direct attribute access (works for both, including cython cdef attributes and wrappers)
+                try:
+                    repo_path = git_service.repo_path
+                    # Verify it's not None or empty
+                    if not repo_path or (isinstance(repo_path, str) and not repo_path.strip()):
+                        repo_path = None
+                    else:
+                        # Debug: log successful access
+                        try:
+                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                                f.write(f"SUCCESS show_branch_log: Found repo_path={repo_path} via direct access for branch={branch}\n\n")
+                        except:
+                            pass
+                except (AttributeError, TypeError) as e:
+                    repo_path = None
+                    # Debug: log failure
+                    try:
+                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                            f.write(f"FAILED show_branch_log: Direct access failed: {e} for branch={branch}\n")
+                    except:
+                        pass
+                
+                # Method 2: Use getattr (works even if hasattr returns False for cython)
+                if repo_path is None:
+                    try:
+                        repo_path = getattr(git_service, 'repo_path', None)
+                        # Verify it's not None or empty
+                        if not repo_path or (isinstance(repo_path, str) and not repo_path.strip()):
+                            repo_path = None
+                    except (AttributeError, TypeError):
+                        repo_path = None
+                
+                # Method 3: Try via repo.path (fallback)
+                if repo_path is None:
+                    try:
+                        if hasattr(git_service, 'repo'):
+                            repo = getattr(git_service, 'repo', None)
+                            if repo and hasattr(repo, 'path'):
+                                repo_path = getattr(repo, 'path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Method 4: Check if git_service itself is a Path
+                if repo_path is None and isinstance(git_service, Path):
+                    repo_path = git_service
+                
+                # Convert to Path object if it's a string
+                # Check if repo_path is valid (not None, not empty string)
+                if repo_path and str(repo_path).strip():
+                    if isinstance(repo_path, str):
+                        repo_path = Path(repo_path)
+                    elif not isinstance(repo_path, Path):
+                        # Try to convert other types
+                        repo_path = Path(str(repo_path))
+                    
+                    # Resolve "." to absolute path
+                    if str(repo_path) == ".":
+                        repo_path = Path(".").resolve()
+                    
+                    # Pass git_service directly to _show_native_git_log (it should already have repo_path)
+                    # Don't validate path existence here - let git command handle it (it will fail gracefully)
+                    self._show_native_git_log(branch, branch_info, git_service, append=append)
+                else:
+                    # No repo_path found or invalid - log for debugging
+                    try:
+                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                            f.write(f"DEBUG: No valid repo_path found for branch={branch}\n")
+                            f.write(f"repo_path value: {repo_path}\n")
+                            f.write(f"git_service type: {type(git_service)}\n")
+                            f.write(f"hasattr repo_path: {hasattr(git_service, 'repo_path')}\n")
+                            # Try to get repo_path directly
+                            try:
+                                repo_path_attr = getattr(git_service, 'repo_path', 'NOT_FOUND')
+                                f.write(f"Direct access repo_path: {repo_path_attr}\n")
+                                f.write(f"repo_path type: {type(repo_path_attr)}\n")
+                            except Exception as e:
+                                f.write(f"Direct access failed: {e}\n")
+                            f.write(f"git_service dir (repo-related): {[x for x in dir(git_service) if 'repo' in x.lower()]}\n\n")
+                    except:
+                        pass
+                    self.update(Text())
+            except Exception as e:
+                # On any error, show empty and log the error for debugging
+                import traceback
+                try:
+                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                        f.write(f"Error in show_branch_log (branch={branch}): {e}\n")
+                        f.write(f"git_service type: {type(git_service)}\n")
+                        f.write(f"git_service attrs: {dir(git_service)}\n")
+                        f.write(f"Traceback:\n{traceback.format_exc()}\n\n")
+                except:
+                    pass
+                self.update(Text())
+        else:
+            # Show empty if no git service
+            self.update(Text())
     
     def _build_header(self, branch: str, branch_info: dict) -> Text:
         """Build branch header."""
@@ -571,6 +634,329 @@ class LogPane(Static):
             header.append(f" (HEAD)", style="green bold")
         
         return header
+    
+    def _show_native_git_log(self, branch: str, branch_info: dict, git_service, append: bool = False) -> None:
+        """
+        Display native git log --graph --color=always output directly.
+        This shows exactly what git outputs, preserving all colors and formatting.
+        Supports virtual scrolling - loads more commits as user scrolls.
+        """
+        from rich.text import Text
+        from rich.console import Group
+        from pathlib import Path
+        import subprocess
+        from pygitzen.git_graph import parse_ansi_to_rich_text
+        
+        # Prevent concurrent loads
+        if self._native_git_log_loading:
+            return
+        self._native_git_log_loading = True
+        
+        try:
+            # Get repo path from git_service
+            # Try multiple methods to get repo_path (works for both cython and non-cython)
+            repo_path = None
+            
+            # Method 1: Direct attribute access
+            try:
+                if hasattr(git_service, 'repo_path'):
+                    repo_path = git_service.repo_path
+            except (AttributeError, TypeError):
+                pass
+            
+            # Method 2: Use getattr (works even if hasattr returns False for cython)
+            if repo_path is None:
+                try:
+                    repo_path = getattr(git_service, 'repo_path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Method 3: Try via repo.path
+            if repo_path is None:
+                try:
+                    if hasattr(git_service, 'repo'):
+                        repo = getattr(git_service, 'repo', None)
+                        if repo and hasattr(repo, 'path'):
+                            repo_path = getattr(repo, 'path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Convert to Path object
+            if repo_path:
+                if isinstance(repo_path, str):
+                    repo_path = Path(repo_path)
+                elif not isinstance(repo_path, Path):
+                    repo_path = Path(str(repo_path))
+            else:
+                # Fallback to current directory
+                repo_path = Path(".")
+            
+            # If appending, increase the limit; otherwise reset
+            if not append:
+                self._native_git_log_count = 50
+                self._native_git_log_lines = []
+            else:
+                # Increase limit by 50 more commits
+                self._native_git_log_count += 50
+            
+            # Build git command - use native git log --graph --color=always
+            # Add --abbrev-commit for short SHAs and --decorate to show refs (branches, tags, HEAD)
+            cmd = ['git', 'log', '--graph', '--color=always', '--abbrev-commit', '--decorate', f'-{self._native_git_log_count}']
+            
+            # Add branch if specified (don't use --all, it's slower)
+            # Only add branch if it's not empty
+            if branch and branch.strip():
+                # Use refs/heads/ prefix for branches with '/' to ensure they're treated as branches, not paths
+                # This avoids the "ambiguous argument" error for branch names like feature/fuzzy-search-commits
+                if branch.startswith('refs/'):
+                    # Already a full ref path, use as is
+                    cmd.append(branch)
+                elif '/' in branch:
+                    # Branch name contains '/' - use refs/heads/ prefix to avoid ambiguity
+                    cmd.append(f'refs/heads/{branch}')
+                else:
+                    # Simple branch name without '/' - use as is
+                    cmd.append(branch)
+            
+            # Run git command with error handling for encoding issues
+            # Use shorter timeout for faster failure
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=False,  # Get bytes first
+                cwd=str(repo_path),
+                timeout=5  # Short timeout for fast feedback
+            )
+            
+            # Decode with error handling for non-UTF-8 characters
+            # Use errors='replace' to handle any invalid UTF-8 bytes
+            output_text = result.stdout.decode('utf-8', errors='replace')
+            error_text = result.stderr.decode('utf-8', errors='replace')
+            
+            # Create a simple result-like object with decoded text
+            class DecodedResult:
+                def __init__(self, returncode, stdout, stderr):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+            
+            result = DecodedResult(result.returncode, output_text, error_text)
+            
+            if result.returncode != 0:
+                # Show error message
+                error_text = Text()
+                error_text.append(f"Error running git log: {result.stderr}\n", style="red")
+                self.update(error_text)
+                self._native_git_log_loading = False
+                return
+            
+            # Parse ANSI-colored output and convert to Rich Text
+            # Process the entire output at once for better performance
+            if not output_text.strip():
+                # No output, show empty
+                self.update(Text())
+                self._native_git_log_loading = False
+                return
+            
+            # Split into lines and process
+            output_lines = output_text.split('\n')
+            new_log_lines = []
+            
+            # Convert each line from ANSI to Rich Text
+            # Process in batches for better performance
+            for line in output_lines:
+                if line:  # Only process non-empty lines
+                    try:
+                        rich_line = parse_ansi_to_rich_text(line)
+                        new_log_lines.append(rich_line)
+                    except Exception:
+                        # If parsing fails, strip ANSI and add as plain text
+                        from pygitzen.git_graph import strip_ansi_codes
+                        plain_line = strip_ansi_codes(line)
+                        new_log_lines.append(Text(plain_line, style="white"))
+            
+            # If appending, only add new lines (skip already loaded ones)
+            if append and self._native_git_log_lines:
+                # Count existing content lines (excluding header and empty line)
+                existing_content_lines = len(self._native_git_log_lines) - 2  # Subtract header and empty line
+                
+                # Only add lines that weren't in the previous load
+                if existing_content_lines < len(new_log_lines):
+                    # Add only the new lines (skip the ones we already have)
+                    new_lines_to_add = new_log_lines[existing_content_lines:]
+                    self._native_git_log_lines.extend(new_lines_to_add)
+            else:
+                # First load - build full content with header
+                log_lines = []
+                # Add header
+                header = self._build_header(branch, branch_info)
+                log_lines.append(header)
+                log_lines.append(Text())  # Empty line
+                log_lines.extend(new_log_lines)
+                self._native_git_log_lines = log_lines
+            
+            # Update the pane
+            if self._native_git_log_lines:
+                full_content = Group(*self._native_git_log_lines)
+                self.update(full_content)
+            else:
+                self.update(Text())
+            
+            # Update cache
+            self._cached_branch = branch
+            self._cached_branch_info = branch_info.copy()
+            
+        except Exception as e:
+            # On error, show error message
+            error_text = Text()
+            error_text.append(f"Error showing native git log: {e}\n", style="red")
+            self.update(error_text)
+        finally:
+            self._native_git_log_loading = False
+    
+    def _build_graph_structure(self, commits: list[CommitInfo], git_service) -> dict:
+        """
+        Build graph structure showing branch relationships with proper tracking of divergence and merging.
+        Returns dict mapping commit SHA to graph info with column tracking, active columns, and branch state.
+        """
+        graph_info = {}
+        commit_shas = [_normalize_commit_sha(c.sha) for c in commits]
+        sha_to_index = {sha: i for i, sha in enumerate(commit_shas)}
+        
+        # Build parent/child relationships
+        for commit in commits:
+            normalized_sha = _normalize_commit_sha(commit.sha)
+            commit_refs = {}
+            if git_service is not None:
+                try:
+                    commit_refs = git_service.get_commit_refs(normalized_sha)
+                except:
+                    pass
+            
+            parents = commit_refs.get("merge_parents", [])
+            # For non-merge commits, get first parent
+            if not parents:
+                try:
+                    if git_service is not None:
+                        commit_bytes = bytes.fromhex(normalized_sha)
+                        commit_obj = git_service.repo[commit_bytes]
+                        if commit_obj.parents:
+                            parents = [p.hex() for p in commit_obj.parents[:1]]  # First parent only for non-merge
+                except:
+                    pass
+            
+            graph_info[commit.sha] = {
+                'parents': parents,
+                'children': [],
+                'is_merge': commit_refs.get("is_merge", False),
+                'column': 0,
+                'index': sha_to_index.get(normalized_sha, 0),
+                'diverges': False,  # True if this commit has multiple children (branch point)
+                'merges': False,  # True if this commit merges multiple branches
+            }
+        
+        # Build child relationships
+        for sha, info in graph_info.items():
+            for parent_sha in info['parents']:
+                parent_normalized = _normalize_commit_sha(parent_sha)
+                # Find parent in our commits list
+                for commit in commits:
+                    if _normalize_commit_sha(commit.sha) == parent_normalized:
+                        if commit.sha not in graph_info:
+                            graph_info[commit.sha] = {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'index': 0, 'diverges': False, 'merges': False}
+                        graph_info[commit.sha]['children'].append(sha)
+                        break
+        
+        # Mark divergence points (commits with multiple children)
+        for sha, info in graph_info.items():
+            if len(info['children']) > 1:
+                info['diverges'] = True
+        
+        # Mark merge points
+        for sha, info in graph_info.items():
+            if info['is_merge'] and len(info['parents']) >= 2:
+                info['merges'] = True
+        
+        # Calculate columns using a proper graph algorithm
+        # Track active columns and assign commits to columns based on parent relationships
+        commit_to_column = {}
+        next_column = 0
+        # Track which columns are active at each commit index
+        columns_at_index = {}  # index -> set of active column numbers
+        
+        for i, commit in enumerate(commits):
+            sha = commit.sha
+            info = graph_info.get(sha, {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'index': i, 'diverges': False, 'merges': False})
+            
+            if i == 0:
+                # First commit is always in column 0
+                commit_to_column[sha] = 0
+                info['column'] = 0
+            else:
+                # Find parent in our commits list
+                parent_column = 0
+                parent_found = False
+                parent_columns = []
+                
+                if info['parents']:
+                    # Check all parents to find the ones in our list
+                    for parent_sha in info['parents']:
+                        parent_normalized = _normalize_commit_sha(parent_sha)
+                        for c in commits:
+                            if _normalize_commit_sha(c.sha) == parent_normalized:
+                                if c.sha in commit_to_column:
+                                    col = commit_to_column[c.sha]
+                                    parent_columns.append(col)
+                                    if not parent_found:
+                                        parent_column = col
+                                        parent_found = True
+                                    break
+                
+                if info['is_merge'] and len(parent_columns) >= 2:
+                    # Merge commit: use leftmost parent's column
+                    leftmost_parent_col = min(parent_columns)
+                    commit_to_column[sha] = leftmost_parent_col
+                    info['column'] = leftmost_parent_col
+                elif info['is_merge'] and len(info['parents']) >= 2:
+                    # Merge commit but parents not in list - assign to new column temporarily
+                    # This will be corrected when we see the actual merge
+                    commit_to_column[sha] = parent_column if parent_found else 0
+                    info['column'] = parent_column if parent_found else 0
+                else:
+                    # Regular commit: use parent's column (or column 0 if no parent found)
+                    commit_to_column[sha] = parent_column
+                    info['column'] = parent_column
+            
+            graph_info[sha] = info
+        
+        # Calculate active columns at each index (for drawing continuation lines)
+        for i in range(len(commits)):
+            active_cols = set()
+            # Look ahead to see which columns will be active
+            for j in range(i, len(commits)):
+                future_commit = commits[j]
+                future_sha = future_commit.sha
+                future_info = graph_info.get(future_sha, {})
+                future_col = future_info.get('column', 0)
+                active_cols.add(future_col)
+                
+                # Also check if current commit is a parent of future commits
+                future_parents = future_info.get('parents', [])
+                current_sha = commits[i].sha
+                for parent_sha in future_parents:
+                    if _normalize_commit_sha(parent_sha) == _normalize_commit_sha(current_sha):
+                        current_info = graph_info.get(current_sha, {})
+                        active_cols.add(current_info.get('column', 0))
+                        break
+            
+            columns_at_index[i] = active_cols
+        
+        # Store active columns in graph_info
+        for sha, info in graph_info.items():
+            idx = info.get('index', 0)
+            info['active_columns'] = columns_at_index.get(idx, set())
+        
+        return graph_info
     
     def _build_log_lines(self, commits: list[CommitInfo], branch_info: dict, git_service, branch: str, total_commits_count: int = None) -> list:
         """Build log lines with virtual scrolling - only render visible commits."""
@@ -595,10 +981,19 @@ class LogPane(Static):
         # This allows us to show "more commits" message even when commits list is already limited
         actual_total = total_commits_count if total_commits_count is not None else len(commits)
         
+        # Build graph structure
+        graph_structure = self._build_graph_structure(commits_to_render, git_service)
+        
         # Build commit lines (this is the expensive part)
         commit_lines_start = time.perf_counter()
         for i, commit in enumerate(commits_to_render):
-            commit_line = self._build_commit_line(commit, i, actual_total, git_service, branch)
+            # Get colored graph prefix for this commit if available
+            normalized_sha = _normalize_commit_sha(commit.sha)
+            git_graph_prefix_colored = self._cached_graph_prefixes_colored.get(normalized_sha)
+            commit_line = self._build_commit_line(
+                commit, i, actual_total, git_service, branch, 
+                graph_structure, commits_to_render, git_graph_prefix_colored
+            )
             log_lines.append(commit_line)
             log_lines.append(Text())  # Empty line between commits
         commit_lines_elapsed = time.perf_counter() - commit_lines_start
@@ -650,63 +1045,498 @@ class LogPane(Static):
         
         return log_lines
     
-    def _build_commit_line(self, commit: CommitInfo, index: int, total: int, git_service, branch: str) -> Text:
-        """Build a single commit line (optimized for speed - simplified styling)."""
+    def _format_relative_date(self, timestamp: int) -> str:
+        """
+        Format timestamp as relative date (e.g., "11 days ago", "3 weeks ago").
+        
+        Args:
+            timestamp: Unix timestamp
+        
+        Returns:
+            Relative date string like "11 days ago", "3 weeks ago", "2 months ago", etc.
+        """
+        from datetime import datetime, timezone
+        import time
+        
+        now = datetime.now(timezone.utc)
+        commit_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        delta = now - commit_time
+        
+        total_seconds = int(delta.total_seconds())
+        
+        if total_seconds < 60:
+            return "just now"
+        elif total_seconds < 3600:
+            minutes = total_seconds // 60
+            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        elif total_seconds < 86400:
+            hours = total_seconds // 3600
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        elif total_seconds < 604800:  # 7 days
+            days = total_seconds // 86400
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        elif total_seconds < 2592000:  # ~30 days
+            weeks = total_seconds // 604800
+            return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+        elif total_seconds < 31536000:  # ~365 days
+            months = total_seconds // 2592000
+            return f"{months} month{'s' if months != 1 else ''} ago"
+        else:
+            years = total_seconds // 31536000
+            return f"{years} year{'s' if years != 1 else ''} ago"
+    
+    def _calculate_graph_chars(self, commit: CommitInfo, index: int, total: int, graph_structure: dict, commits: list[CommitInfo]) -> str:
+        """
+        Calculate graph characters for a commit based on its position in the graph.
+        Returns string like "*", "|", "\", "/", "|/", "|\", etc.
+        
+        Style 1 (ASCII): Uses *, |, |/, |\
+        Style 2 (dots): Uses dots (●) and lines
+        """
+        commit_sha = _normalize_commit_sha(commit.sha)
+        info = graph_structure.get(commit.sha, {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'diverges': False, 'merges': False})
+        
+        is_merge = info.get('is_merge', False)
+        merges = info.get('merges', False)
+        diverges = info.get('diverges', False)
+        column = info.get('column', 0)
+        
+        if self.graph_style == "dots":
+            # Dots style: use dot for commits
+            return "●"
+        
+        # ASCII style
+        # Check if this commit merges branches (has multiple parents from different columns)
+        if merges or (is_merge and len(info.get('parents', [])) >= 2):
+            # Check if any parent is in a different column
+            parent_columns = []
+            for parent_sha in info.get('parents', []):
+                parent_normalized = _normalize_commit_sha(parent_sha)
+                for c in commits:
+                    if _normalize_commit_sha(c.sha) == parent_normalized:
+                        parent_info = graph_structure.get(c.sha, {})
+                        parent_columns.append(parent_info.get('column', 0))
+                        break
+            
+            # If we have parents in different columns, this is a merge
+            if len(set(parent_columns)) > 1:
+                return "*"  # Commit marker, merge line will be shown separately
+        
+        # Check if this commit diverges (has multiple children in different columns)
+        if diverges:
+            children_columns = []
+            for child_sha in info.get('children', []):
+                child_normalized = _normalize_commit_sha(child_sha)
+                for c in commits:
+                    if _normalize_commit_sha(c.sha) == child_normalized:
+                        child_info = graph_structure.get(c.sha, {})
+                        children_columns.append(child_info.get('column', 0))
+                        break
+            
+            # If we have children in different columns, this is a divergence
+            if len(set(children_columns)) > 1:
+                return "*"  # Commit marker, divergence will be shown in prefix
+        
+        # Regular commit: use *
+        return "*"
+    
+    def _get_active_columns_at_index(self, index: int, commits: list[CommitInfo], graph_structure: dict) -> set:
+        """Get set of active column numbers at a given commit index."""
+        active_columns = set()
+        for i in range(index, len(commits)):
+            commit = commits[i]
+            sha = commit.sha
+            info = graph_structure.get(sha, {})
+            column = info.get('column', 0)
+            active_columns.add(column)
+        return active_columns
+    
+    def _calculate_graph_prefix(self, commit: CommitInfo, index: int, total: int, graph_structure: dict, commits: list[CommitInfo], line_type: str = "commit", git_graph_prefix_colored: str = None) -> Text:
+        """
+        Calculate graph prefix for each line of a commit.
+        line_type: "commit", "merge", "author", "date", "message", "signed_off"
+        Returns Rich Text object with colors if git_graph_prefix_colored is provided, otherwise returns plain string.
+        
+        Algorithm: Track active columns and show proper graph characters for merges/divergences.
+        If git colored graph is available, use it directly for accurate visualization.
+        """
+        from rich.text import Text
+        from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+        
+        commit_sha = _normalize_commit_sha(commit.sha)
+        info = graph_structure.get(commit.sha, {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'diverges': False, 'merges': False, 'active_columns': set()})
+        
+        # If we have git's colored graph prefix, use it directly (most accurate)
+        if git_graph_prefix_colored and line_type == "commit":
+            # Handle both string and list formats
+            if isinstance(git_graph_prefix_colored, list) and len(git_graph_prefix_colored) > 0:
+                main_prefix_colored = git_graph_prefix_colored[0]
+            else:
+                main_prefix_colored = git_graph_prefix_colored
+            # Use git's colored prefix for commit line
+            return convert_graph_prefix_to_rich(main_prefix_colored)
+        
+        # For continuation lines, we need to derive from git's prefix or calculate
+        if git_graph_prefix_colored and line_type != "commit":
+            # Handle both string and list formats
+            if isinstance(git_graph_prefix_colored, list) and len(git_graph_prefix_colored) > 0:
+                main_prefix_colored = git_graph_prefix_colored[0]
+            else:
+                main_prefix_colored = git_graph_prefix_colored
+            
+            # For continuation lines, replace * with | and remove \ characters
+            plain_prefix = strip_ansi_codes(main_prefix_colored)
+            continuation_prefix_plain = plain_prefix.replace('*', '|').replace('●', '│')
+            continuation_prefix_plain = continuation_prefix_plain.replace('\\', ' ')
+            # Normalize whitespace - preserve column structure
+            leading_spaces = len(continuation_prefix_plain) - len(continuation_prefix_plain.lstrip())
+            continuation_prefix_plain = '|' + (' ' * max(1, leading_spaces))
+            # Create Rich Text - try to preserve colors from git prefix
+            # For now, use dim white for continuation lines (could enhance to preserve colors)
+            result = Text()
+            result.append(continuation_prefix_plain, style="dim white")
+            return result
+        
+        is_merge = info.get('is_merge', False)
+        merges = info.get('merges', False)
+        diverges = info.get('diverges', False)
+        column = info.get('column', 0)
+        active_columns = info.get('active_columns', set())
+        
+        # If this is the last commit, no continuation lines
+        if index >= total - 1:
+            if self.graph_style == "dots":
+                return Text("  ", style="dim white")
+            # For ASCII style, show empty space for last commit
+            if column == 0:
+                return Text("  ", style="dim white")
+            else:
+                # Show spaces for columns before this one
+                return Text("  " + "  " * column, style="dim white")
+        
+        # For merge line, use backslash
+        if line_type == "merge" and (is_merge or merges):
+            # Check if we have git's merge continuation line
+            if git_graph_prefix_colored and isinstance(git_graph_prefix_colored, list) and len(git_graph_prefix_colored) > 1:
+                # Use git's merge continuation line (|\)
+                for cont_line in git_graph_prefix_colored[1:]:
+                    if '\\' in strip_ansi_codes(cont_line):
+                        return convert_graph_prefix_to_rich(cont_line)
+            
+            # Fallback: calculate merge line
+            if self.graph_style == "dots":
+                # Dots style: use line for merge
+                if column == 0:
+                    return Text("│\\ ", style="dim white")
+                else:
+                    return Text("│\\ " + "  " * column, style="dim white")
+            else:
+                # ASCII style
+                if column == 0:
+                    return Text("|\\ ", style="dim white")
+                else:
+                    return Text("|\\ " + "  " * column, style="dim white")
+        
+        # Check if this commit has a direct future child
+        has_direct_future_child = False
+        next_commit_column = None
+        for i in range(index + 1, min(index + 50, total, len(commits))):
+            future_commit = commits[i]
+            future_sha = _normalize_commit_sha(future_commit.sha)
+            future_info = graph_structure.get(future_commit.sha, {})
+            future_parents = future_info.get('parents', [])
+            # Check if this commit is a direct parent of a future commit
+            for parent_sha in future_parents:
+                if _normalize_commit_sha(parent_sha) == commit_sha:
+                    has_direct_future_child = True
+                    next_commit_column = future_info.get('column', 0)
+                    break
+            if has_direct_future_child:
+                break
+        
+        # Check if this commit diverges (has children in different columns)
+        if diverges and line_type == "commit":
+            # Find the next commit that's a child of this one
+            child_columns = set()
+            for child_sha in info.get('children', []):
+                child_normalized = _normalize_commit_sha(child_sha)
+                for c in commits:
+                    if _normalize_commit_sha(c.sha) == child_normalized:
+                        child_info = graph_structure.get(c.sha, {})
+                        child_columns.add(child_info.get('column', 0))
+                        break
+            
+            # If we have children in different columns, show divergence
+            if len(child_columns) > 1:
+                # Find the rightmost child column
+                rightmost_child_col = max(child_columns)
+                if rightmost_child_col > column:
+                    # Branch diverges to the right
+                    if self.graph_style == "dots":
+                        if column == 0:
+                            return Text("│/ ", style="dim white")
+                        else:
+                            return Text("│/ " + "  " * (column - 1), style="dim white")
+                    else:
+                        if column == 0:
+                            return Text("|/ ", style="dim white")
+                        else:
+                            return Text("|/ " + "  " * (column - 1), style="dim white")
+        
+        # Build prefix based on column and active columns
+        if self.graph_style == "dots":
+            # Dots style: use vertical lines
+            if column == 0:
+                if has_direct_future_child or column in active_columns:
+                    if line_type == "commit":
+                        return Text("● ", style="dim white")  # Dot for commit
+                    else:
+                        return Text("│ ", style="dim white")  # Vertical line for continuation
+                else:
+                    if line_type == "commit":
+                        return Text("● ", style="dim white")
+                    else:
+                        return Text("  ", style="dim white")
+            else:
+                # Multiple columns: show lines for each column
+                prefix = ""
+                for col in range(column):
+                    if col in active_columns or col < column:
+                        prefix += "│ "
+                    else:
+                        prefix += "  "
+                
+                if line_type == "commit":
+                    prefix += "● "  # Dot for commit
+                elif has_direct_future_child or column in active_columns:
+                    prefix += "│ "  # Vertical line
+                else:
+                    prefix += "  "
+                
+                return Text(prefix, style="dim white")
+        else:
+            # ASCII style
+            if column == 0:
+                if has_direct_future_child or column in active_columns:
+                    if line_type == "commit":
+                        return Text("* ", style="dim white")  # Star for commit
+                    else:
+                        return Text("| ", style="dim white")  # Vertical line for continuation
+                else:
+                    if line_type == "commit":
+                        return Text("* ", style="dim white")
+                    else:
+                        return Text("  ", style="dim white")
+            else:
+                # Multiple columns: show lines for each column
+                prefix = ""
+                for col in range(column):
+                    if col in active_columns or col < column:
+                        prefix += "| "
+                    else:
+                        prefix += "  "
+                
+                if line_type == "commit":
+                    prefix += "* "  # Star for commit
+                elif has_direct_future_child or column in active_columns:
+                    prefix += "| "  # Vertical line
+                else:
+                    prefix += "  "
+                
+                return Text(prefix, style="dim white")
+    
+    def _build_commit_line(self, commit: CommitInfo, index: int, total: int, git_service, branch: str, graph_structure: dict = None, commits: list[CommitInfo] = None, git_graph_prefix_colored: str = None) -> Text:
+        """
+        Build full commit display with graph visualization, 'commit' prefix, Merge: line, full message, and Signed-off-by.
+        Format matches git log --graph style.
+        
+        Args:
+            git_graph_prefix_colored: Colored graph prefix from git (with ANSI codes) if available
+        """
         from rich.text import Text
         from datetime import datetime
         from time import timezone
         
-        # OPTIMIZATION: Use simpler Text construction to reduce Rich overhead
-        # Build as plain string first, then convert to Text with minimal styling
-        short_sha = commit.sha[:8]
+        # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
+        commit_sha = _normalize_commit_sha(commit.sha)
+        short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
         
-        # Graph indicator
-        graph_indicator = "│ " if index < total - 1 else "  "
+        # Calculate graph prefix using graph structure
+        commits_list = commits if commits is not None else []
+        if graph_structure is None:
+            graph_prefix = Text("│ " if index < total - 1 else "  ", style="dim white")
+        else:
+            graph_prefix = self._calculate_graph_prefix(commit, index, total, graph_structure, commits_list, "commit", git_graph_prefix_colored)
+            # Ensure graph_prefix is a Text object
+            if isinstance(graph_prefix, str):
+                graph_prefix = Text(graph_prefix, style="dim white")
         
-        # Build refs string (simplified)
-        refs_str = ""
+        # Format date as relative (e.g., "11 days ago")
+        commit_date = self._format_relative_date(commit.timestamp)
+        
+        # Get commit refs and merge info
+        commit_refs = {}
+        is_merge = False
+        merge_parents = []
         if git_service is not None:
             try:
-                commit_refs = git_service.get_commit_refs(commit.sha)
-                refs_parts = []
-                if commit_refs.get("is_head"):
-                    refs_parts.append("HEAD")
-                local_branches = [b for b in commit_refs.get("branches", []) if b != branch]
-                if local_branches:
-                    refs_parts.append(", ".join(local_branches[:2]))  # Limit to 2 branches
-                remote_branches = [rb for rb in commit_refs.get("remote_branches", []) if rb.startswith("origin/")]
-                if remote_branches:
-                    refs_parts.append(", ".join(remote_branches[:1]))  # Limit to 1 remote
-                tags = commit_refs.get("tags", [])
-                if tags:
-                    refs_parts.append(f"tag: {tags[0]}")  # Limit to 1 tag
-                if commit_refs.get("is_merge"):
-                    refs_parts.append("Merge")
-                
-                if refs_parts:
-                    refs_str = f"({', '.join(refs_parts[:3])}) "  # Limit total refs
+                normalized_sha = _normalize_commit_sha(commit.sha)
+                commit_refs = git_service.get_commit_refs(normalized_sha)
+                is_merge = commit_refs.get("is_merge", False)
+                merge_parents = commit_refs.get("merge_parents", [])
             except Exception:
                 pass
         
-        # Author and date (simplified format)
-        commit_datetime = datetime.fromtimestamp(commit.timestamp)
-        offset_seconds = -timezone if timezone else 0
-        offset_hours = offset_seconds // 3600
-        offset_sign = '+' if offset_hours >= 0 else '-'
-        offset_abs = abs(offset_hours)
-        offset_str = f"{offset_sign}{offset_abs:02d}00"
-        commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
+        # Get full commit message and Signed-off-by lines
+        full_message_info = {}
+        if git_service is not None:
+            try:
+                normalized_sha = _normalize_commit_sha(commit.sha)
+                full_message_info = git_service.get_commit_message_full(normalized_sha)
+            except Exception:
+                pass
         
-        # Build as single Text object with minimal segments (faster than many append calls)
-        line1 = f"{graph_indicator}{short_sha} {refs_str}{commit.summary}"
-        line2 = f"{graph_indicator}Author: {commit.author} | Date: {commit_date}"
+        full_message = full_message_info.get("message", commit.summary)
+        signed_off_by = full_message_info.get("signed_off_by", [])
         
-        commit_line = Text()
-        commit_line.append(line1, style="white")
-        commit_line.append("\n", style="white")
-        commit_line.append(line2, style="dim white")
+        # Build refs for display with colors
+        refs_parts = []
+        refs_styles = []  # Store styles for each ref part
         
-        return commit_line
+        if commit_refs.get("is_head"):
+            if branch:
+                refs_parts.append(f"HEAD -> {branch}")
+                refs_styles.append("green")  # HEAD -> branch in green
+            else:
+                refs_parts.append("HEAD")
+                refs_styles.append("green")
+        
+        local_branches = [b for b in commit_refs.get("branches", []) if b != branch]
+        for b in local_branches[:2]:
+            refs_parts.append(b)
+            refs_styles.append("cyan")  # Local branches in cyan
+        
+        remote_branches = [rb for rb in commit_refs.get("remote_branches", []) if rb.startswith("origin/")]
+        for rb in remote_branches[:1]:
+            refs_parts.append(rb)
+            refs_styles.append("dim white")  # Remote branches in dim white
+        
+        tags = commit_refs.get("tags", [])
+        for tag in tags[:1]:
+            refs_parts.append(f"tag: {tag}")
+            refs_styles.append("yellow")  # Tags in yellow
+        
+        # Build commit display
+        commit_display = Text()
+        
+        # Line 1: graph prefix (includes * or ●) + commit SHA (refs) [Merge branch 'xxx' if merge]
+        # graph_prefix is already a Text object with colors
+        commit_display.append(graph_prefix)
+        commit_display.append("commit ", style="dim white")
+        # Use full SHA (at least 10 chars, show full if available)
+        full_sha = commit_sha[:10] if len(commit_sha) >= 10 else commit_sha
+        commit_display.append(full_sha, style="yellow")  # SHA in yellow/orange
+        if refs_parts:
+            commit_display.append(" (", style="dim white")
+            for i, (ref_part, ref_style) in enumerate(zip(refs_parts, refs_styles)):
+                if i > 0:
+                    commit_display.append(", ", style="dim white")
+                commit_display.append(ref_part, style=ref_style)
+            commit_display.append(")", style="dim white")
+        
+        # For merge commits only, add "Merge branch 'xxx'" on first line
+        # Regular commits: no summary on first line
+        if is_merge and commit.summary.startswith("Merge"):
+            commit_display.append(" ", style="white")
+            commit_display.append(commit.summary, style="white")
+        
+        commit_display.append("\n", style="white")
+        
+        # Check for merge continuation line from git (|\)
+        normalized_sha = _normalize_commit_sha(commit.sha)
+        git_prefix_colored = self._cached_graph_prefixes_colored.get(normalized_sha)
+        merge_cont_line = None
+        diverge_cont_line = None
+        
+        if git_prefix_colored and isinstance(git_prefix_colored, list) and len(git_prefix_colored) > 1:
+            # Check continuation lines for merge (|\) or divergence (|/)
+            from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+            for cont_line in git_prefix_colored[1:]:
+                plain_cont = strip_ansi_codes(cont_line)
+                if '\\' in plain_cont:
+                    merge_cont_line = cont_line
+                elif '/' in plain_cont:
+                    diverge_cont_line = cont_line
+        
+        # Add merge continuation line if present (appears as separate line after commit)
+        if merge_cont_line:
+            from pygitzen.git_graph import convert_graph_prefix_to_rich
+            merge_cont_rich = convert_graph_prefix_to_rich(merge_cont_line)
+            commit_display.append(merge_cont_rich)
+            commit_display.append("\n", style="white")
+        
+        # Add divergence continuation line if present (appears after commit line)
+        if diverge_cont_line:
+            from pygitzen.git_graph import convert_graph_prefix_to_rich
+            diverge_cont_rich = convert_graph_prefix_to_rich(diverge_cont_line)
+            commit_display.append(diverge_cont_rich)
+            commit_display.append("\n", style="white")
+        
+        # Line 2: Merge: parent1 parent2 ... (only for merge commits)
+        if is_merge and len(merge_parents) >= 2:
+            # Use regular continuation prefix (|) not merge prefix (|\)
+            continuation_prefix = self._calculate_graph_prefix(commit, index, total, graph_structure or {}, commits_list, "author", git_graph_prefix_colored) if graph_structure else (Text("│ ", style="dim white") if index < total - 1 else Text("  ", style="dim white"))
+            if isinstance(continuation_prefix, str):
+                continuation_prefix = Text(continuation_prefix, style="dim white")
+            commit_display.append(continuation_prefix)
+            # Convert parent SHAs to 10-char short format
+            parent_shas_short = [p[:10] for p in merge_parents]
+            commit_display.append(f"Merge: {' '.join(parent_shas_short)}", style="dim white")
+            commit_display.append("\n", style="white")
+        
+        # Calculate continuation prefix (vertical lines, not commit marker) - reuse if already calculated
+        if 'continuation_prefix' not in locals():
+            continuation_prefix = self._calculate_graph_prefix(commit, index, total, graph_structure or {}, commits_list, "author", git_graph_prefix_colored) if graph_structure else (Text("│ ", style="dim white") if index < total - 1 else Text("  ", style="dim white"))
+            # Ensure continuation_prefix is Text
+            if isinstance(continuation_prefix, str):
+                continuation_prefix = Text(continuation_prefix, style="dim white")
+        
+        # Line 3: Author
+        commit_display.append(continuation_prefix)
+        commit_display.append("Author: ", style="dim white")
+        commit_display.append(commit.author, style="white")
+        commit_display.append("\n", style="white")
+        
+        # Line 4: Date
+        commit_display.append(continuation_prefix)
+        commit_display.append("Date: ", style="dim white")
+        commit_display.append(commit_date, style="dim white")
+        commit_display.append("\n", style="white")
+        
+        # Line 5: Blank line
+        commit_display.append(continuation_prefix)
+        commit_display.append("\n", style="white")
+        
+        # Lines 6+: Full commit message
+        message_lines = full_message.split('\n')
+        for msg_line in message_lines:
+            if msg_line.strip():  # Skip empty lines in message
+                commit_display.append(continuation_prefix)
+                commit_display.append(msg_line, style="white")
+                commit_display.append("\n", style="white")
+        
+        # Blank line before Signed-off-by
+        if signed_off_by:
+            commit_display.append(continuation_prefix)
+            commit_display.append("\n", style="white")
+        
+        # Signed-off-by lines
+        for signer in signed_off_by:
+            commit_display.append(continuation_prefix)
+            commit_display.append(f"Signed-off-by: {signer}", style="dim white")
+            commit_display.append("\n", style="white")
+        
+        return commit_display
 
 
 class PatchPane(Static):
@@ -734,8 +1564,19 @@ class PatchPane(Static):
         offset_str = f"{offset_sign}{offset_abs:02d}00"
         commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
         
+        # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
+        commit_sha = _normalize_commit_sha(commit.sha)
+        
+        # Debug: Log if SHA was fixed
+        if commit.sha != commit_sha:
+            try:
+                with open("debug_sha_format.log", "a", encoding="utf-8") as f:
+                    f.write(f"FIXED SHA: original={repr(commit.sha)}, normalized={commit_sha}\n")
+            except:
+                pass
+        
         # Create commit header
-        header_text = f"""commit {commit.sha}
+        header_text = f"""commit {commit_sha}
 Author: {commit.author}
 Date: {commit_date}
 
@@ -927,6 +1768,8 @@ class PygitzenApp(App):
         height: 1fr;
         border: solid white;
         overflow: auto;
+        overflow-x: auto;
+        overflow-y: auto;
         scrollbar-size: 1 1;
     }
     
@@ -942,6 +1785,9 @@ class PygitzenApp(App):
     #log-pane {
         background: #1e1e1e;
         min-height: 100%;
+        width: auto;
+        min-width: 100%;
+        text-wrap: wrap;
     }
     
     #command-log-pane {
@@ -1096,6 +1942,7 @@ class PygitzenApp(App):
         Binding("b", "branch", "Branch"),
         Binding("s", "stash", "Stash"),
         Binding("+", "load_more", "More"),
+        Binding("g", "toggle_graph_style", "Toggle Graph Style"),
     ]
 
     active_branch: reactive[str | None] = reactive(None)
@@ -1286,6 +2133,65 @@ class PygitzenApp(App):
     
     def _check_virtual_scroll_expansion(self) -> None:
         """Periodically check if we need to expand virtual scrolling (fallback if scroll events don't fire)."""
+        # Check for native git log virtual scrolling first
+        if self._view_mode == "log" and self.log_pane._native_git_log_lines:
+            try:
+                # Get scroll container
+                container = self.query_one("#patch-scroll-container", None)
+                if container is None:
+                    return
+                
+                # Get scroll position
+                scroll_y = 0
+                max_scroll_y = 0
+                
+                if hasattr(container, 'scroll_y'):
+                    scroll_y = container.scroll_y
+                if hasattr(container, 'max_scroll_y'):
+                    max_scroll_y = container.max_scroll_y
+                elif hasattr(container, 'virtual_size'):
+                    max_scroll_y = container.virtual_size.height if hasattr(container.virtual_size, 'height') else 0
+                
+                # Check if we need to load more commits for native git log
+                if max_scroll_y > 0 and not self.log_pane._native_git_log_loading:
+                    scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                    
+                    # If scrolled near bottom (85%), load more commits
+                    if scroll_percent >= 0.85:
+                        _log_timing_message(f"[TIMING] [PERIODIC CHECK] Log pane: Loading more commits (scroll_percent={scroll_percent:.2f}, current_count={self.log_pane._native_git_log_count})")
+                        # Load more commits - use same wrapper approach as load_commits_for_log
+                        if self.active_branch and self.git:
+                            # Get repo_path (same logic as load_commits_for_log)
+                            repo_path_to_use = None
+                            if hasattr(self, 'repo_path') and self.repo_path:
+                                repo_path_to_use = self.repo_path
+                            elif hasattr(self.git, 'repo_path'):
+                                try:
+                                    repo_path_to_use = self.git.repo_path
+                                except:
+                                    pass
+                            elif hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
+                                try:
+                                    repo_path_to_use = self.git.repo.path
+                                except:
+                                    pass
+                            
+                            # Create wrapper with repo_path
+                            class GitServiceWithPath:
+                                def __init__(self, git_service, repo_path):
+                                    self.git_service = git_service
+                                    self.repo_path = Path(repo_path) if repo_path else None
+                                    if hasattr(git_service, 'repo'):
+                                        self.repo = git_service.repo
+                            
+                            git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use or ".")
+                            basic_branch_info = {"name": self.active_branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
+                            self.log_pane._show_native_git_log(self.active_branch, basic_branch_info, git_service_wrapper, append=True)
+                        return
+            except Exception:
+                pass  # Silently fail if check fails
+        
+        # Original virtual scrolling check for custom rendering (if still used)
         if self._view_mode != "log" or not self.active_branch:
             return
         
@@ -1364,7 +2270,9 @@ class PygitzenApp(App):
                                     self.git_service = git_service
                                     self.refs_map = refs_map
                                 def get_commit_refs(self, commit_sha: str):
-                                    return self.refs_map.get(commit_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
+                                    # Normalize SHA before lookup (fix for Cython version)
+                                    normalized_sha = _normalize_commit_sha(commit_sha)
+                                    return self.refs_map.get(normalized_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
                             git_service = CachedGitService(self.git, self.log_pane._cached_commit_refs_map)
                         
                         # Force re-render by bypassing debounce
@@ -1467,6 +2375,20 @@ class PygitzenApp(App):
             self.command_log_pane.styles.display = "block"
         else:
             self.command_log_pane.styles.display = "none"
+    
+    def action_toggle_graph_style(self) -> None:
+        """Toggle graph visualization style between ASCII (*, |, |/, |\\) and dots (●, │)."""
+        if self.log_pane.graph_style == "ascii":
+            self.log_pane.graph_style = "dots"
+        else:
+            self.log_pane.graph_style = "ascii"
+        
+        # Refresh the log view to show the new style
+        if self.active_branch and self._view_mode == "log":
+            # Re-render the log with the new style
+            self.log_pane._last_render_time = 0  # Force immediate render
+            self._update_branch_info_ui(self.active_branch, self.log_pane._cached_branch_info)
+    
 
     def refresh_data_fast(self) -> None:
         """Load UI immediately with minimal data (fast, non-blocking)."""
@@ -1679,73 +2601,147 @@ class PygitzenApp(App):
         return [commit for _, commit in scored_commits]
     
     def load_commits_for_log(self, branch: str, reset: bool = True) -> None:
-        """Load commits for log view with full history (optimized - fast initial load)."""
+        """Load commits for log view - now uses native git log directly (fast)."""
         log_start = time.perf_counter()
         _log_timing_message(f"--- load_commits_for_log START (branch: {branch}, reset: {reset}) ---")
         
         # Update Commits pane title to show which branch (only on reset, preserve title when loading more)
         if reset:
             self.commits_pane.set_branch(branch)
-        # When reset=False (loading more), don't call set_branch as it clears the count
-        # The title will be preserved from the previous update
         
         # Reset pagination if this is a new branch or reset requested
         if reset or self.active_branch != branch:
             self.log_pane._loaded_commits_count = 0
             self.log_pane._total_commits_count = 0
-            # DISABLED FOR TESTING: Don't reset virtual scrolling limit
-            # self.log_pane._max_rendered_commits = 50
             self.log_pane._cached_commits = []  # Clear old cached commits
         
-        # TESTING: Try git-native command first (has timeout), fallback to dulwich if it fails
+        # Load commits for commits pane (left side) - still needed for that pane
+        # But for log pane (right side), we use native git log directly (much faster)
         list_start = time.perf_counter()
-        skip = self.log_pane._loaded_commits_count if not reset else 0
+        skip = 0
         max_count = self.log_initial_size if reset else self.page_size
         
-        # Try git-native version first (has timeout support)
+        # Load commits for commits pane only (left side)
         if hasattr(self.git, 'list_commits_native'):
             try:
-                loaded_commits = self.git.list_commits_native(branch, max_count=max_count, skip=skip, show_full_history=False, timeout=30)
-                _log_timing_message(f"  list_commits_native (git log): used")
+                loaded_commits = self.git.list_commits_native(branch, max_count=max_count, skip=skip, show_full_history=False, timeout=10)
             except Exception as e:
-                _log_timing_message(f"  list_commits_native failed, using dulwich: {e}")
                 loaded_commits = self.git.list_commits(branch, max_count=max_count, skip=skip, show_full_history=False)
         else:
-            # Fallback to dulwich if native method doesn't exist
             loaded_commits = self.git.list_commits(branch, max_count=max_count, skip=skip, show_full_history=False)
         list_elapsed = time.perf_counter() - list_start
-        _log_timing_message(f"  list_commits (show_full_history=False, skip={skip}): {list_elapsed:.4f}s ({len(loaded_commits)} commits)")
+        _log_timing_message(f"  list_commits for commits pane: {list_elapsed:.4f}s ({len(loaded_commits)} commits)")
         
-        # DECOUPLED: Keep commits pane and log pane separate
-        # log_commits is for the log pane (right side), commits is for commits pane (left side)
-        # Both should be populated initially, but can diverge later (e.g., when scrolling loads more in log pane)
+        # Update commits pane (left side)
         if reset:
-            self.log_commits = loaded_commits.copy()  # Store commits for log pane
-            # Also populate commits pane initially (they can diverge later)
-            self.all_commits = loaded_commits.copy()  # Store all commits for search
-            # Apply search filter if there's a search query
+            self.all_commits = loaded_commits.copy()
             if self._search_query:
                 self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
             else:
                 self.commits = loaded_commits.copy()
             self.loaded_commits = len(self.commits)
-            # Update commits pane
             self.commits_pane.set_commits(self.commits)
             self._update_commits_title()
-        else:
-            # Append new commits to log pane only (commits pane loads separately via "+" key)
-            self.log_commits.extend(loaded_commits)
         
-        # Update log pane loaded count
-        self.log_pane._loaded_commits_count = len(self.log_commits)
-        
-        # Show basic log immediately (without commit refs - fast)
+        # Show native git log in log pane (right side) - much faster, no dulwich needed
         basic_branch_info = {"name": branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
         show_log_start = time.perf_counter()
         try:
-            self.log_pane.show_branch_log(branch, self.log_commits, basic_branch_info, None, append=not reset)  # Pass None to skip commit refs
+            # Pass git service AND repo_path (for cython compatibility)
+            # Use self.repo_path from app if available, otherwise try to get from git_service
+            repo_path_to_use = None
+            
+            # Method 1: Try self.repo_path from app (should always be set during initialization)
+            if hasattr(self, 'repo_path'):
+                try:
+                    repo_path_value = self.repo_path
+                    # Convert to string if it's a Path object, then check if it's valid
+                    if repo_path_value:
+                        if isinstance(repo_path_value, Path):
+                            repo_path_to_use = str(repo_path_value)
+                        else:
+                            repo_path_to_use = str(repo_path_value)
+                        # Debug log
+                        try:
+                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                                f.write(f"DEBUG load_commits_for_log: Using self.repo_path={repo_path_to_use} for branch={branch}\n")
+                        except:
+                            pass
+                except Exception as e:
+                    try:
+                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                            f.write(f"DEBUG load_commits_for_log: Error getting self.repo_path: {e}\n")
+                    except:
+                        pass
+            
+            # Method 2: Try to get from git_service (for cython, this might not work)
+            if not repo_path_to_use:
+                try:
+                    repo_path_to_use = getattr(self.git, 'repo_path', None)
+                except:
+                    pass
+            
+            # Method 3: Try via repo.path
+            if not repo_path_to_use:
+                try:
+                    if hasattr(self.git, 'repo'):
+                        repo = getattr(self.git, 'repo', None)
+                        if repo and hasattr(repo, 'path'):
+                            repo_path_to_use = getattr(repo, 'path', None)
+                except:
+                    pass
+            
+            # Fallback: use current directory (shouldn't happen, but just in case)
+            if not repo_path_to_use:
+                repo_path_to_use = "."
+            
+            class GitServiceWithPath:
+                def __init__(self, git_service, repo_path):
+                    self.git_service = git_service
+                    # Always set repo_path as Path object - this is critical for cython compatibility
+                    if isinstance(repo_path, Path):
+                        self.repo_path = repo_path
+                    elif isinstance(repo_path, str):
+                        self.repo_path = Path(repo_path)
+                    else:
+                        self.repo_path = Path(str(repo_path))
+                    # Also expose repo if available
+                    if hasattr(git_service, 'repo'):
+                        self.repo = git_service.repo
+                    # Debug: verify repo_path is set
+                    if not self.repo_path or str(self.repo_path) == ".":
+                        try:
+                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                                f.write(f"WARNING: GitServiceWithPath created with invalid repo_path: {repo_path}\n")
+                                f.write(f"self.repo_path value: {self.repo_path}\n")
+                        except:
+                            pass
+            
+            git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use)
+            
+            # Debug: verify wrapper has repo_path before passing
+            try:
+                wrapper_repo_path = getattr(git_service_wrapper, 'repo_path', None)
+                if wrapper_repo_path:
+                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                        f.write(f"SUCCESS: GitServiceWithPath wrapper created with repo_path={wrapper_repo_path} for branch={branch}\n")
+                        f.write(f"wrapper type: {type(git_service_wrapper)}\n")
+                        f.write(f"wrapper.repo_path type: {type(wrapper_repo_path)}\n\n")
+                else:
+                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                        f.write(f"ERROR: GitServiceWithPath wrapper missing repo_path for branch={branch}\n")
+                        f.write(f"repo_path_to_use was: {repo_path_to_use}\n")
+                        f.write(f"self.repo_path was: {getattr(self, 'repo_path', 'NOT_SET')}\n\n")
+            except Exception as e:
+                try:
+                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
+                        f.write(f"ERROR checking wrapper: {e}\n\n")
+                except:
+                    pass
+            
+            self.log_pane.show_branch_log(branch, [], basic_branch_info, git_service_wrapper, append=not reset)
             show_log_elapsed = time.perf_counter() - show_log_start
-            _log_timing_message(f"  show_branch_log (basic, no refs, append={not reset}): {show_log_elapsed:.4f}s")
+            _log_timing_message(f"  show_branch_log (native git): {show_log_elapsed:.4f}s")
         except Exception as e:
             # Log error if show_branch_log fails
             import sys
@@ -1883,6 +2879,10 @@ class PygitzenApp(App):
     def _update_commit_count_ui(self, branch: str, count: int) -> None:
         """Update commit count UI (called from main thread)."""
         try:
+            # Skip if we're using native git log (it handles its own updates)
+            if self.log_pane._native_git_log_lines:
+                return
+            
             # Only update if we're still viewing this branch
             if self.active_branch == branch and count > 0:
                 self.total_commits = count
@@ -1905,7 +2905,9 @@ class PygitzenApp(App):
                                 self.git_service = git_service
                                 self.refs_map = refs_map
                             def get_commit_refs(self, commit_sha: str):
-                                return self.refs_map.get(commit_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
+                                # Normalize SHA before lookup (fix for Cython version)
+                                normalized_sha = _normalize_commit_sha(commit_sha)
+                                return self.refs_map.get(normalized_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
                         git_service = CachedGitService(self.git, self.log_pane._cached_commit_refs_map)
                     
                     # Force re-render with correct total count
@@ -2073,6 +3075,10 @@ class PygitzenApp(App):
     def _update_commits_full_history_ui(self, branch: str, full_commits: list) -> None:
         """Update commits with full history (called from main thread)."""
         try:
+            # Skip if we're using native git log (it handles its own updates)
+            if self.log_pane._native_git_log_lines:
+                return
+            
             # Only update if we're still viewing this branch
             if self.active_branch == branch and self._view_mode == "log":
                 self.all_commits = full_commits.copy()
@@ -2148,6 +3154,10 @@ class PygitzenApp(App):
         import time
         update_start = time.perf_counter()
         try:
+            # Skip if we're using native git log (it handles its own updates)
+            if self.log_pane._native_git_log_lines:
+                return
+            
             # Only update if we're still viewing this branch in log mode
             if self.active_branch == branch and self._view_mode == "log" and self.log_commits:
                 # OPTIMIZATION: Always cache branch info, only re-render if we have cached refs ready
@@ -2170,7 +3180,9 @@ class PygitzenApp(App):
                             self.refs_map = refs_map
                         
                         def get_commit_refs(self, commit_sha: str):
-                            return self.refs_map.get(commit_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
+                            # Normalize SHA before lookup (fix for Cython version)
+                            normalized_sha = _normalize_commit_sha(commit_sha)
+                            return self.refs_map.get(normalized_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
                     
                     cached_git = CachedGitService(self.git, self.log_pane._cached_commit_refs_map)
                     # Virtual scrolling will limit rendering to _max_rendered_commits
@@ -2203,7 +3215,8 @@ class PygitzenApp(App):
                 
                 # OPTIMIZATION: Get refs for rendered commits in a single git log call (LazyGit approach)
                 # Instead of calling get_commit_refs() 200 times, use git log with %D format
-                commit_shas = [commit.sha for commit in commits_to_fetch]
+                # Normalize SHAs to ensure they're in proper hex format
+                commit_shas = [_normalize_commit_sha(commit.sha) for commit in commits_to_fetch]
                 
                 git_log_start = time.perf_counter()
                 commit_refs_map = self.git.get_commit_refs_from_git_log(branch, commit_shas)
@@ -2211,9 +3224,11 @@ class PygitzenApp(App):
                 _log_timing_message(f"[TIMING] [BACKGROUND]   get_commit_refs_from_git_log (single call): {git_log_elapsed:.4f}s ({len(commits_to_fetch)} commits, virtual scroll limit)")
                 
                 # Fill in any missing commits with empty refs (fallback) - only for rendered commits
+                # Use normalized SHA for lookup
                 for commit in commits_to_fetch:
-                    if commit.sha not in commit_refs_map:
-                        commit_refs_map[commit.sha] = {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []}
+                    normalized_sha = _normalize_commit_sha(commit.sha)
+                    if normalized_sha not in commit_refs_map:
+                        commit_refs_map[normalized_sha] = {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []}
                 
                 _log_timing_message(f"[TIMING] [BACKGROUND]   get_commit_refs TOTAL ({len(commits_to_fetch)} rendered commits): {git_log_elapsed:.4f}s (avg: {git_log_elapsed/len(commits_to_fetch):.6f}s per commit)")
                 
@@ -2246,6 +3261,10 @@ class PygitzenApp(App):
         import time
         update_start = time.perf_counter()
         try:
+            # Skip if we're using native git log (it handles its own updates)
+            if self.log_pane._native_git_log_lines:
+                return
+            
             # Only update if we're still viewing this branch in log mode
             if self.active_branch == branch and self._view_mode == "log" and self.log_commits:
                 # Always cache the refs map
@@ -2275,7 +3294,9 @@ class PygitzenApp(App):
                         self.refs_map = refs_map
                     
                     def get_commit_refs(self, commit_sha: str):
-                        return self.refs_map.get(commit_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
+                        # Normalize SHA before lookup (fix for Cython version)
+                        normalized_sha = _normalize_commit_sha(commit_sha)
+                        return self.refs_map.get(normalized_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
                 
                 cached_git = CachedGitService(self.git, commit_refs_map)
                 # Pass both branch_info and commit_refs together - single render
@@ -2351,9 +3372,11 @@ class PygitzenApp(App):
             diff_start = time.perf_counter()
             ci = self.commits[index]
             get_diff_start = time.perf_counter()
-            diff = self.git.get_commit_diff(ci.sha)
+            # Normalize SHA before using it
+            normalized_sha = _normalize_commit_sha(ci.sha)
+            diff = self.git.get_commit_diff(normalized_sha)
             get_diff_elapsed = time.perf_counter() - get_diff_start
-            _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {ci.sha[:8]})")
+            _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {normalized_sha[:8]})")
             show_start = time.perf_counter()
             self.patch_pane.show_commit_info(ci, diff)
             show_elapsed = time.perf_counter() - show_start
@@ -2420,7 +3443,7 @@ class PygitzenApp(App):
             except Exception:
                 pass  # Silently fail if scroll detection fails
         
-        # Handle scroll for log view (right side)
+        # Handle scroll for log view (right side) - native git log virtual scrolling
         # Check if scroll is from the log pane or its container
         if self._view_mode == "log" and (widget_id == "log-pane" or widget_id == "patch-scroll-container"):
             try:
@@ -2437,10 +3460,55 @@ class PygitzenApp(App):
                 if hasattr(widget, 'max_scroll_y'):
                     max_scroll_y = widget.max_scroll_y
                 elif hasattr(widget, 'virtual_size'):
-                    # Alternative: use virtual_size if available
                     max_scroll_y = widget.virtual_size.height if hasattr(widget.virtual_size, 'height') else 0
                 
                 # Also try to get from the scroll container if widget is log-pane
+                if widget_id == "log-pane" and hasattr(self, 'log_pane'):
+                    # Find the scroll container parent
+                    container = self.query_one("#patch-scroll-container", None)
+                    if container and hasattr(container, 'scroll_y'):
+                        scroll_y = container.scroll_y
+                        max_scroll_y = container.max_scroll_y if hasattr(container, 'max_scroll_y') else 0
+                
+                # Check if we need to load more commits for native git log
+                # Only do this if we're using native git log (have cached lines)
+                if max_scroll_y > 0 and self.log_pane._native_git_log_lines:
+                    scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                    
+                    # If scrolled near bottom (85%), load more commits
+                    if scroll_percent >= 0.85 and not self.log_pane._native_git_log_loading:
+                        _log_timing_message(f"[TIMING] [SCROLL] Log pane: Loading more commits (scroll_percent={scroll_percent:.2f}, current_count={self.log_pane._native_git_log_count})")
+                        # Load more commits - use same wrapper approach as load_commits_for_log
+                        if self.active_branch and self.git:
+                            # Get repo_path (same logic as load_commits_for_log)
+                            repo_path_to_use = None
+                            if hasattr(self, 'repo_path') and self.repo_path:
+                                repo_path_to_use = self.repo_path
+                            elif hasattr(self.git, 'repo_path'):
+                                try:
+                                    repo_path_to_use = self.git.repo_path
+                                except:
+                                    pass
+                            elif hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
+                                try:
+                                    repo_path_to_use = self.git.repo.path
+                                except:
+                                    pass
+                            
+                            # Create wrapper with repo_path
+                            class GitServiceWithPath:
+                                def __init__(self, git_service, repo_path):
+                                    self.git_service = git_service
+                                    self.repo_path = Path(repo_path) if repo_path else None
+                                    if hasattr(git_service, 'repo'):
+                                        self.repo = git_service.repo
+                            
+                            git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use or ".")
+                            basic_branch_info = {"name": self.active_branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
+                            self.log_pane._show_native_git_log(self.active_branch, basic_branch_info, git_service_wrapper, append=True)
+                    return  # Skip old virtual scrolling logic for native git log
+                
+                # OLD VIRTUAL SCROLLING LOGIC (for custom rendering - not used with native git log)
                 if widget_id == "log-pane" and hasattr(self, 'log_pane'):
                     # Find the scroll container parent
                     container = self.query_one("#patch-scroll-container", None)
@@ -2476,7 +3544,9 @@ class PygitzenApp(App):
                                             self.git_service = git_service
                                             self.refs_map = refs_map
                                         def get_commit_refs(self, commit_sha: str):
-                                            return self.refs_map.get(commit_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
+                                            # Normalize SHA before lookup (fix for Cython version)
+                                            normalized_sha = _normalize_commit_sha(commit_sha)
+                                            return self.refs_map.get(normalized_sha, {"branches": [], "remote_branches": [], "tags": [], "is_head": False, "is_merge": False, "merge_parents": []})
                                     git_service = CachedGitService(self.git, self.log_pane._cached_commit_refs_map)
                                 
                                 # Force re-render by bypassing debounce (we want immediate expansion)

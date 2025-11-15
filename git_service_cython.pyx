@@ -109,7 +109,28 @@ cdef class GitServiceCython:
             merge_base_bytes = bytes.fromhex(merge_base_sha) if merge_base_sha else None
             
             for index, (sha, commit) in enumerate(self._iter_commits_optimized(head, -1)):
-                commit_sha = sha.hex()
+                # Ensure commit_sha is always a hex string (not bytes)
+                # sha from _iter_commits_optimized is always bytes, so convert to hex
+                if isinstance(sha, bytes):
+                    commit_sha = sha.hex()
+                elif hasattr(sha, 'hex'):
+                    # If it has a hex method, use it
+                    commit_sha = sha.hex()
+                else:
+                    # Last resort: convert to string, but this should not happen
+                    commit_sha = str(sha) if not isinstance(sha, str) else sha
+                    # Validate it's a hex string
+                    if not all(c in '0123456789abcdefABCDEF' for c in commit_sha):
+                        # If not hex, try to get hex representation
+                        if isinstance(sha, (int, float)):
+                            commit_sha = format(int(sha), '040x')
+                        else:
+                            # Log error
+                            try:
+                                with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
+                                    f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
+                            except:
+                                pass
                 
                 # Stop at merge-base (don't include merge-base itself, only commits after it)
                 if merge_base_bytes and sha == merge_base_bytes:
@@ -157,7 +178,28 @@ cdef class GitServiceCython:
         yielded = 0
         
         for index, (sha, commit) in enumerate(self._iter_commits_optimized(head, -1)):
-            commit_sha = sha.hex()
+            # Ensure commit_sha is always a hex string (not bytes)
+            # sha from _iter_commits_optimized is always bytes, so convert to hex
+            if isinstance(sha, bytes):
+                commit_sha = sha.hex()
+            elif hasattr(sha, 'hex'):
+                # If it has a hex method, use it
+                commit_sha = sha.hex()
+            else:
+                # Last resort: convert to string, but this should not happen
+                commit_sha = str(sha) if not isinstance(sha, str) else sha
+                # Validate it's a hex string
+                if not all(c in '0123456789abcdefABCDEF' for c in commit_sha):
+                    # If not hex, try to get hex representation
+                    if isinstance(sha, (int, float)):
+                        commit_sha = format(int(sha), '040x')
+                    else:
+                        # Log error
+                        try:
+                            with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
+                                f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
+                        except:
+                            pass
             
             # If not main/master branch, exclude commits that exist in base branch
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
@@ -268,7 +310,11 @@ cdef class GitServiceCython:
         
         count = 0
         for sha, _ in self._iter_commits_optimized(head, -1):
-            commit_sha = sha.hex()
+            # Ensure commit_sha is always a hex string (not bytes)
+            if isinstance(sha, bytes):
+                commit_sha = sha.hex()
+            else:
+                commit_sha = str(sha) if not isinstance(sha, str) else sha
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
                 continue
             count += 1
@@ -417,18 +463,29 @@ cdef class GitServiceCython:
                 
                 if process.returncode == 0:
                     # Parse output: each line is: SHA\x00REFS\x00PARENTS\x00SUMMARY
+                    # Normalize commit_shas to lowercase for case-insensitive matching
+                    normalized_result_map = {sha.lower(): refs for sha, refs in result_map.items()}
+                    
                     for line in process.stdout.strip().split("\n"):
                         if not line:
                             continue
                         parts = line.split("\x00")
                         if len(parts) >= 3:
-                            sha = parts[0].strip()
+                            sha = parts[0].strip().lower()  # Normalize to lowercase
                             refs_str = parts[1].strip() if len(parts) > 1 else ""
                             parents_str = parts[2].strip() if len(parts) > 2 else ""
                             
-                            if sha in result_map:
+                            if sha in normalized_result_map:
                                 # Parse refs string (e.g., "HEAD -> master, tag: v0.15.2, origin/main")
-                                refs = result_map[sha]
+                                # Get the original SHA key (case-preserved) from normalized map
+                                original_sha = None
+                                for orig_sha in result_map.keys():
+                                    if orig_sha.lower() == sha:
+                                        original_sha = orig_sha
+                                        break
+                                
+                                if original_sha:
+                                    refs = result_map[original_sha]
                                 
                                 # Check if HEAD
                                 if "HEAD" in refs_str:
@@ -449,10 +506,18 @@ cdef class GitServiceCython:
                                         if branch_name and branch_name not in refs["branches"]:
                                             refs["branches"].append(branch_name)
                                     elif ref_part.startswith("tag: "):
-                                        # Tag: "tag: v0.15.2"
+                                        # Tag: "tag: v0.15.2" or "tag: v2.52.0-rc0"
                                         tag_name = ref_part.replace("tag: ", "").strip()
                                         if tag_name and tag_name not in refs["tags"]:
                                             refs["tags"].append(tag_name)
+                                    elif "tag:" in ref_part.lower():
+                                        # Handle case where tag might be in different format
+                                        # Extract tag name after "tag:" (case insensitive)
+                                        tag_parts = ref_part.split(":", 1)
+                                        if len(tag_parts) > 1:
+                                            tag_name = tag_parts[1].strip()
+                                            if tag_name and tag_name not in refs["tags"]:
+                                                refs["tags"].append(tag_name)
                                     elif "/" in ref_part and not ref_part.startswith("tag:"):
                                         # Remote branch: "origin/main"
                                         if ref_part not in refs["remote_branches"]:
@@ -606,28 +671,80 @@ cdef class GitServiceCython:
         return result
     
     def get_commit_diff(self, str sha_hex):
-        """Get diff for a commit."""
-        sha = bytes.fromhex(sha_hex)
-        commit = self.repo[sha]
-        parents = commit.parents
+        """Get diff for a commit using git-native command (avoids dulwich hex_to_sha issues)."""
+        import subprocess
+        import re
         
-        from dulwich.patch import write_tree_diff
-        import io
+        # Ensure sha_hex is a proper hex string (normalize if needed)
+        # Handle case where it might be bytes or wrong format
+        if isinstance(sha_hex, bytes):
+            # If it's already bytes, check if it's 20 bytes (binary) or 40 bytes (hex string as bytes)
+            if len(sha_hex) == 20:
+                # It's a binary SHA, convert to hex
+                sha_hex = sha_hex.hex()
+            elif len(sha_hex) == 40:
+                # It's a hex string as bytes, decode it
+                sha_hex = sha_hex.decode('ascii')
+            else:
+                # Try to decode as string
+                sha_hex = sha_hex.decode('ascii', errors='replace')
         
-        buf = io.BytesIO()
+        sha_hex = str(sha_hex).strip()
         
-        if not parents:
-            # Root commit (no parent) - show all files as additions
-            from dulwich.objects import Tree
-            empty_tree = Tree()
-            write_tree_diff(buf, self.repo.object_store, empty_tree, commit.tree)
-        else:
-            # Regular commit - show diff between parent and commit
-            parent = self.repo[parents[0]]
-            write_tree_diff(buf, self.repo.object_store, parent.tree, commit.tree)
+        # Validate and fix SHA format
+        if len(sha_hex) != 40 or not all(c in '0123456789abcdefABCDEF' for c in sha_hex):
+            # Try to extract valid hex
+            hex_match = re.search(r'[0-9a-fA-F]{40}', sha_hex)
+            if hex_match:
+                sha_hex = hex_match.group(0).lower()
+            else:
+                return f"Error: Invalid SHA format: {sha_hex[:20]}...\n"
         
-        diff_text = buf.getvalue().decode(errors="replace")
-        return diff_text
+        sha_hex = sha_hex.lower()
+        
+        # Use git show to get the diff (avoids dulwich's hex_to_sha issues completely)
+        try:
+            result = subprocess.run(
+                ['git', 'show', sha_hex, '--no-color'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0:
+                # git show includes commit message, extract just the diff part
+                # Look for the diff separator (usually starts with "diff --git")
+                output = result.stdout
+                diff_start = output.find('diff --git')
+                if diff_start >= 0:
+                    return output[diff_start:]
+                # If no diff separator found, return everything (might be root commit or special case)
+                return output
+            else:
+                # git show failed, log the error
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                try:
+                    with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                        f.write(f"[CYTHON] git show failed for {sha_hex}: returncode={result.returncode}, stderr={error_msg}\n")
+                except:
+                    pass
+                return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
+        except subprocess.TimeoutExpired:
+            try:
+                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                    f.write(f"[CYTHON] Timeout in git show for {sha_hex}\n")
+            except:
+                pass
+            return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
+        except Exception as e:
+            # Log error
+            try:
+                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                    f.write(f"[CYTHON] Error in git-native get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
+            except:
+                pass
+            return f"Error: Could not get diff for commit {sha_hex[:8]}. Exception: {type(e).__name__}\n"
     
     def _find_in_tree(self, tree, path_parts):
         """Recursively find file in tree and return its SHA."""
