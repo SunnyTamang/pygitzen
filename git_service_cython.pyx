@@ -76,15 +76,17 @@ cdef class GitServiceCython:
         remote_commits = set()
         try:
             remote_ref = f"refs/remotes/origin/{branch}".encode()
-            if remote_ref in self.repo.refs:
+            try:
                 remote_head = self.repo.refs[remote_ref]
-                for sha, _ in self._iter_commits_optimized(remote_head, 1000):
+                for sha, _ in self._iter_commits_optimized(remote_head, 200):
                     remote_commits.add(sha.hex())
+            except (KeyError, AttributeError, TypeError):
+                pass
         except Exception:
             pass
         return remote_commits
     
-    def list_commits(self, str branch, int max_count=200, int skip=0):
+    def list_commits(self, str branch, int max_count=200, int skip=0, show_full_history=False):
         """Optimized Cython version of list_commits."""
         ref = f"refs/heads/{branch}".encode()
         head = self.repo.refs[ref]
@@ -92,23 +94,112 @@ cdef class GitServiceCython:
         # Get remote commits to check push status
         remote_commits = self._get_remote_commits(branch)
         
+        # Determine if we should show full history
+        if show_full_history and branch not in ["main", "master"]:
+            # For feature branches with full history, find merge-base and show all commits from there
+            base_branch_names = ["main", "master"]
+            merge_base_sha = None
+            for base_name in base_branch_names:
+                merge_base_sha = self.get_merge_base(branch, base_name)
+                if merge_base_sha:
+                    break
+            
+            commits = []
+            yielded = 0
+            merge_base_bytes = bytes.fromhex(merge_base_sha) if merge_base_sha else None
+            
+            for index, (sha, commit) in enumerate(self._iter_commits_optimized(head, -1)):
+                # Ensure commit_sha is always a hex string (not bytes)
+                # sha from _iter_commits_optimized is always bytes, so convert to hex
+                if isinstance(sha, bytes):
+                    commit_sha = sha.hex()
+                elif hasattr(sha, 'hex'):
+                    # If it has a hex method, use it
+                    commit_sha = sha.hex()
+                else:
+                    # Last resort: convert to string, but this should not happen
+                    commit_sha = str(sha) if not isinstance(sha, str) else sha
+                    # Validate it's a hex string
+                    if not all(c in '0123456789abcdefABCDEF' for c in commit_sha):
+                        # If not hex, try to get hex representation
+                        if isinstance(sha, (int, float)):
+                            commit_sha = format(int(sha), '040x')
+                        else:
+                            # Log error
+                            try:
+                                with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
+                                    f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
+                            except:
+                                pass
+                
+                # Stop at merge-base (don't include merge-base itself, only commits after it)
+                if merge_base_bytes and sha == merge_base_bytes:
+                    break
+                
+                # Apply skip for pagination
+                if yielded < skip:
+                    yielded += 1
+                    continue
+                
+                author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
+                summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
+                is_pushed = commit_sha in remote_commits
+                
+                commits.append(
+                    CommitInfo(
+                        sha=commit_sha,
+                        summary=summary,
+                        author=author,
+                        timestamp=int(commit.commit_time),
+                        pushed=is_pushed,
+                    )
+                )
+                if len(commits) >= max_count:
+                    break
+            return commits
+        
+        # Original behavior: exclude commits that exist in base branch
         # Get commits from base branch (main or master) to exclude shared history
         base_branch_commits = set()
         base_branch_names = ["main", "master"]
         
         for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                for sha, _ in self._iter_commits_optimized(base_head, 1000):
-                    base_branch_commits.add(sha.hex())
-                break
+            if base_name != branch:
+                base_ref = f"refs/heads/{base_name}".encode()
+                try:
+                    base_head = self.repo.refs[base_ref]
+                    for sha, _ in self._iter_commits_optimized(base_head, 200):
+                        base_branch_commits.add(sha.hex())
+                    break
+                except (KeyError, AttributeError, TypeError):
+                    continue
         
         commits = []
         yielded = 0
         
         for index, (sha, commit) in enumerate(self._iter_commits_optimized(head, -1)):
-            commit_sha = sha.hex()
+            # Ensure commit_sha is always a hex string (not bytes)
+            # sha from _iter_commits_optimized is always bytes, so convert to hex
+            if isinstance(sha, bytes):
+                commit_sha = sha.hex()
+            elif hasattr(sha, 'hex'):
+                # If it has a hex method, use it
+                commit_sha = sha.hex()
+            else:
+                # Last resort: convert to string, but this should not happen
+                commit_sha = str(sha) if not isinstance(sha, str) else sha
+                # Validate it's a hex string
+                if not all(c in '0123456789abcdefABCDEF' for c in commit_sha):
+                    # If not hex, try to get hex representation
+                    if isinstance(sha, (int, float)):
+                        commit_sha = format(int(sha), '040x')
+                    else:
+                        # Log error
+                        try:
+                            with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
+                                f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
+                        except:
+                            pass
             
             # If not main/master branch, exclude commits that exist in base branch
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
@@ -144,48 +235,58 @@ cdef class GitServiceCython:
         
         # Try to use Git's native counting first (much faster)
         try:
-            # Change to repo directory
-            original_cwd = os.getcwd()
-            os.chdir(str(self.repo_path))
-            
-            try:
-                # Use git rev-list --count for main/master branches
-                if branch in ["main", "master"]:
-                    result = subprocess.run(
-                        ['git', 'rev-list', '--count', branch],
-                        capture_output=True,
-                        text=True,
-                        timeout=5
-                    )
-                    if result.returncode == 0:
+            # Use cwd parameter instead of chdir for better reliability
+            # Use git rev-list --count for main/master branches (fastest)
+            if branch in ["main", "master"]:
+                result = subprocess.run(
+                    ['git', 'rev-list', '--count', branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=str(self.repo_path)
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    try:
                         return int(result.stdout.strip())
-                
-                # For other branches, use git rev-list with exclusion
+                    except ValueError:
+                        pass
+            
+            # For other branches, use git rev-list with exclusion
+            if branch not in ["main", "master"]:
                 base_branch_names = ["main", "master"]
                 for base_name in base_branch_names:
-                    if base_name != branch:
-                        # Try to get merge-base
-                        merge_base_result = subprocess.run(
-                            ['git', 'merge-base', base_name, branch],
+                    # Try to get merge-base
+                    merge_base_result = subprocess.run(
+                        ['git', 'merge-base', base_name, branch],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        cwd=str(self.repo_path)
+                    )
+                    if merge_base_result.returncode == 0 and merge_base_result.stdout.strip():
+                        merge_base = merge_base_result.stdout.strip()
+                        # Count commits from merge-base to branch
+                        count_result = subprocess.run(
+                            ['git', 'rev-list', '--count', f'{merge_base}..{branch}'],
                             capture_output=True,
                             text=True,
-                            timeout=5
+                            timeout=10,
+                            cwd=str(self.repo_path)
                         )
-                        if merge_base_result.returncode == 0:
-                            merge_base = merge_base_result.stdout.strip()
-                            # Count commits from merge-base to branch
-                            count_result = subprocess.run(
-                                ['git', 'rev-list', '--count', f'{merge_base}..{branch}'],
-                                capture_output=True,
-                                text=True,
-                                timeout=5
-                            )
-                            if count_result.returncode == 0:
+                        if count_result.returncode == 0 and count_result.stdout.strip():
+                            try:
                                 return int(count_result.stdout.strip())
-                        break
-            finally:
-                os.chdir(original_cwd)
-        except Exception:
+                            except ValueError:
+                                pass
+                    break
+        except Exception as e:
+            # Log error for debugging but continue to fallback
+            import sys
+            try:
+                with open("debug_count_commits.log", "a") as f:
+                    f.write(f"Error in native git count_commits for {branch}: {e}\n")
+            except:
+                pass
             # Fallback to Python iteration if Git command fails
             pass
         
@@ -197,16 +298,23 @@ cdef class GitServiceCython:
         base_branch_names = ["main", "master"]
         
         for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                for sha, _ in self._iter_commits_optimized(base_head, -1):
-                    base_branch_commits.add(sha.hex())
-                break
+            if base_name != branch:
+                base_ref = f"refs/heads/{base_name}".encode()
+                try:
+                    base_head = self.repo.refs[base_ref]
+                    for sha, _ in self._iter_commits_optimized(base_head, -1):
+                        base_branch_commits.add(sha.hex())
+                    break
+                except (KeyError, AttributeError, TypeError):
+                    continue
         
         count = 0
         for sha, _ in self._iter_commits_optimized(head, -1):
-            commit_sha = sha.hex()
+            # Ensure commit_sha is always a hex string (not bytes)
+            if isinstance(sha, bytes):
+                commit_sha = sha.hex()
+            else:
+                commit_sha = str(sha) if not isinstance(sha, str) else sha
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
                 continue
             count += 1
@@ -234,29 +342,409 @@ cdef class GitServiceCython:
         result.sort(key=get_branch_name)
         return result
     
+    def get_merge_base(self, str branch, str base_branch="main"):
+        """Find the merge-base (common ancestor) between branch and base_branch."""
+        import subprocess
+        import os
+        
+        if base_branch == branch:
+            return None
+        
+        # Check if base branch exists
+        base_ref = f"refs/heads/{base_branch}".encode()
+        try:
+            _ = self.repo.refs[base_ref]
+        except (KeyError, AttributeError, TypeError):
+            # Try master if main doesn't exist
+            if base_branch == "main":
+                base_branch = "master"
+                base_ref = f"refs/heads/{base_branch}".encode()
+                try:
+                    _ = self.repo.refs[base_ref]
+                except (KeyError, AttributeError, TypeError):
+                    return None
+            else:
+                return None
+        
+        # Check if branch exists
+        branch_ref = f"refs/heads/{branch}".encode()
+        try:
+            _ = self.repo.refs[branch_ref]
+        except (KeyError, AttributeError, TypeError):
+            return None
+        
+        try:
+            original_cwd = os.getcwd()
+            os.chdir(str(self.repo_path))
+            try:
+                # Use git merge-base command for reliable results
+                result = subprocess.run(
+                    ['git', 'merge-base', base_branch, branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    merge_base_sha = result.stdout.strip()
+                    return merge_base_sha
+            finally:
+                os.chdir(original_cwd)
+        except Exception:
+            # Fallback: find common ancestor manually using dulwich
+            try:
+                base_head = self.repo.refs[base_ref]
+                branch_head = self.repo.refs[branch_ref]
+                
+                # Get all ancestors of base branch
+                base_ancestors = set()
+                for sha, _ in self._iter_commits_optimized(base_head, 1000):
+                    base_ancestors.add(sha)
+                
+                # Walk branch history to find first common ancestor
+                for sha, _ in self._iter_commits_optimized(branch_head, 200):
+                    if sha in base_ancestors:
+                        return sha.hex()
+            except Exception:
+                pass
+        
+        return None
+    
+    def get_commit_refs_from_git_log(self, str branch, list commit_shas):
+        """
+        Get refs for multiple commits at once using git log (LazyGit optimization).
+        Uses git log with %D format to get refs in a single call instead of per-commit lookups.
+        
+        Returns a dict mapping commit_sha -> refs dict.
+        """
+        import subprocess
+        import os
+        
+        if not commit_shas:
+            return {}
+        
+        result_map = {}
+        
+        # Initialize all commits with empty refs
+        for sha in commit_shas:
+            result_map[sha] = {
+                "branches": [],
+                "remote_branches": [],
+                "tags": [],
+                "is_head": False,
+                "is_merge": False,
+                "merge_parents": [],
+            }
+        
+        try:
+            original_cwd = os.getcwd()
+            os.chdir(str(self.repo_path))
+            try:
+                # Use git log with %D format (ref names) - similar to LazyGit's approach
+                # Format: %H (hash) %x00 %D (ref names) %x00 %P (parents)
+                # This gets refs for all commits in one call
+                cmd = [
+                    "git", "log",
+                    branch,
+                    f"--max-count={len(commit_shas)}",
+                    "--oneline",
+                    "--pretty=format:%H%x00%D%x00%P%x00%s",
+                    "--decorate-refs=refs/heads/*",
+                    "--decorate-refs=refs/remotes/*",
+                    "--decorate-refs=refs/tags/*",
+                ]
+                
+                process = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=str(self.repo_path)
+                )
+                
+                if process.returncode == 0:
+                    # Parse output: each line is: SHA\x00REFS\x00PARENTS\x00SUMMARY
+                    # Normalize commit_shas to lowercase for case-insensitive matching
+                    normalized_result_map = {sha.lower(): refs for sha, refs in result_map.items()}
+                    
+                    for line in process.stdout.strip().split("\n"):
+                        if not line:
+                            continue
+                        parts = line.split("\x00")
+                        if len(parts) >= 3:
+                            sha = parts[0].strip().lower()  # Normalize to lowercase
+                            refs_str = parts[1].strip() if len(parts) > 1 else ""
+                            parents_str = parts[2].strip() if len(parts) > 2 else ""
+                            
+                            if sha in normalized_result_map:
+                                # Parse refs string (e.g., "HEAD -> master, tag: v0.15.2, origin/main")
+                                # Get the original SHA key (case-preserved) from normalized map
+                                original_sha = None
+                                for orig_sha in result_map.keys():
+                                    if orig_sha.lower() == sha:
+                                        original_sha = orig_sha
+                                        break
+                                
+                                if original_sha:
+                                    refs = result_map[original_sha]
+                                
+                                # Check if HEAD
+                                if "HEAD" in refs_str:
+                                    refs["is_head"] = True
+                                
+                                # Parse branches, remote branches, and tags
+                                # Format: "HEAD -> master, tag: v0.15.2, origin/main"
+                                ref_parts = [p.strip() for p in refs_str.split(",")]
+                                for ref_part in ref_parts:
+                                    ref_part = ref_part.strip()
+                                    if not ref_part:
+                                        continue
+                                    
+                                    # Skip HEAD -> part
+                                    if "HEAD ->" in ref_part:
+                                        # Extract branch name after "->"
+                                        branch_name = ref_part.split("->")[-1].strip()
+                                        if branch_name and branch_name not in refs["branches"]:
+                                            refs["branches"].append(branch_name)
+                                    elif ref_part.startswith("tag: "):
+                                        # Tag: "tag: v0.15.2" or "tag: v2.52.0-rc0"
+                                        tag_name = ref_part.replace("tag: ", "").strip()
+                                        if tag_name and tag_name not in refs["tags"]:
+                                            refs["tags"].append(tag_name)
+                                    elif "tag:" in ref_part.lower():
+                                        # Handle case where tag might be in different format
+                                        # Extract tag name after "tag:" (case insensitive)
+                                        tag_parts = ref_part.split(":", 1)
+                                        if len(tag_parts) > 1:
+                                            tag_name = tag_parts[1].strip()
+                                            if tag_name and tag_name not in refs["tags"]:
+                                                refs["tags"].append(tag_name)
+                                    elif "/" in ref_part and not ref_part.startswith("tag:"):
+                                        # Remote branch: "origin/main"
+                                        if ref_part not in refs["remote_branches"]:
+                                            refs["remote_branches"].append(ref_part)
+                                    elif ref_part and not ref_part.startswith("HEAD"):
+                                        # Local branch (without HEAD ->)
+                                        if ref_part not in refs["branches"]:
+                                            refs["branches"].append(ref_part)
+                                
+                                # Check if merge commit (multiple parents)
+                                if parents_str:
+                                    parent_list = [p.strip() for p in parents_str.split() if p.strip()]
+                                    if len(parent_list) > 1:
+                                        refs["is_merge"] = True
+                                        refs["merge_parents"] = parent_list
+                                
+                                # Also check merge status from dulwich for accuracy
+                                try:
+                                    commit_bytes = bytes.fromhex(sha)
+                                    commit = self.repo[commit_bytes]
+                                    if len(commit.parents) > 1:
+                                        refs["is_merge"] = True
+                                        if not refs["merge_parents"]:
+                                            refs["merge_parents"] = [p.hex() for p in commit.parents]
+                                except Exception:
+                                    pass
+            finally:
+                os.chdir(original_cwd)
+        except Exception:
+            # Fallback: if git log fails, return empty refs (will be filled by get_commit_refs if needed)
+            pass
+        
+        return result_map
+    
+    def get_commit_refs(self, str commit_sha):
+        """Get branch references and metadata for a commit."""
+        result = {
+            "branches": [],  # Local branches pointing to this commit
+            "remote_branches": [],  # Remote branches pointing to this commit
+            "tags": [],  # Tags pointing to this commit
+            "is_head": False,  # Whether this is HEAD
+            "is_merge": False,  # Whether this is a merge commit
+            "merge_parents": [],  # Parent commits if merge
+        }
+        
+        commit_bytes = bytes.fromhex(commit_sha)
+        
+        # Check local branches - use keys() iteration instead of as_dict()
+        # as_dict() causes segfault in Cython, so we iterate keys directly
+        try:
+            refs_prefix = b"refs/heads/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            branch_name = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["branches"].append(branch_name)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check remote branches
+        try:
+            refs_prefix = b"refs/remotes/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            remote_branch = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["remote_branches"].append(remote_branch)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check tags
+        try:
+            refs_prefix = b"refs/tags/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    try:
+                        ref_sha = self.repo.refs[ref_name]
+                        if ref_sha == commit_bytes:
+                            tag_name = ref_name[len(refs_prefix):].decode(errors="replace")
+                            result["tags"].append(tag_name)
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+        except Exception:
+            pass
+        
+        # Check if merge commit
+        try:
+            commit = self.repo[commit_bytes]
+            if len(commit.parents) > 1:
+                result["is_merge"] = True
+                result["merge_parents"] = [p.hex() for p in commit.parents]
+        except Exception:
+            pass
+        
+        return result
+    
+    def get_branch_info(self, str branch):
+        """Get information about a branch."""
+        result = {
+            "name": branch,
+            "head_sha": None,
+            "remote_tracking": None,  # e.g., "origin/main"
+            "upstream": None,  # Upstream branch name
+            "is_current": False,  # Whether this is the current branch
+        }
+        
+        try:
+            branch_ref = f"refs/heads/{branch}".encode()
+            try:
+                result["head_sha"] = self.repo.refs[branch_ref].hex()
+            except (KeyError, AttributeError, TypeError):
+                pass
+        except Exception:
+            pass
+        
+        # Check if current branch
+        try:
+            from dulwich import refs as dulwich_refs
+            # Use dulwich's follow to resolve symbolic refs safely
+            try:
+                head_ref = dulwich_refs.follow(self.repo, b"HEAD")
+                if head_ref and isinstance(head_ref, bytes) and head_ref.startswith(b"refs/heads/"):
+                    current_branch = head_ref.decode().split("/heads/")[-1]
+                    result["is_current"] = (current_branch == branch)
+            except (KeyError, AttributeError, TypeError, ValueError):
+                pass
+        except Exception:
+            pass
+        
+        # Check remote tracking
+        try:
+            remote_ref = f"refs/remotes/origin/{branch}".encode()
+            try:
+                # Try to access the ref - if it exists, we'll get it, otherwise KeyError
+                _ = self.repo.refs[remote_ref]
+                result["remote_tracking"] = f"origin/{branch}"
+                result["upstream"] = branch
+            except (KeyError, AttributeError, TypeError):
+                pass
+        except Exception:
+            pass
+        
+        return result
+    
     def get_commit_diff(self, str sha_hex):
-        """Get diff for a commit."""
-        sha = bytes.fromhex(sha_hex)
-        commit = self.repo[sha]
-        parents = commit.parents
+        """Get diff for a commit using git-native command (avoids dulwich hex_to_sha issues)."""
+        import subprocess
+        import re
         
-        from dulwich.patch import write_tree_diff
-        import io
+        # Ensure sha_hex is a proper hex string (normalize if needed)
+        # Handle case where it might be bytes or wrong format
+        if isinstance(sha_hex, bytes):
+            # If it's already bytes, check if it's 20 bytes (binary) or 40 bytes (hex string as bytes)
+            if len(sha_hex) == 20:
+                # It's a binary SHA, convert to hex
+                sha_hex = sha_hex.hex()
+            elif len(sha_hex) == 40:
+                # It's a hex string as bytes, decode it
+                sha_hex = sha_hex.decode('ascii')
+            else:
+                # Try to decode as string
+                sha_hex = sha_hex.decode('ascii', errors='replace')
         
-        buf = io.BytesIO()
+        sha_hex = str(sha_hex).strip()
         
-        if not parents:
-            # Root commit (no parent) - show all files as additions
-            from dulwich.objects import Tree
-            empty_tree = Tree()
-            write_tree_diff(buf, self.repo.object_store, empty_tree, commit.tree)
-        else:
-            # Regular commit - show diff between parent and commit
-            parent = self.repo[parents[0]]
-            write_tree_diff(buf, self.repo.object_store, parent.tree, commit.tree)
+        # Validate and fix SHA format
+        if len(sha_hex) != 40 or not all(c in '0123456789abcdefABCDEF' for c in sha_hex):
+            # Try to extract valid hex
+            hex_match = re.search(r'[0-9a-fA-F]{40}', sha_hex)
+            if hex_match:
+                sha_hex = hex_match.group(0).lower()
+            else:
+                return f"Error: Invalid SHA format: {sha_hex[:20]}...\n"
         
-        diff_text = buf.getvalue().decode(errors="replace")
-        return diff_text
+        sha_hex = sha_hex.lower()
+        
+        # Use git show to get the diff (avoids dulwich's hex_to_sha issues completely)
+        try:
+            result = subprocess.run(
+                ['git', 'show', sha_hex, '--no-color'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0:
+                # git show includes commit message, extract just the diff part
+                # Look for the diff separator (usually starts with "diff --git")
+                output = result.stdout
+                diff_start = output.find('diff --git')
+                if diff_start >= 0:
+                    return output[diff_start:]
+                # If no diff separator found, return everything (might be root commit or special case)
+                return output
+            else:
+                # git show failed, log the error
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                try:
+                    with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                        f.write(f"[CYTHON] git show failed for {sha_hex}: returncode={result.returncode}, stderr={error_msg}\n")
+                except:
+                    pass
+                return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
+        except subprocess.TimeoutExpired:
+            try:
+                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                    f.write(f"[CYTHON] Timeout in git show for {sha_hex}\n")
+            except:
+                pass
+            return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
+        except Exception as e:
+            # Log error
+            try:
+                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
+                    f.write(f"[CYTHON] Error in git-native get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
+            except:
+                pass
+            return f"Error: Could not get diff for commit {sha_hex[:8]}. Exception: {type(e).__name__}\n"
     
     def _find_in_tree(self, tree, path_parts):
         """Recursively find file in tree and return its SHA."""
@@ -482,7 +970,179 @@ cdef class GitServiceCython:
         return False
     
     def get_file_status(self):
-        """Optimized Cython version of get_file_status with early skipping."""
+        """Optimized version using native git status --porcelain (10x faster than dulwich)."""
+        import subprocess
+        import os
+        
+        # Try native git status first (much faster for large repos)
+        try:
+            # Use git status --porcelain for fast, parseable output
+            # Format: XY filename (X=index, Y=working tree)
+            result = subprocess.run(
+                ['git', 'status', '--porcelain', '-u'],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=str(self.repo_path)
+            )
+            # Debug: Log if git command fails
+            if result.returncode != 0:
+                try:
+                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
+                        f.write(f"[ERROR] git status failed: returncode={result.returncode}, stderr={result.stderr}\n")
+                except:
+                    pass
+            if result.returncode == 0:
+                # Get list of actually staged files to verify (fast check)
+                staged_files_set = set()
+                try:
+                    staged_result = subprocess.run(
+                        ['git', 'diff', '--cached', '--name-only'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=str(self.repo_path)
+                    )
+                    if staged_result.returncode == 0:
+                        staged_files_set = set(staged_result.stdout.strip().split('\n')) if staged_result.stdout.strip() else set()
+                except Exception:
+                    pass  # If verification fails, continue without it
+                
+                files = []
+                output_lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
+                # Debug: Log raw output
+                try:
+                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
+                        f.write(f"[DEBUG] Native git status output ({len(output_lines)} lines):\n")
+                        for line in output_lines[:10]:  # Log first 10 lines
+                            f.write(f"  {line}\n")
+                        f.write(f"[DEBUG] Actually staged files (from git diff --cached): {len(staged_files_set)} files\n")
+                        for staged_file in list(staged_files_set)[:5]:
+                            f.write(f"  {staged_file}\n")
+                except:
+                    pass
+                for line in output_lines:
+                    if not line.strip():
+                        continue
+                    # Parse porcelain format: XY filename
+                    # X = index status, Y = working tree status
+                    # Common values: M=modified, A=added, D=deleted, R=renamed, C=copied, ??=untracked
+                    # Format is usually "XY filename" (2 status chars + space + filename)
+                    # But can also be "M filename" where M+space is status, filename starts immediately
+                    if len(line) < 3:  # Need at least 2 status chars + 1 char filename
+                        continue
+                    # Ensure we have exactly 2 status chars - handle edge cases
+                    if line[0] == '?' and line[1] == '?':
+                        # Untracked file: "?? filename"
+                        status_code = '??'
+                        filename = line[3:].strip() if len(line) > 3 and line[2] == ' ' else line[2:].strip()
+                    elif len(line) >= 2:
+                        # Normal format: "XY filename" where XY are status chars
+                        status_code = line[:2]
+                        # Filename starts after the 2 status chars and 1 space (index 3)
+                        # But handle case where space is part of status code (e.g., "M filename" where M+space is status)
+                        if len(line) > 2:
+                            if line[2] == ' ':
+                                # Standard format: "XY filename" with space separator
+                                filename = line[3:].strip()
+                            else:
+                                # Edge case: "M filename" where M+space is status code, filename starts immediately
+                                # This happens when git shows "M " (staged) but without proper separator
+                                # Extract filename starting from index 2 (after status code)
+                                filename = line[2:].strip()
+                        else:
+                            # Line too short, skip
+                            continue
+                    else:
+                        continue
+                    # Handle renamed files: "R  old -> new"
+                    if ' -> ' in filename:
+                        filename = filename.split(' -> ')[1]
+                    
+                    index_status = status_code[0]
+                    working_status = status_code[1]
+                    
+                    # Determine staged/unstaged flags based on git porcelain format
+                    # X = index status, Y = working tree status
+                    # ' ' = no change, 'M' = modified, 'A' = added, 'D' = deleted, '?' = untracked
+                    # 
+                    # IMPORTANT: If X='M' and Y=' ' (staged only), but git diff --cached shows nothing,
+                    # this might be a git state issue. We'll trust git status for now, but the logic
+                    # should handle both cases correctly.
+                    
+                    # Staged: X is not space and not '?' (has changes in index)
+                    staged = index_status != ' ' and index_status != '?'
+                    # Unstaged: Y is not space and not '?' (has changes in working tree)
+                    # BUT: For '??' (untracked), both are '?' but it should be unstaged=True
+                    if index_status == '?' and working_status == '?':
+                        # Untracked file - not staged, but should show in Changes pane
+                        unstaged = True
+                        staged = False  # Ensure untracked files are not marked as staged
+                    else:
+                        unstaged = working_status != ' ' and working_status != '?'
+                    
+                    # CRITICAL FIX: Verify staged status with git diff --cached
+                    # Sometimes git status --porcelain shows "M " (staged) even when nothing is staged
+                    # This happens when the index was reset but git status hasn't updated
+                    if staged and filename not in staged_files_set:
+                        # File is marked as staged in status, but not actually staged
+                        # This is a git state inconsistency - treat as unstaged
+                        staged = False
+                        # If it was showing as staged-only, it must have unstaged changes
+                        if not unstaged:
+                            # If working status was ' ' (no unstaged), but file isn't staged,
+                            # it means the file has changes but they're not staged
+                            # Check if file exists and has changes
+                            unstaged = True
+                    
+                    # Determine status string
+                    if index_status == 'D' or working_status == 'D':
+                        status = "deleted"
+                    elif index_status == '?' and working_status == '?':
+                        # Untracked file
+                        status = "untracked"
+                    elif index_status == 'A':
+                        # Added to index (staged)
+                        status = "staged"
+                    elif index_status == 'R':
+                        status = "renamed"
+                    elif index_status == 'C':
+                        status = "copied"
+                    elif index_status == 'M' or working_status == 'M':
+                        status = "modified"
+                    else:
+                        status = "modified"
+                    
+                    files.append(FileStatus(
+                        path=filename,
+                        status=status,
+                        staged=staged,
+                        unstaged=unstaged
+                    ))
+                
+                # Sort by path
+                files.sort(key=lambda f: f.path)
+                # Debug: Log parsed files to verify
+                try:
+                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
+                        f.write(f"[DEBUG] Native git status parsed {len(files)} files\n")
+                        for file_status in files[:10]:  # Log first 10
+                            f.write(f"  {file_status.path}: status={file_status.status}, staged={file_status.staged}, unstaged={file_status.unstaged}\n")
+                except:
+                    pass
+                return files
+        except Exception as e:
+            # Fallback to dulwich if git command fails
+            # Log the error for debugging
+            try:
+                import traceback
+                with open("debug_git_status.log", "a", encoding="utf-8") as f:
+                    f.write(f"[ERROR] Native git status failed: {type(e).__name__}: {e}\n")
+                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
+            except:
+                pass
+        
+        # Fallback: Original dulwich-based implementation
         from dulwich.index import Index
         from dulwich.objects import Blob
         
@@ -503,9 +1163,17 @@ cdef class GitServiceCython:
         
         # Get HEAD commit and tree
         try:
-            head_ref = self.repo.refs[b"HEAD"]
-            head_commit = self.repo[head_ref]
-            head_tree = self.repo[head_commit.tree]
+            from dulwich import refs as dulwich_refs
+            # Use dulwich's read_ref which safely handles symbolic refs
+            try:
+                head_sha = dulwich_refs.read_ref(self.repo, b"HEAD")
+                if head_sha and len(head_sha) == 20:
+                    head_commit = self.repo[head_sha]
+                    head_tree = self.repo[head_commit.tree]
+                else:
+                    head_tree = None
+            except (KeyError, AttributeError, TypeError, ValueError):
+                head_tree = None
         except Exception:
             head_tree = None
         
@@ -600,7 +1268,8 @@ cdef class GitServiceCython:
                                 # Not in HEAD, so it's untracked
                                 # Only add if not ignored by .gitignore
                                 if not self._is_path_ignored(rel_path, compiled_gitignore):
-                                    files.append(FileStatus(path=rel_path, status="untracked", staged=False, unstaged=False))
+                                    # Untracked files should have unstaged=True to show in Changes pane
+                                    files.append(FileStatus(path=rel_path, status="untracked", staged=False, unstaged=True))
                         else:
                             # File is in index, check if modified in working directory (unstaged changes)
                             if rel_path in index_entries:
@@ -673,9 +1342,8 @@ cdef class GitServiceCython:
                 # File has staged or unstaged changes - include it
                 files_with_changes.append(f)
             elif f.status == "untracked":
-                # Untracked file - include it only if not ignored
-                if not self._is_ignored(f.path):
-                    files_with_changes.append(f)
+                # Untracked file - always include it (already checked for ignore when created, unstaged=True set at creation)
+                files_with_changes.append(f)
             elif f.status == "deleted":
                 # Deleted file - include it
                 files_with_changes.append(f)

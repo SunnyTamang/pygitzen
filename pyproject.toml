@@ -46,4 +46,7 @@ pygitzen = "pygitzen.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Note: Extension modules are defined in setup.py, not here
+# This avoids conflicts when using setup.py directly
+
 
