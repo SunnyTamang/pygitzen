@@ -1149,7 +1149,7 @@ class GitService:
         # Fallback: Return empty list if git command fails (don't use slow dulwich)
         # This ensures consistent behavior and avoids performance issues
         return []
-    
+
     def list_stashes(self) -> List[StashInfo]:
         """Get list of stashes using git stash list command."""
         import subprocess
@@ -1216,5 +1216,54 @@ class GitService:
             pass
         
         return stashes
+    
+    def get_stash_diff(self, stash_index: int) -> tuple[str, str]:
+        """
+        Get diff and stat for a stash using git stash show command.
+        Returns tuple of (diff_text, stat_text).
+        """
+        import subprocess
+        from pathlib import Path
+        
+        # Ensure repo_path is a Path object and resolve it
+        if isinstance(self.repo_path, str):
+            repo_path = Path(self.repo_path).resolve()
+        else:
+            repo_path = Path(self.repo_path).resolve()
+        
+        diff_text = ""
+        stat_text = ""
+        
+        try:
+            # Get stash stat (summary of changes) using --stat flag
+            # Use --color=always to preserve git's native colors
+            stat_result = subprocess.run(
+                ['git', 'stash', 'show', f'stash@{{{stash_index}}}', '--stat', '--color=always'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_path)
+            )
+            
+            if stat_result.returncode == 0:
+                stat_text = stat_result.stdout.strip()
+            
+            # Get stash diff using -p flag with --color=always to preserve git's native colors
+            # This shows the full patch/diff output from git
+            diff_result = subprocess.run(
+                ['git', 'stash', 'show', f'stash@{{{stash_index}}}', '-p', '--color=always'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_path)
+            )
+            
+            if diff_result.returncode == 0:
+                diff_text = diff_result.stdout.strip()
+        except Exception:
+            # If git command fails, return empty strings
+            pass
+        
+        return (diff_text, stat_text)
 
 
