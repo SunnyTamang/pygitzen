@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
 
-from .git_service import GitService, BranchInfo, CommitInfo, FileStatus
+from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo
 
 # Performance timing utilities
 _TIMING_LOG_FILE = None
@@ -552,18 +552,118 @@ class CommitsPane(ListView):
                 continue
 
 
-class StashPane(Static):
+class StashPane(ListView):
     """Stash pane showing stashed changes."""
     
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Stash"
+        self._parent_app = None  # Will be set by parent
+        self._last_index = None  # Track index changes
+        self._last_highlighted = None  # Track highlighted changes
+        self._stashes = []  # Store stashes for access
     
-    def update_stash(self, stash_count: int) -> None:
-        from rich.text import Text
-        text = Text()
-        text.append(f"-{stash_count} of {stash_count}-", style="white")
-        self.update(text)
+    def set_stashes(self, stashes: list) -> None:
+        """Update the stash list with new stashes."""
+        # Clear existing items
+        self.clear()
+        self._stashes = stashes
+        self._last_highlighted = None  # Reset highlighting tracker
+        
+        if not stashes:
+            from rich.text import Text
+            from textual.widgets import ListItem, Static
+            text = Text()
+            text.append("No stashes", style="dim white")
+            self.append(ListItem(Static(text)))
+            return
+        
+        # Update title with count
+        self.border_title = f"Stash ({len(stashes)})"
+        
+        # Add each stash entry
+        for stash in stashes:
+            from rich.text import Text
+            from textual.widgets import ListItem, Static
+            
+            text = Text()
+            # Format: stash@{index}: branch: message
+            text.append(f"stash@{{{stash.index}}}", style="cyan")
+            text.append(": ", style="white")
+            text.append(f"{stash.branch}", style="yellow")
+            text.append(": ", style="white")
+            
+            # Show full message, wrap if too long
+            message = stash.message
+            max_line_length = 55  # Maximum characters per line (allowing for indentation)
+            
+            if len(message) <= max_line_length:
+                # Short message, show on one line
+                text.append(message, style="white")
+            else:
+                # Long message, wrap to multiple lines
+                words = message.split()
+                current_line = ""
+                lines = []
+                
+                for word in words:
+                    if len(current_line + " " + word) <= max_line_length:
+                        current_line += (" " + word) if current_line else word
+                    else:
+                        if current_line:
+                            lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
+                
+                # Add first line
+                text.append(lines[0], style="white")
+                # Add continuation lines with indentation
+                for i, line in enumerate(lines[1:], 1):
+                    text.append("\n     ", style="white")  # Indent continuation lines
+                    text.append(line, style="dim white")
+            
+            self.append(ListItem(Static(text)))
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes and auto-update patch panel."""
+        self._update_patch_for_index(index)
+        self._update_highlighting(index)
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
+        # Arrow keys update highlighted, update patch
+        if highlighted is not None:
+            self._update_patch_for_index(highlighted)
+            self._update_highlighting(highlighted)
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-stash")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-stash")
+                    self._last_highlighted = index
+            except:
+                pass
+    
+    def _update_patch_for_index(self, index: int | None) -> None:
+        """Update patch panel for the given index."""
+        if index is not None and index != self._last_index and self._parent_app:
+            self._last_index = index
+            if 0 <= index < len(self._stashes):
+                self._parent_app.show_stash_diff(index)
 
 
 class CommitSearchInput(Input):
@@ -1728,6 +1828,55 @@ Date: {commit_date}
             full_content = Text(header_text, style="white") + Text(diff_text or "No diff available", style="white")
         
         self.update(full_content)
+    
+    def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
+        """Show stash details and diff in the patch pane."""
+        from rich.text import Text
+        from rich.console import Console
+        from rich.syntax import Syntax
+        from rich.console import Group
+        
+        # Create stash header with newline after message
+        header_text = f"""stash@{stash.index}: On {stash.branch}: {stash.message}
+
+"""
+        
+        # Build content with git's native colors preserved
+        full_content = Text(header_text)
+        
+        # Add stat summary if available (preserve git's native colors)
+        # Ensure all lines start at column 0 (strip leading whitespace from each line)
+        if stat_text:
+            # Split into lines, strip leading whitespace from each, then rejoin
+            # This ensures all stat lines align properly
+            lines = stat_text.split('\n')
+            cleaned_lines = [line.lstrip() for line in lines]
+            stat_text_cleaned = '\n'.join(cleaned_lines)
+            
+            try:
+                stat_text_obj = Text.from_ansi(stat_text_cleaned)
+            except:
+                stat_text_obj = Text(stat_text_cleaned)
+            full_content += stat_text_obj
+            full_content += Text("\n\n")
+        
+        # Display diff as-is (with native git colors preserved via ANSI codes)
+        if diff_text:
+            # Parse ANSI color codes from git output and convert to Rich Text
+            # Rich can parse ANSI codes using Text.from_ansi()
+            try:
+                diff_text_obj = Text.from_ansi(diff_text)
+            except:
+                # Fallback to plain text if ANSI parsing fails
+                diff_text_obj = Text(diff_text)
+            
+            # Combine header and diff
+            full_content += diff_text_obj
+        else:
+            # No diff available
+            full_content += Text("No diff available", style="dim white")
+        
+        self.update(full_content)
 
 
 class CommandLogPane(Static):
@@ -1867,10 +2016,11 @@ class PygitzenApp(App):
     }
     
     #stash-pane {
-        height: 3;
+        height: 5;
         border: solid white;
         background: #1e1e1e;
         overflow: auto;
+        scrollbar-size: 1 1;
     }
     
     #stash-pane:focus {
@@ -1979,6 +2129,31 @@ class PygitzenApp(App):
         text-style: bold;
     }
     
+    /* Selected/highlighted item styling for stash pane */
+    #stash-pane ListItem.--highlight {
+        background: #357ABD; /* blue for strong contrast */
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #stash-pane ListItem.--highlight:focus {
+        background: #2f6aa3; /* slightly darker when focused */
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #stash-pane ListItem.highlighted-stash {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #stash-pane ListItem.highlighted-stash:focus {
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+    }
+    
     #files-pane ListItem {
         height: 1;
         min-height: 1;
@@ -2015,6 +2190,14 @@ class PygitzenApp(App):
         color: #ffffff;
     }
     #branches-pane ListItem.--highlight > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+    #stash-pane ListItem.--highlight > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+    #stash-pane ListItem.highlighted-stash > Static {
         background: transparent;
         color: #ffffff;
     }
@@ -2111,6 +2294,7 @@ class PygitzenApp(App):
                 self._using_cython = False
             self.branches: list[BranchInfo] = []
             self.commits: list[CommitInfo] = []  # Commits for commits pane (left side)
+            self.stashes: list[StashInfo] = []  # Stashes for stash pane
             self.all_commits: list[CommitInfo] = []  # Store all commits for search (commits pane)
             self.log_commits: list[CommitInfo] = []  # Commits for log pane (right side) - separate from commits pane
             self.repo_path = repo_dir
@@ -2121,6 +2305,7 @@ class PygitzenApp(App):
             self.loaded_commits = 0
             self._loading_commits = False
             self._loading_file_status = False
+            self._loading_stashes = False
             self._search_query: str = ""
             self._view_mode: str = "patch"  # "patch" or "log"
             
@@ -2159,6 +2344,7 @@ class PygitzenApp(App):
                 self.commits_pane = CommitsPane(id="commits-pane")
                 self.search_input = CommitSearchInput(id="commit-search-input")
                 self.stash_pane = StashPane(id="stash-pane")
+                self.stash_pane._parent_app = self  # Set parent reference for stash selection
                 
                 yield self.status_pane
                 
@@ -2587,11 +2773,16 @@ class PygitzenApp(App):
             self.staged_pane.append(ListItem(Static(loading_text)))
             self.changes_pane.append(ListItem(Static(loading_text)))
             
+            # Initialize stashes as empty (will be loaded in background)
+            self.stashes = []
+            self.stash_pane.set_stashes([])
+            
             # Load heavy operations in background (non-blocking)
             # Store branch for background workers
             self._pending_branch = self.active_branch
             self.load_commits_count_background(self.active_branch)
             self.load_file_status_background()
+            self.load_stashes_background()
             
             total_elapsed = time.perf_counter() - total_start
             _log_timing_message(f"===== refresh_data_fast TOTAL: {total_elapsed:.4f}s =====")
@@ -2657,8 +2848,7 @@ class PygitzenApp(App):
         if self.branches:
             self.branches_pane.set_branches(self.branches, self.active_branch)
         
-        # Update stash pane (simplified - just show placeholder)
-        self.stash_pane.update_stash(0)
+        # Stashes are loaded in background (not here to avoid blocking)
         
         # Update command log
         # self.command_log_pane.update_log("Repository refreshed successfully!")
@@ -3026,6 +3216,95 @@ class PygitzenApp(App):
         except Exception:
             pass  # Silently fail if branch changed
     
+    def load_stashes_background(self) -> None:
+        """Load stashes in background (non-blocking)."""
+        if getattr(self, '_loading_stashes', False):
+            return
+        
+        self._loading_stashes = True
+        
+        # Use a thread to load stashes asynchronously without blocking the UI
+        import threading
+        
+        def load_stashes_in_thread():
+            """Load stashes in background thread (non-blocking)."""
+            stash_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background START")
+            try:
+                # Get repo_path (cached if available)
+                repo_path = getattr(self, '_cached_repo_path', None)
+                if repo_path is None:
+                    # Method 1: Direct attribute access
+                    try:
+                        if hasattr(self.git, 'repo_path'):
+                            repo_path = self.git.repo_path
+                    except (AttributeError, TypeError):
+                        pass
+                    
+                    # Method 2: Use getattr
+                    if repo_path is None:
+                        try:
+                            repo_path = getattr(self.git, 'repo_path', None)
+                        except (AttributeError, TypeError):
+                            pass
+                    
+                    # Method 3: Try via repo.path
+                    if repo_path is None:
+                        try:
+                            if hasattr(self.git, 'repo'):
+                                repo = getattr(self.git, 'repo', None)
+                                if repo and hasattr(repo, 'path'):
+                                    repo_path = getattr(repo, 'path', None)
+                        except (AttributeError, TypeError):
+                            pass
+                    
+                    # Fallback
+                    if repo_path is None:
+                        repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
+                    
+                    # Cache it for future use
+                    self._cached_repo_path = repo_path
+                
+                # Convert to string/Path for consistency
+                if isinstance(repo_path, Path):
+                    repo_path_str = str(repo_path)
+                else:
+                    repo_path_str = str(repo_path) if repo_path else "."
+                
+                get_stashes_start = time.perf_counter()
+                # Check if method exists (Cython version might not have it)
+                if hasattr(self.git, 'list_stashes'):
+                    stashes = self.git.list_stashes()
+                else:
+                    # Fallback to Python version if Cython doesn't have the method
+                    from .git_service import GitService
+                    python_git = GitService(repo_path_str)
+                    stashes = python_git.list_stashes()
+                get_stashes_elapsed = time.perf_counter() - get_stashes_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   list_stashes: {get_stashes_elapsed:.4f}s ({len(stashes)} stashes)")
+                
+                # Update UI from main thread (use queue which is thread-safe)
+                stashes_copy = stashes.copy()
+                self._ui_update_queue.put(lambda: self._update_stashes_ui(stashes_copy))
+                
+                stash_total = time.perf_counter() - stash_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background TOTAL: {stash_total:.4f}s")
+            except Exception as e:
+                # If stash fetching fails, show empty
+                import traceback
+                try:
+                    with open("debug_stash.log", "a", encoding="utf-8") as f:
+                        f.write(f"Error loading stashes (background): {type(e).__name__}: {e}\n")
+                        f.write(f"Traceback:\n{traceback.format_exc()}\n")
+                except:
+                    pass
+                
+                # Update UI from main thread on error (use queue which is thread-safe)
+                self._ui_update_queue.put(lambda: self._update_stashes_ui([]))
+        
+        thread = threading.Thread(target=load_stashes_in_thread, daemon=True)
+        thread.start()
+    
     def load_file_status_background(self) -> None:
         """Load file status in background (non-blocking)."""
         if self._loading_file_status:
@@ -3081,6 +3360,16 @@ class PygitzenApp(App):
         # Start thread immediately - doesn't block UI
         thread = threading.Thread(target=load_files_in_thread, daemon=True)
         thread.start()
+    
+    def _update_stashes_ui(self, stashes: list) -> None:
+        """Update stashes UI (called from main thread)."""
+        try:
+            self.stashes = stashes
+            self.stash_pane.set_stashes(stashes)
+            self._loading_stashes = False
+        except Exception:
+            # Silently fail if UI update fails
+            self._loading_stashes = False
     
     def _update_file_status_ui(self, files_with_changes: list) -> None:
         """Update file status UI (called from main thread) - optimized for large file lists."""
@@ -4421,6 +4710,53 @@ class PygitzenApp(App):
             _log_timing_message(f"[TIMING] show_commit_info: {show_elapsed:.4f}s")
             diff_total = time.perf_counter() - diff_start
             _log_timing_message(f"[TIMING] show_commit_diff TOTAL: {diff_total:.4f}s")
+    
+    def show_stash_diff(self, index: int) -> None:
+        """Show stash diff in patch pane when stash is selected."""
+        if 0 <= index < len(self.stashes):
+            stash = self.stashes[index]
+            # Switch to patch view when stash is selected
+            self._view_mode = "patch"
+            self.log_pane.styles.display = "none"
+            self.patch_pane.styles.display = "block"
+            
+            # Get stash diff and stat
+            try:
+                # Check if method exists (Cython version might not have it)
+                if hasattr(self.git, 'get_stash_diff'):
+                    diff_text, stat_text = self.git.get_stash_diff(stash.index)
+                else:
+                    # Fallback to Python version if Cython doesn't have the method
+                    from .git_service import GitService
+                    # Get repo_path from git service (both Python and Cython have this)
+                    repo_path = None
+                    try:
+                        if hasattr(self.git, 'repo_path'):
+                            repo_path = self.git.repo_path
+                    except (AttributeError, TypeError):
+                        pass
+                    if repo_path is None:
+                        try:
+                            repo_path = getattr(self.git, 'repo_path', None)
+                        except (AttributeError, TypeError):
+                            pass
+                    if repo_path is None:
+                        repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
+                    
+                    if isinstance(repo_path, Path):
+                        repo_path_str = str(repo_path)
+                    else:
+                        repo_path_str = str(repo_path) if repo_path else "."
+                    
+                    python_git = GitService(repo_path_str)
+                    diff_text, stat_text = python_git.get_stash_diff(stash.index)
+                
+                self.patch_pane.show_stash_info(stash, diff_text, stat_text)
+            except Exception as e:
+                # If stash diff fetching fails, show error
+                from rich.text import Text
+                error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
+                self.patch_pane.update(error_text)
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view is self.branches_pane:
@@ -4443,6 +4779,15 @@ class PygitzenApp(App):
             self.patch_pane.styles.display = "block"
             self.selected_commit_index = event.index
             self.show_commit_diff(event.index)
+        elif event.list_view is self.stash_pane:
+            # Only show stash diff if there are actual stashes
+            if self.stashes and 0 <= event.index < len(self.stashes):
+                # Switch to patch view when stash is selected
+                self._view_mode = "patch"
+                self.log_pane.styles.display = "none"
+                self.patch_pane.styles.display = "block"
+                self.show_stash_diff(event.index)
+            # If "No stashes" is clicked, do nothing (don't show commit diff)
 
     def action_load_more(self) -> None:
         """Load more commits - works for both commits pane and log view."""

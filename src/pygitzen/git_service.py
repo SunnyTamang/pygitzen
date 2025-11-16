@@ -34,6 +34,14 @@ class FileStatus:
     unstaged: bool = False  # Whether changes are unstaged (for files with both)
 
 
+@dataclass
+class StashInfo:
+    index: int  # Stash index (0 = most recent)
+    branch: str  # Branch where stash was created
+    message: str  # Stash message
+    sha: str  # Stash commit SHA
+
+
 class GitService:
     def __init__(self, start_dir: Path | str = ".") -> None:
         self.repo_path = self._find_repo_root(Path(start_dir))
@@ -1141,5 +1149,112 @@ class GitService:
         # Fallback: Return empty list if git command fails (don't use slow dulwich)
         # This ensures consistent behavior and avoids performance issues
         return []
+
+    def list_stashes(self) -> List[StashInfo]:
+        """Get list of stashes using git stash list command.
+        Optimized: Doesn't fetch SHA (lazy-loaded when needed for performance).
+        """
+        import subprocess
+        import re
+        from pathlib import Path
+        
+        stashes: List[StashInfo] = []
+        
+        try:
+            # Ensure repo_path is a Path object and resolve it
+            if isinstance(self.repo_path, str):
+                repo_path = Path(self.repo_path).resolve()
+            else:
+                repo_path = Path(self.repo_path).resolve()
+            
+            # Use git stash list to get all stashes
+            # Format: stash@{0}: WIP on branch: message
+            # Or: stash@{0}: On branch: message
+            result = subprocess.run(
+                ['git', 'stash', 'list'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_path)
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse each line
+                for line in result.stdout.strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    
+                    # Parse format: stash@{index}: [WIP on ]branch: message
+                    # Example: "stash@{0}: WIP on feature/stash-display-and-keybindings: message here"
+                    # Or: "stash@{0}: On feature/stash-display-and-keybindings: message here"
+                    # Handle both "WIP on branch: message" and "On branch: message" formats
+                    match = re.match(r'stash@\{(\d+)\}:\s*(?:WIP on |On )?([^:]+?):\s*(.+)', line)
+                    if match:
+                        index = int(match.group(1))
+                        branch = match.group(2).strip()
+                        message = match.group(3).strip()
+                        
+                        # Don't fetch SHA here - it's expensive and only needed when showing details
+                        # SHA will be fetched lazily if needed
+                        stashes.append(StashInfo(
+                            index=index,
+                            branch=branch,
+                            message=message,
+                            sha=""  # Empty SHA - can be fetched later if needed
+                        ))
+        except Exception:
+            # If git command fails, return empty list
+            pass
+        
+        return stashes
+    
+    def get_stash_diff(self, stash_index: int) -> tuple[str, str]:
+        """
+        Get diff and stat for a stash using git stash show command.
+        Returns tuple of (diff_text, stat_text).
+        """
+        import subprocess
+        from pathlib import Path
+        
+        # Ensure repo_path is a Path object and resolve it
+        if isinstance(self.repo_path, str):
+            repo_path = Path(self.repo_path).resolve()
+        else:
+            repo_path = Path(self.repo_path).resolve()
+        
+        diff_text = ""
+        stat_text = ""
+        
+        try:
+            # Get stash stat (summary of changes) using --stat flag
+            # Use --color=always to preserve git's native colors
+            stat_result = subprocess.run(
+                ['git', 'stash', 'show', f'stash@{{{stash_index}}}', '--stat', '--color=always'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_path)
+            )
+            
+            if stat_result.returncode == 0:
+                stat_text = stat_result.stdout.strip()
+            
+            # Get stash diff using -p flag with --color=always to preserve git's native colors
+            # This shows the full patch/diff output from git
+            diff_result = subprocess.run(
+                ['git', 'stash', 'show', f'stash@{{{stash_index}}}', '-p', '--color=always'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(repo_path)
+            )
+            
+            if diff_result.returncode == 0:
+                diff_text = diff_result.stdout.strip()
+        except Exception:
+            # If git command fails, return empty strings
+            pass
+        
+        return (diff_text, stat_text)
 
 
