@@ -4036,6 +4036,8 @@ class PygitzenApp(App):
                     # This uses local tracking refs instead of network calls
                     unpushed_commits = set()
                     cache_invalidated_remote_branch = False
+                    # Initialize main_branches at function scope to avoid UnboundLocalError
+                    main_branches = []
                     if actual_ref and actual_ref != "HEAD":
                         # Check cache for unpushed commits
                         cache_key = f"{actual_ref}_unpushed"
@@ -4491,6 +4493,8 @@ class PygitzenApp(App):
                         # No need to check if remote exists - we use local tracking refs
                         cache_invalidated_remote_branch = False
                         unpushed_commits = set()
+                        # Initialize main_branches at function scope to avoid UnboundLocalError
+                        main_branches = []
                         cache_key = f"{actual_ref}_unpushed"
                         if cache_key in self._remote_commits_cache and not cache_invalidated_remote_branch:
                             unpushed_commits = self._remote_commits_cache[cache_key]
