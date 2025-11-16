@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
 
-from .git_service import GitService, BranchInfo, CommitInfo, FileStatus
+from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo
 
 # Performance timing utilities
 _TIMING_LOG_FILE = None
@@ -552,18 +552,48 @@ class CommitsPane(ListView):
                 continue
 
 
-class StashPane(Static):
+class StashPane(ListView):
     """Stash pane showing stashed changes."""
     
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Stash"
     
-    def update_stash(self, stash_count: int) -> None:
-        from rich.text import Text
-        text = Text()
-        text.append(f"-{stash_count} of {stash_count}-", style="white")
-        self.update(text)
+    def set_stashes(self, stashes: list) -> None:
+        """Update the stash list with new stashes."""
+        # Clear existing items
+        self.clear()
+        
+        if not stashes:
+            from rich.text import Text
+            from textual.widgets import ListItem, Static
+            text = Text()
+            text.append("No stashes", style="dim white")
+            self.append(ListItem(Static(text)))
+            return
+        
+        # Update title with count
+        self.border_title = f"Stash ({len(stashes)})"
+        
+        # Add each stash entry
+        for stash in stashes:
+            from rich.text import Text
+            from textual.widgets import ListItem, Static
+            
+            text = Text()
+            # Format: stash@{index}: branch: message
+            text.append(f"stash@{{{stash.index}}}", style="cyan")
+            text.append(": ", style="white")
+            text.append(f"{stash.branch}", style="yellow")
+            text.append(": ", style="white")
+            
+            # Truncate long messages
+            message = stash.message
+            if len(message) > 40:
+                message = message[:37] + "..."
+            text.append(message, style="white")
+            
+            self.append(ListItem(Static(text)))
 
 
 class CommitSearchInput(Input):
@@ -1867,10 +1897,11 @@ class PygitzenApp(App):
     }
     
     #stash-pane {
-        height: 3;
+        height: 5;
         border: solid white;
         background: #1e1e1e;
         overflow: auto;
+        scrollbar-size: 1 1;
     }
     
     #stash-pane:focus {
@@ -2587,6 +2618,30 @@ class PygitzenApp(App):
             self.staged_pane.append(ListItem(Static(loading_text)))
             self.changes_pane.append(ListItem(Static(loading_text)))
             
+            # Load stashes immediately (fast operation)
+            try:
+                # Check if method exists (Cython version might not have it)
+                if hasattr(self.git, 'list_stashes'):
+                    stashes = self.git.list_stashes()
+                else:
+                    # Fallback to Python version if Cython doesn't have the method
+                    from .git_service import GitService
+                    # Get repo_path from git service (both Python and Cython have this)
+                    repo_path = self.git.repo_path if hasattr(self.git, 'repo_path') else "."
+                    python_git = GitService(str(repo_path))
+                    stashes = python_git.list_stashes()
+                self.stash_pane.set_stashes(stashes)
+            except Exception as e:
+                # If stash fetching fails, show empty (silently fail to avoid UI disruption)
+                import traceback
+                try:
+                    with open("debug_stash.log", "a", encoding="utf-8") as f:
+                        f.write(f"Error loading stashes: {type(e).__name__}: {e}\n")
+                        f.write(f"Traceback:\n{traceback.format_exc()}\n")
+                except:
+                    pass
+                self.stash_pane.set_stashes([])
+            
             # Load heavy operations in background (non-blocking)
             # Store branch for background workers
             self._pending_branch = self.active_branch
@@ -2657,8 +2712,29 @@ class PygitzenApp(App):
         if self.branches:
             self.branches_pane.set_branches(self.branches, self.active_branch)
         
-        # Update stash pane (simplified - just show placeholder)
-        self.stash_pane.update_stash(0)
+        # Update stash pane with actual stash entries
+        try:
+            # Check if method exists (Cython version might not have it)
+            if hasattr(self.git, 'list_stashes'):
+                stashes = self.git.list_stashes()
+            else:
+                # Fallback to Python version if Cython doesn't have the method
+                from .git_service import GitService
+                # Get repo_path from git service (both Python and Cython have this)
+                repo_path = self.git.repo_path if hasattr(self.git, 'repo_path') else "."
+                python_git = GitService(str(repo_path))
+                stashes = python_git.list_stashes()
+            self.stash_pane.set_stashes(stashes)
+        except Exception as e:
+            # If stash fetching fails, show empty (log error for debugging)
+            import traceback
+            try:
+                with open("debug_stash.log", "a", encoding="utf-8") as f:
+                    f.write(f"Error loading stashes: {type(e).__name__}: {e}\n")
+                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
+            except:
+                pass
+            self.stash_pane.set_stashes([])
         
         # Update command log
         # self.command_log_pane.update_log("Repository refreshed successfully!")

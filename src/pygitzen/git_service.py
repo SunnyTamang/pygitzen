@@ -34,6 +34,14 @@ class FileStatus:
     unstaged: bool = False  # Whether changes are unstaged (for files with both)
 
 
+@dataclass
+class StashInfo:
+    index: int  # Stash index (0 = most recent)
+    branch: str  # Branch where stash was created
+    message: str  # Stash message
+    sha: str  # Stash commit SHA
+
+
 class GitService:
     def __init__(self, start_dir: Path | str = ".") -> None:
         self.repo_path = self._find_repo_root(Path(start_dir))
@@ -1141,5 +1149,65 @@ class GitService:
         # Fallback: Return empty list if git command fails (don't use slow dulwich)
         # This ensures consistent behavior and avoids performance issues
         return []
+    
+    def list_stashes(self) -> List[StashInfo]:
+        """Get list of stashes using git stash list command."""
+        import subprocess
+        import re
+        
+        stashes: List[StashInfo] = []
+        
+        try:
+            # Use git stash list to get all stashes
+            # Format: stash@{0}: WIP on branch: message
+            # Or: stash@{0}: On branch: message
+            result = subprocess.run(
+                ['git', 'stash', 'list'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse each line
+                for line in result.stdout.strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    
+                    # Parse format: stash@{index}: [WIP on ]branch: message
+                    # Example: "stash@{0}: WIP on feature/stash-display-and-keybindings: message here"
+                    # Or: "stash@{0}: On feature/stash-display-and-keybindings: message here"
+                    # Handle both "WIP on branch: message" and "On branch: message" formats
+                    match = re.match(r'stash@\{(\d+)\}:\s*(?:WIP on |On )?([^:]+?):\s*(.+)', line)
+                    if match:
+                        index = int(match.group(1))
+                        branch = match.group(2).strip()
+                        message = match.group(3).strip()
+                        
+                        # Get stash SHA using git rev-parse
+                        try:
+                            sha_result = subprocess.run(
+                                ['git', 'rev-parse', f'stash@{{{index}}}'],
+                                capture_output=True,
+                                text=True,
+                                timeout=2,
+                                cwd=str(self.repo_path)
+                            )
+                            sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+                        except Exception:
+                            sha = ""
+                        
+                        stashes.append(StashInfo(
+                            index=index,
+                            branch=branch,
+                            message=message,
+                            sha=sha
+                        ))
+        except Exception:
+            # If git command fails, return empty list
+            pass
+        
+        return stashes
 
 
