@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import queue
+import threading
 from functools import wraps
 from pathlib import Path
 
@@ -131,13 +132,7 @@ def log_timing_end(operation_name: str, start_time: float):
     elapsed = time.perf_counter() - start_time
     _log_timing_message(f"[TIMING] {operation_name}: {elapsed:.4f}s")
 
-# Try to import Cython version for better performance
-try:
-    from git_service_cython import GitServiceCython
-    CYTHON_AVAILABLE = True
-except ImportError:
-    CYTHON_AVAILABLE = False
-    GitServiceCython = None
+# Python-only version - Cython removed
 
 class StatusPane(Static):
     """Status pane showing current branch and repo info."""
@@ -162,6 +157,14 @@ class StagedPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Staged Changes"
         self.show_cursor = False
+        self._parent_app = None  # Will be set by parent
+        self._files: list[FileStatus] = []  # Store files for diff access
+        self._last_index = None  # Track index changes
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the staged files list."""
@@ -172,6 +175,9 @@ class StagedPane(ListView):
             f for f in files
             if f.staged and f.status in ["modified", "staged", "deleted", "renamed", "copied", "submodule"]
         ]
+        
+        # Store files for diff access
+        self._files = staged_files
         
         if not staged_files:
             from rich.text import Text
@@ -203,6 +209,32 @@ class StagedPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes and auto-update patch panel."""
+        self._update_patch_for_index(index)
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
+        if highlighted is not None:
+            self._update_patch_for_index(highlighted)
+    
+    def _update_patch_for_index(self, index: int | None) -> None:
+        """Update patch panel for the given index."""
+        if index is not None and index != self._last_index and self._parent_app:
+            self._last_index = index
+            if 0 <= index < len(self._files):
+                # Switch to patch view and show file diff
+                self._parent_app._view_mode = "patch"
+                self._parent_app.log_pane.styles.display = "none"
+                self._parent_app.patch_pane.styles.display = "block"
+                self._parent_app.show_file_diff(self._files[index].path, staged=True)
+            # Call automatic patch update callback (lazygit pattern)
+            if self._on_render_to_main:
+                try:
+                    self._on_render_to_main()
+                except Exception:
+                    pass
 
 
 class ChangesPane(ListView):
@@ -212,6 +244,14 @@ class ChangesPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Changes"
         self.show_cursor = False
+        self._parent_app = None  # Will be set by parent
+        self._files: list[FileStatus] = []  # Store files for diff access
+        self._last_index = None  # Track index changes
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the unstaged files list."""
@@ -226,6 +266,9 @@ class ChangesPane(ListView):
             # Include files that are not staged but have changes
             elif not f.staged and f.status in ["modified", "untracked", "deleted"]:
                 unstaged_files.append(f)
+        
+        # Store files for diff access
+        self._files = unstaged_files
         
         # Debug: Log what we received and filtered
         try:
@@ -262,6 +305,32 @@ class ChangesPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes and auto-update patch panel."""
+        self._update_patch_for_index(index)
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
+        if highlighted is not None:
+            self._update_patch_for_index(highlighted)
+    
+    def _update_patch_for_index(self, index: int | None) -> None:
+        """Update patch panel for the given index."""
+        if index is not None and index != self._last_index and self._parent_app:
+            self._last_index = index
+            if 0 <= index < len(self._files):
+                # Switch to patch view and show file diff
+                self._parent_app._view_mode = "patch"
+                self._parent_app.log_pane.styles.display = "none"
+                self._parent_app.patch_pane.styles.display = "block"
+                self._parent_app.show_file_diff(self._files[index].path, staged=False)
+            # Call automatic patch update callback (lazygit pattern)
+            if self._on_render_to_main:
+                try:
+                    self._on_render_to_main()
+                except Exception:
+                    pass
 
 
 class BranchesPane(ListView):
@@ -298,15 +367,29 @@ class CommitsPane(ListView):
         self._parent_app = None  # Will be set by parent
         self._last_index = None  # Track index changes
         self._last_highlighted = None  # Track highlighted changes
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
 
     def set_branch(self, branch: str) -> None:
         """Update title to show which branch commits are displayed."""
         self.border_title = f"Commits ({branch})"
     
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
+    
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-update patch panel."""
         self._update_patch_for_index(index)
         self._update_highlighting(index)
+        # Update title when selection changes
+        if self._parent_app:
+            self._parent_app._update_commits_title()
+        # Call automatic patch update callback (lazygit pattern)
+        if self._on_render_to_main:
+            try:
+                self._on_render_to_main()
+            except Exception:
+                pass
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
@@ -314,6 +397,15 @@ class CommitsPane(ListView):
         if highlighted is not None:
             self._update_patch_for_index(highlighted)
             self._update_highlighting(highlighted)
+            # Update title when selection changes
+            if self._parent_app:
+                self._parent_app._update_commits_title()
+            # Call automatic patch update callback (lazygit pattern)
+            if self._on_render_to_main:
+                try:
+                    self._on_render_to_main()
+                except Exception:
+                    pass
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
@@ -338,10 +430,47 @@ class CommitsPane(ListView):
     
     def _update_patch_for_index(self, index: int | None) -> None:
         """Update patch panel for the given index."""
-        if index is not None and index != self._last_index and self._parent_app:
-            self._last_index = index
+        if index is not None and self._parent_app:
+            # Always update if index is valid (even if same, to ensure patch is shown on focus)
+            if index != self._last_index:
+                self._last_index = index
             self._parent_app.selected_commit_index = index
             self._parent_app.show_commit_diff(index)
+            # Update title to reflect selected commit number
+            self._parent_app._update_commits_title()
+    
+    def on_focus(self) -> None:
+        """Handle focus event - restore previous selection or use first commit, show patch."""
+        if len(self.children) > 0:
+            # Restore previous selection if available, otherwise use first commit
+            if self._parent_app and self._parent_app.selected_commit_index >= 0:
+                # Use the previously selected commit index
+                selected_idx = self._parent_app.selected_commit_index
+                # Ensure index is within bounds
+                if selected_idx >= len(self.children):
+                    selected_idx = 0
+            else:
+                # No previous selection, use first commit
+                selected_idx = 0
+            
+            # Set index and highlighted to restore selection
+            self.index = selected_idx
+            self.highlighted = selected_idx
+            self._update_highlighting(selected_idx)
+            
+            # Force update patch panel by calling _update_patch_for_index
+            # This ensures patch is shown even if index hasn't changed
+            # Reset _last_index temporarily to force update
+            self._last_index = None
+            self._update_patch_for_index(selected_idx)
+            
+            # Ensure patch pane is visible (in case view mode was changed)
+            if self._parent_app:
+                # Switch to patch view if not already
+                if self._parent_app._view_mode != "patch":
+                    self._parent_app._view_mode = "patch"
+                    self._parent_app.log_pane.styles.display = "none"
+                    self._parent_app.patch_pane.styles.display = "block"
     
     def set_commits(self, commits: list[CommitInfo]) -> None:
         self.clear()
@@ -463,11 +592,17 @@ class CommitsPane(ListView):
         if not commits or len(commits) == 0:
             return
         
-        # Create a map of normalized SHA to push status for quick lookup
-        push_status_map = {}
+        # Create a map of normalized SHA to commit info (including both pushed and merged status)
+        commit_status_map = {}
         for commit in commits:
             commit_sha = _normalize_commit_sha(commit.sha)
-            push_status_map[commit_sha] = commit.pushed
+            commit_status_map[commit_sha] = {
+                'pushed': commit.pushed,
+                'merged': commit.merged
+            }
+            # Also update the stored commit info map so future lookups have correct status
+            if hasattr(self, '_commit_info_map'):
+                self._commit_info_map[commit_sha] = commit
         
         # Check if we have stored commit SHAs
         if not hasattr(self, '_commit_shas') or len(self._commit_shas) == 0:
@@ -490,16 +625,22 @@ class CommitsPane(ListView):
                 stored_sha = self._commit_shas[i]
                 normalized_stored_sha = _normalize_commit_sha(stored_sha)
                 
-                # Get push status from map
-                if normalized_stored_sha not in push_status_map:
+                # Get status from map (both pushed and merged)
+                if normalized_stored_sha not in commit_status_map:
                     continue
                 
-                pushed_status = push_status_map[normalized_stored_sha]
+                status = commit_status_map[normalized_stored_sha]
+                pushed_status = status['pushed']
+                merged_status = status['merged']
                 
                 # Get commit info from stored map (we have the commit message here)
                 commit_info = self._commit_info_map.get(stored_sha)
                 if not commit_info:
                     continue
+                
+                # Update commit_info with latest status (so it's correct for display)
+                commit_info.pushed = pushed_status
+                commit_info.merged = merged_status
                 
                 # Rebuild the text exactly as we created it originally
                 if hasattr(item, 'children') and len(item.children) > 0:
@@ -515,7 +656,7 @@ class CommitsPane(ListView):
                     # 1. Merged (green ✓): Commit exists on main/master
                     # 2. Pushed (yellow ↑): Commit is pushed but NOT merged
                     # 3. Unpushed (red -): Commit is not pushed
-                    if commit_info.merged:
+                    if merged_status:
                         new_text.append("✓ ", style="green")  # StatusMerged
                     elif pushed_status:
                         new_text.append("↑ ", style="yellow")  # StatusPushed
@@ -562,6 +703,11 @@ class StashPane(ListView):
         self._last_index = None  # Track index changes
         self._last_highlighted = None  # Track highlighted changes
         self._stashes = []  # Store stashes for access
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
     
     def set_stashes(self, stashes: list) -> None:
         """Update the stash list with new stashes."""
@@ -664,6 +810,12 @@ class StashPane(ListView):
             self._last_index = index
             if 0 <= index < len(self._stashes):
                 self._parent_app.show_stash_diff(index)
+            # Call automatic patch update callback (lazygit pattern)
+            if self._on_render_to_main:
+                try:
+                    self._on_render_to_main()
+                except Exception:
+                    pass
 
 
 class CommitSearchInput(Input):
@@ -1829,6 +1981,48 @@ Date: {commit_date}
         
         self.update(full_content)
     
+    def show_file_info(self, file_path: str, diff_text: str, staged: bool = False) -> None:
+        """Show file diff in patch pane."""
+        from rich.text import Text
+        from rich.syntax import Syntax
+        from rich.console import Group
+        
+        # Create file header
+        status_label = "Staged" if staged else "Unstaged"
+        header_text = f"{status_label} changes: {file_path}\n\n"
+        
+        # Create diff content with proper colors
+        if diff_text:
+            try:
+                # Use Rich syntax highlighting for diff
+                syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
+                # Use Group to combine Text and Syntax objects
+                full_content = Group(
+                    Text(header_text, style="white"),
+                    syntax
+                )
+            except:
+                # Fallback to manual color formatting with Text only
+                lines = diff_text.split('\n')
+                diff_text_obj = Text()
+                for line in lines:
+                    if line.startswith('+'):
+                        diff_text_obj.append(line + '\n', style="green")
+                    elif line.startswith('-'):
+                        diff_text_obj.append(line + '\n', style="red")
+                    elif line.startswith('@@'):
+                        diff_text_obj.append(line + '\n', style="blue")
+                    else:
+                        diff_text_obj.append(line + '\n', style="white")
+                
+                # Now we can concatenate Text objects
+                full_content = Text(header_text, style="white") + diff_text_obj
+        else:
+            # Both are Text objects, so concatenation works
+            full_content = Text(header_text, style="white") + Text(diff_text or "No diff available", style="white")
+        
+        self.update(full_content)
+    
     def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
         """Show stash details and diff in the patch pane."""
         from rich.text import Text
@@ -2244,7 +2438,7 @@ class PygitzenApp(App):
     active_branch: reactive[str | None] = reactive(None)
     selected_commit_index: reactive[int] = reactive(0)
 
-    def __init__(self, repo_dir: str = ".", use_cython: bool = True) -> None:
+    def __init__(self, repo_dir: str = ".") -> None:
         import sys
         init_start = time.perf_counter()
         _log_timing_message(f"[TIMING] ===== PygitzenApp.__init__ START =====")
@@ -2252,46 +2446,12 @@ class PygitzenApp(App):
         super().__init__()
         from dulwich.errors import NotGitRepository
         try:
-            # self.git = GitService(repo_dir)
-            # Use Cython version if available and requested, otherwise use Python version
-            if use_cython and CYTHON_AVAILABLE:
-                cython_init_start = time.perf_counter()
-                try:
-                    self.git = GitServiceCython(repo_dir)
-                    self.git_python = self.git  # Use Cython for file operations too (now optimized!)
-                    self._using_cython = True
-                    # Log successful Cython initialization
-                    import sys
-                    cython_init_elapsed = time.perf_counter() - cython_init_start
-                    _log_timing_message(f"[TIMING] GitServiceCython.__init__: {cython_init_elapsed:.4f}s")
-                    print(f"[DEBUG] Cython extension initialized successfully")
-                except Exception as e:
-                    # If Cython initialization fails, fall back to Python
-                    import sys
-                    import traceback
-                    cython_init_elapsed = time.perf_counter() - cython_init_start
-                    error_msg = f"Error initializing Cython extension, falling back to Python: {type(e).__name__}: {e}\n"
-                    error_msg += f"Traceback:\n{traceback.format_exc()}\n"
-                    _log_timing_message(f"[TIMING] GitServiceCython.__init__ (FAILED): {cython_init_elapsed:.4f}s")
-                    _log_timing_message(error_msg)
-                    try:
-                        with open("debug_cython_init.log", "a", encoding="utf-8") as f:
-                            f.write(error_msg)
-                    except Exception:
-                        pass
-                    python_init_start = time.perf_counter()
-                    self.git = GitService(repo_dir)
-                    python_init_elapsed = time.perf_counter() - python_init_start
-                    _log_timing_message(f"[TIMING] GitService.__init__ (fallback): {python_init_elapsed:.4f}s")
-                    self.git_python = self.git
-                    self._using_cython = False
-            else:
-                python_init_start = time.perf_counter()
-                self.git = GitService(repo_dir)
-                python_init_elapsed = time.perf_counter() - python_init_start
-                _log_timing_message(f"[TIMING] GitService.__init__: {python_init_elapsed:.4f}s")
-                self.git_python = self.git  # Same instance
-                self._using_cython = False
+            # Use Python GitService (Cython removed)
+            python_init_start = time.perf_counter()
+            self.git = GitService(repo_dir)
+            python_init_elapsed = time.perf_counter() - python_init_start
+            _log_timing_message(f"[TIMING] GitService.__init__: {python_init_elapsed:.4f}s")
+            self.git_python = self.git  # Same instance
             self.branches: list[BranchInfo] = []
             self.commits: list[CommitInfo] = []  # Commits for commits pane (left side)
             self.stashes: list[StashInfo] = []  # Stashes for stash pane
@@ -2312,6 +2472,17 @@ class PygitzenApp(App):
             # Thread-safe queue for UI updates from background threads
             self._ui_update_queue = queue.Queue()
             
+            # WaitGroup pattern (similar to lazygit's waitForIntro)
+            # Blocks background operations until UI is fully initialized
+            self._ui_ready = threading.Event()
+            self._ui_ready.clear()  # Start as not ready
+            
+            # Synchronization barrier for data loading (similar to lazygit's WaitGroup)
+            # Tracks: commits, stashes, files (3 operations)
+            self._data_loading_barrier = threading.Barrier(3, action=self._on_all_data_loaded)
+            self._data_loading_complete = threading.Event()
+            self._data_loading_complete.clear()
+            
             # PHASE 2: Cache with proper invalidation
             # Cache commit counts per branch
             self._commit_count_cache: dict[str, int] = {}
@@ -2319,6 +2490,8 @@ class PygitzenApp(App):
             self._remote_branch_cache: dict[str, bool] = {}
             # Cache remote commits per branch (set of commit SHAs)
             self._remote_commits_cache: dict[str, set[str]] = {}
+            # Cache merged commits (shared across all branches - commits on main/master)
+            self._merged_commits_cache: set[str] = set()
             
             # Track HEAD SHA for invalidation detection
             # Maps branch -> HEAD SHA (for local branches)
@@ -2340,6 +2513,9 @@ class PygitzenApp(App):
                 self.status_pane = StatusPane(id="status-pane")
                 self.staged_pane = StagedPane(id="staged-pane")
                 self.changes_pane = ChangesPane(id="changes-pane")
+                # Set parent app reference for file panes
+                self.staged_pane._parent_app = self
+                self.changes_pane._parent_app = self
                 self.branches_pane = BranchesPane(id="branches-pane")
                 self.commits_pane = CommitsPane(id="commits-pane")
                 self.search_input = CommitSearchInput(id="commit-search-input")
@@ -2381,7 +2557,7 @@ class PygitzenApp(App):
         # Initialize view mode - will be set by refresh_data_fast
         self._view_mode = "log"  # Default to log view (branch view)
         # Show startup message with version info
-        version_info = " (Cython)" if self._using_cython else " (Python)"
+        version_info = " (Python)"
         self.command_log_pane.update_log(f"pygitzen started{version_info}")
         # self.refresh_data()
         self.refresh_data_fast()
@@ -2397,6 +2573,18 @@ class PygitzenApp(App):
         
         mount_elapsed = time.perf_counter() - mount_start
         _log_timing_message(f"[TIMING] ===== on_mount TOTAL: {mount_elapsed:.4f}s =====")
+        
+        # Signal that UI is ready (similar to lazygit's waitForIntro.Done())
+        # This allows background operations to proceed
+        self._ui_ready.set()
+        _log_timing_message("[TIMING] UI ready - background operations can now proceed")
+        
+        # Set automatic patch update callbacks (lazygit GetOnRenderToMain pattern)
+        # These are set after UI is ready to ensure all panes are initialized
+        self.commits_pane.set_on_render_to_main(self._get_commits_render_to_main())
+        self.stash_pane.set_on_render_to_main(self._get_stash_render_to_main())
+        self.staged_pane.set_on_render_to_main(self._get_staged_render_to_main())
+        self.changes_pane.set_on_render_to_main(self._get_changes_render_to_main())
     
     def _process_ui_update_queue(self) -> None:
         """Process UI updates from background threads (called periodically from main thread)."""
@@ -2743,23 +2931,62 @@ class PygitzenApp(App):
                 self.branches_pane.index = 0
                 self.branches_pane.highlighted = 0
 
-            # Load commits for commits pane (left side) - shows all commits from all branches
-            commits_load_start = time.perf_counter()
-            self.load_commits(self.active_branch)
-            commits_load_elapsed = time.perf_counter() - commits_load_start
-            _log_timing_message(f"load_commits: {commits_load_elapsed:.4f}s")
-
-            # Load first page of commits immediately (fast, ~0.02s)
-            # Don't block on count_commits - load it in background
+            # Initialize commits pane with empty state (show UI immediately)
+            self.commits = []
+            self.commits_pane.clear()
+            self.commits_pane.border_title = f"Commits ({self.active_branch})" if self.active_branch else "Commits (HEAD)"
+            
             # On initial load, show log view for the selected branch
             self._view_mode = "log"
             self.patch_pane.styles.display = "none"
             self.log_pane.styles.display = "block"
             
-            log_load_start = time.perf_counter()
-            self.load_commits_for_log(self.active_branch)
-            log_load_elapsed = time.perf_counter() - log_load_start
-            _log_timing_message(f"load_commits_for_log: {log_load_elapsed:.4f}s")
+            # Show loading message in log pane
+            from rich.text import Text
+            loading_text = Text("Loading commits...", style="dim white")
+            self.log_pane.update(loading_text)
+            
+            # Load commits in background (non-blocking) - this allows UI to appear immediately
+            # Similar to lazygit: wait for UI to be ready before starting background work
+            def load_commits_background():
+                """Load commits in background thread (waits for UI to be ready)."""
+                try:
+                    # Wait for UI to be ready (similar to lazygit's waitForIntro.Wait())
+                    self._ui_ready.wait()
+                    
+                    commits_load_start = time.perf_counter()
+                    # Store active branch to avoid race conditions
+                    branch_to_load = self.active_branch
+                    
+                    # Load commits data (load_commits() handles thread-safe UI updates internally)
+                    self.load_commits(branch_to_load)
+                    commits_load_elapsed = time.perf_counter() - commits_load_start
+                    _log_timing_message(f"load_commits (background): {commits_load_elapsed:.4f}s")
+                    
+                    # Load log view in background as well
+                    log_load_start = time.perf_counter()
+                    self.load_commits_for_log(branch_to_load)
+                    log_load_elapsed = time.perf_counter() - log_load_start
+                    _log_timing_message(f"load_commits_for_log (background): {log_load_elapsed:.4f}s")
+                    
+                    # Signal completion to barrier (similar to lazygit's wg.Done())
+                    try:
+                        self._data_loading_barrier.wait()
+                        _log_timing_message("[TIMING] Commits loading completed (barrier)")
+                    except threading.BrokenBarrierError:
+                        _log_timing_message("[TIMING] Commits loading: barrier was broken")
+                except Exception as e:
+                    _log_timing_message(f"[ERROR] Background load_commits failed: {type(e).__name__}: {e}")
+                    # Still signal barrier even on error
+                    try:
+                        self._data_loading_barrier.wait()
+                    except (threading.BrokenBarrierError, Exception):
+                        pass
+            
+            # Start background thread for commits loading
+            import threading
+            commits_thread = threading.Thread(target=load_commits_background, daemon=True)
+            commits_thread.start()
             
             # Update status pane immediately (fast)
             if self.active_branch:
@@ -2853,7 +3080,7 @@ class PygitzenApp(App):
         # Update command log
         # self.command_log_pane.update_log("Repository refreshed successfully!")
         # Update command log
-        version_info = " (Cython)" if self._using_cython else " (Python)"
+        version_info = " (Python)"
         self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info}")
 
     def _fuzzy_match(self, query: str, text: str) -> float:
@@ -3141,7 +3368,9 @@ class PygitzenApp(App):
         import threading
         
         def count_commits_in_thread():
-            """Count commits in background thread (non-blocking)."""
+            """Count commits in background thread (non-blocking, waits for UI to be ready)."""
+            # Wait for UI to be ready (similar to lazygit's waitForIntro.Wait())
+            self._ui_ready.wait()
             count_start = time.perf_counter()
             _log_timing_message(f"[TIMING] [BACKGROUND] _handle_commit_count_worker START (branch: {branch})")
             try:
@@ -3227,7 +3456,9 @@ class PygitzenApp(App):
         import threading
         
         def load_stashes_in_thread():
-            """Load stashes in background thread (non-blocking)."""
+            """Load stashes in background thread (non-blocking, waits for UI to be ready)."""
+            # Wait for UI to be ready (similar to lazygit's waitForIntro.Wait())
+            self._ui_ready.wait()
             stash_start = time.perf_counter()
             _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background START")
             try:
@@ -3272,14 +3503,8 @@ class PygitzenApp(App):
                     repo_path_str = str(repo_path) if repo_path else "."
                 
                 get_stashes_start = time.perf_counter()
-                # Check if method exists (Cython version might not have it)
-                if hasattr(self.git, 'list_stashes'):
-                    stashes = self.git.list_stashes()
-                else:
-                    # Fallback to Python version if Cython doesn't have the method
-                    from .git_service import GitService
-                    python_git = GitService(repo_path_str)
-                    stashes = python_git.list_stashes()
+                # Get stashes using Python GitService
+                stashes = self.git.list_stashes()
                 get_stashes_elapsed = time.perf_counter() - get_stashes_start
                 _log_timing_message(f"[TIMING] [BACKGROUND]   list_stashes: {get_stashes_elapsed:.4f}s ({len(stashes)} stashes)")
                 
@@ -3289,6 +3514,13 @@ class PygitzenApp(App):
                 
                 stash_total = time.perf_counter() - stash_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background TOTAL: {stash_total:.4f}s")
+                
+                # Signal completion to barrier (similar to lazygit's wg.Done())
+                try:
+                    self._data_loading_barrier.wait()
+                    _log_timing_message("[TIMING] Stashes loading completed (barrier)")
+                except threading.BrokenBarrierError:
+                    _log_timing_message("[TIMING] Stashes loading: barrier was broken")
             except Exception as e:
                 # If stash fetching fails, show empty
                 import traceback
@@ -3301,6 +3533,12 @@ class PygitzenApp(App):
                 
                 # Update UI from main thread on error (use queue which is thread-safe)
                 self._ui_update_queue.put(lambda: self._update_stashes_ui([]))
+                
+                # Still signal barrier even on error
+                try:
+                    self._data_loading_barrier.wait()
+                except (threading.BrokenBarrierError, Exception):
+                    pass
         
         thread = threading.Thread(target=load_stashes_in_thread, daemon=True)
         thread.start()
@@ -3317,7 +3555,9 @@ class PygitzenApp(App):
         import threading
         
         def load_files_in_thread():
-            """Load files in background thread (non-blocking)."""
+            """Load files in background thread (non-blocking, waits for UI to be ready)."""
+            # Wait for UI to be ready (similar to lazygit's waitForIntro.Wait())
+            self._ui_ready.wait()
             import sys
             file_status_start = time.perf_counter()
             _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background START")
@@ -3342,6 +3582,13 @@ class PygitzenApp(App):
                 
                 file_status_elapsed = time.perf_counter() - file_status_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background TOTAL: {file_status_elapsed:.4f}s")
+                
+                # Signal completion to barrier (similar to lazygit's wg.Done())
+                try:
+                    self._data_loading_barrier.wait()
+                    _log_timing_message("[TIMING] Files loading completed (barrier)")
+                except threading.BrokenBarrierError:
+                    _log_timing_message("[TIMING] Files loading: barrier was broken")
             except Exception as e:
                 # Log error to file
                 try:
@@ -3356,10 +3603,21 @@ class PygitzenApp(App):
                 self._ui_update_queue.put(lambda: self._update_file_status_ui([]))
                 file_status_elapsed = time.perf_counter() - file_status_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background (ERROR): {file_status_elapsed:.4f}s")
+                
+                # Still signal barrier even on error
+                try:
+                    self._data_loading_barrier.wait()
+                except (threading.BrokenBarrierError, Exception):
+                    pass
         
         # Start thread immediately - doesn't block UI
         thread = threading.Thread(target=load_files_in_thread, daemon=True)
         thread.start()
+    
+    def _on_all_data_loaded(self) -> None:
+        """Callback when all data loading threads complete (called by barrier)."""
+        _log_timing_message("[TIMING] ===== All data loading threads completed =====")
+        self._data_loading_complete.set()
     
     def _update_stashes_ui(self, stashes: list) -> None:
         """Update stashes UI (called from main thread)."""
@@ -3398,7 +3656,7 @@ class PygitzenApp(App):
             self._loading_file_status = False
             
             # Update command log
-            version_info = " (Cython)" if self._using_cython else " (Python)"
+            version_info = " (Python)"
             file_count = len(files_with_changes)
             display_count = len(files_to_display)
             if file_count > display_limit:
@@ -3897,32 +4155,44 @@ class PygitzenApp(App):
             if actual_ref and actual_ref != "HEAD":
                 cache_key = f"{actual_ref}_unpushed"
                 
-                # Get merged commits from main branches (quick check)
-                merged_commits = set()
-                for main_branch in ["origin/main", "origin/master"]:
-                    try:
-                        check_main = subprocess.run(
-                            ["git", "rev-parse", "--verify", main_branch],
-                            capture_output=True,
-                            text=True,
-                            timeout=1,
-                            cwd=repo_path_str
-                        )
-                        if check_main.returncode == 0:
-                            merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
-                            merged_result = subprocess.run(
-                                merged_cmd,
+                # Get merged commits from cache or fetch if needed
+                if self._merged_commits_cache:
+                    # Use cached merged commits (fast!)
+                    merged_commits = self._merged_commits_cache
+                    _log_timing_message(f"[CACHE] HIT merged_commits_cache: {len(merged_commits)} merged commits")
+                else:
+                    # Cache MISS - fetch merged commits from main branches
+                    merged_commits = set()
+                    for main_branch in ["origin/main", "origin/master"]:
+                        try:
+                            check_main = subprocess.run(
+                                ["git", "rev-parse", "--verify", main_branch],
                                 capture_output=True,
                                 text=True,
-                                timeout=3,
+                                timeout=1,
                                 cwd=repo_path_str
                             )
-                            if merged_result.returncode == 0:
-                                for sha in merged_result.stdout.strip().split("\n"):
-                                    if sha.strip():
-                                        merged_commits.add(sha.strip())
-                    except Exception:
-                        pass
+                            if check_main.returncode == 0:
+                                # Fetch ALL commits from main/master (no limit)
+                                # This ensures commits beyond 1000 are correctly identified as merged
+                                # Performance: Cached after first fetch, so only slow on initial load
+                                merged_cmd = ["git", "rev-list", main_branch]
+                                merged_result = subprocess.run(
+                                    merged_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,  # Increased timeout for large repos
+                                    cwd=repo_path_str
+                                )
+                                if merged_result.returncode == 0:
+                                    for sha in merged_result.stdout.strip().split("\n"):
+                                        if sha.strip():
+                                            merged_commits.add(sha.strip())
+                        except Exception:
+                            pass
+                    # Cache the merged commits for future use
+                    self._merged_commits_cache = merged_commits
+                    _log_timing_message(f"[CACHE] MISS merged_commits_cache: fetched {len(merged_commits)} merged commits")
                 
                 normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
                 
@@ -3938,13 +4208,14 @@ class PygitzenApp(App):
                         commit.pushed = normalized_sha not in normalized_unpushed
                 else:
                     # No cache yet - set merged status at least
-                    # Assume commits NOT on main are pushed (yellow) until background thread determines otherwise
+                    # Assume commits are pushed (yellow) until background thread determines otherwise
                     # This matches lazygit behavior
                     for commit in commits:
                         normalized_sha = _normalize_commit_sha(commit.sha)
                         commit.merged = normalized_sha in normalized_merged
-                        # Assume pushed if not merged (will be corrected by background thread if wrong)
-                        commit.pushed = normalized_sha not in normalized_merged
+                        # Assume pushed (will be corrected by background thread if wrong)
+                        # Note: merged commits should show green checkmark, not yellow arrow
+                        commit.pushed = True
             
             # Start background thread to update commit count and push status
             def update_commits_metadata_background():
@@ -4169,22 +4440,48 @@ class PygitzenApp(App):
                                 rev_list_elapsed = time.perf_counter() - rev_list_start
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref}: {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
                     
-                    # Get merged commits (those on main/master branches)
-                    merged_commits = set()
-                    if main_branches:
-                        for main_branch in main_branches:
-                            merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
-                            merged_result = subprocess.run(
-                                merged_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=5,
-                                cwd=repo_path_str
-                            )
-                            if merged_result.returncode == 0:
-                                for sha in merged_result.stdout.strip().split("\n"):
-                                    if sha.strip():
-                                        merged_commits.add(sha.strip())
+                    # Get merged commits from cache or fetch if needed
+                    if self._merged_commits_cache:
+                        # Use cached merged commits (fast!)
+                        merged_commits = self._merged_commits_cache
+                        _log_timing_message(f"[CACHE] HIT merged_commits_cache (background): {len(merged_commits)} merged commits")
+                    else:
+                        # Cache MISS - fetch merged commits from main branches
+                        merged_commits = set()
+                        main_branches = []
+                        for main_branch in ["origin/main", "origin/master"]:
+                            try:
+                                check_main = subprocess.run(
+                                    ["git", "rev-parse", "--verify", main_branch],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=1,
+                                    cwd=repo_path_str
+                                )
+                                if check_main.returncode == 0:
+                                    main_branches.append(main_branch)
+                            except Exception:
+                                pass
+                        
+                        if main_branches:
+                            for main_branch in main_branches:
+                                # Fetch ALL commits from main/master (no limit)
+                                # This ensures commits beyond 1000 are correctly identified as merged
+                                merged_cmd = ["git", "rev-list", main_branch]
+                                merged_result = subprocess.run(
+                                    merged_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,  # Increased timeout for large repos
+                                    cwd=repo_path_str
+                                )
+                                if merged_result.returncode == 0:
+                                    for sha in merged_result.stdout.strip().split("\n"):
+                                        if sha.strip():
+                                            merged_commits.add(sha.strip())
+                        # Cache the merged commits for future use
+                        self._merged_commits_cache = merged_commits
+                        _log_timing_message(f"[CACHE] MISS merged_commits_cache (background): fetched {len(merged_commits)} merged commits")
                     
                     # Update status for all commits using three-tier lazygit logic:
                     # 1. StatusMerged (green ✓): Commit exists on main/master
@@ -4270,15 +4567,25 @@ class PygitzenApp(App):
         print(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
         
         # OPTIMIZATION: Show commits to UI immediately (critical path)
-        self.commits_pane.set_commits(self.commits)
-        self._update_commits_title()
-        if self.commits:
-            self.selected_commit_index = 0
-            # Reset the last index tracker so the first commit shows
-            self.commits_pane._last_index = None
-            # Ensure the ListView selection and highlighting match our index
-            self.commits_pane.index = 0
-            self.commits_pane.highlighted = 0
+        # Use call_from_thread to ensure thread safety (may be called from background thread)
+        def update_commits_ui():
+            self.commits_pane.set_commits(self.commits)
+            self._update_commits_title()
+            if self.commits:
+                self.selected_commit_index = 0
+                # Reset the last index tracker so the first commit shows
+                self.commits_pane._last_index = None
+                # Ensure the ListView selection and highlighting match our index
+                self.commits_pane.index = 0
+                self.commits_pane.highlighted = 0
+        
+        # Check if we're in the main thread (Textual apps run in main thread)
+        # If called from background thread, use call_from_thread
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            update_commits_ui()
+        else:
+            self.call_from_thread(update_commits_ui)
             # Apply highlighting to first item
             self.commits_pane._update_highlighting(0)
             # OPTIMIZATION: Defer patch loading (non-critical, can load after UI is shown)
@@ -4295,7 +4602,10 @@ class PygitzenApp(App):
         # Show current branch (matching lazygit behavior)
         branch_name = self.active_branch if self.active_branch else "HEAD"
         total_count = self.total_commits if self.total_commits > 0 else len(self.commits)
-        self.commits_pane.border_title = f"Commits ({branch_name}) {len(self.commits)} of {total_count}"
+        # Show selected commit number (1-indexed) of total commits
+        # Use selected_commit_index + 1 for 1-indexed display, or 1 if no selection
+        selected_number = (self.selected_commit_index + 1) if self.selected_commit_index >= 0 and self.commits else 1
+        self.commits_pane.border_title = f"Commits ({branch_name}) {selected_number} of {total_count}"
     
     def _update_commits_count_ui(self, count: int) -> None:
         """Update UI to reflect commit count changes (called from background thread)."""
@@ -4619,22 +4929,33 @@ class PygitzenApp(App):
                                 rev_list_elapsed = time.perf_counter() - rev_list_start
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref} (load_more): {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
                         
-                        # Get merged commits (those on main/master branches)
-                        merged_commits = set()
-                        if main_branches:
-                            for main_branch in main_branches:
-                                merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
-                                merged_result = subprocess.run(
-                                    merged_cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=5,
-                                    cwd=repo_path_str
-                                )
-                                if merged_result.returncode == 0:
-                                    for sha in merged_result.stdout.strip().split("\n"):
-                                        if sha.strip():
-                                            merged_commits.add(sha.strip())
+                        # Get merged commits from cache or fetch if needed
+                        if self._merged_commits_cache:
+                            # Use cached merged commits (fast!)
+                            merged_commits = self._merged_commits_cache
+                            _log_timing_message(f"[CACHE] HIT merged_commits_cache (load_more): {len(merged_commits)} merged commits")
+                        else:
+                            # Cache MISS - fetch merged commits from main branches
+                            merged_commits = set()
+                            if main_branches:
+                                for main_branch in main_branches:
+                                    # Fetch ALL commits from main/master (no limit)
+                                    # This ensures commits beyond 1000 are correctly identified as merged
+                                    merged_cmd = ["git", "rev-list", main_branch]
+                                    merged_result = subprocess.run(
+                                        merged_cmd,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=10,  # Increased timeout for large repos
+                                        cwd=repo_path_str
+                                    )
+                                    if merged_result.returncode == 0:
+                                        for sha in merged_result.stdout.strip().split("\n"):
+                                            if sha.strip():
+                                                merged_commits.add(sha.strip())
+                            # Cache the merged commits for future use
+                            self._merged_commits_cache = merged_commits
+                            _log_timing_message(f"[CACHE] MISS merged_commits_cache (load_more): fetched {len(merged_commits)} merged commits")
                         
                         # Update status using three-tier lazygit logic:
                         # 1. StatusMerged (green ✓): Commit exists on main/master
@@ -4726,41 +5047,54 @@ class PygitzenApp(App):
             
             # Get stash diff and stat
             try:
-                # Check if method exists (Cython version might not have it)
-                if hasattr(self.git, 'get_stash_diff'):
-                    diff_text, stat_text = self.git.get_stash_diff(stash.index)
-                else:
-                    # Fallback to Python version if Cython doesn't have the method
-                    from .git_service import GitService
-                    # Get repo_path from git service (both Python and Cython have this)
-                    repo_path = None
-                    try:
-                        if hasattr(self.git, 'repo_path'):
-                            repo_path = self.git.repo_path
-                    except (AttributeError, TypeError):
-                        pass
-                    if repo_path is None:
-                        try:
-                            repo_path = getattr(self.git, 'repo_path', None)
-                        except (AttributeError, TypeError):
-                            pass
-                    if repo_path is None:
-                        repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
-                    
-                    if isinstance(repo_path, Path):
-                        repo_path_str = str(repo_path)
-                    else:
-                        repo_path_str = str(repo_path) if repo_path else "."
-                    
-                    python_git = GitService(repo_path_str)
-                    diff_text, stat_text = python_git.get_stash_diff(stash.index)
-                
+                # Get stash diff using Python GitService
+                diff_text, stat_text = self.git.get_stash_diff(stash.index)
                 self.patch_pane.show_stash_info(stash, diff_text, stat_text)
             except Exception as e:
                 # If stash diff fetching fails, show error
                 from rich.text import Text
                 error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
                 self.patch_pane.update(error_text)
+    
+    def show_file_diff(self, file_path: str, staged: bool = False) -> None:
+        """Show file diff in patch pane when file is selected."""
+        try:
+            # Get file diff using GitService
+            diff_text = self.git.get_file_diff(file_path, staged=staged)
+            self.patch_pane.show_file_info(file_path, diff_text, staged=staged)
+        except Exception as e:
+            # If file diff fetching fails, show error
+            from rich.text import Text
+            error_text = Text(f"Error loading file diff: {type(e).__name__}: {e}", style="red")
+            self.patch_pane.update(error_text)
+    
+    def _get_commits_render_to_main(self) -> callable:
+        """Get callback for automatic commit patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.commits_pane.index is not None and 0 <= self.commits_pane.index < len(self.commits):
+                self.show_commit_diff(self.commits_pane.index)
+        return render_to_main
+    
+    def _get_stash_render_to_main(self) -> callable:
+        """Get callback for automatic stash patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.stash_pane.index is not None and 0 <= self.stash_pane.index < len(self.stashes):
+                self.show_stash_diff(self.stash_pane.index)
+        return render_to_main
+    
+    def _get_staged_render_to_main(self) -> callable:
+        """Get callback for automatic staged file patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.staged_pane.index is not None and 0 <= self.staged_pane.index < len(self.staged_pane._files):
+                self.show_file_diff(self.staged_pane._files[self.staged_pane.index].path, staged=True)
+        return render_to_main
+    
+    def _get_changes_render_to_main(self) -> callable:
+        """Get callback for automatic unstaged file patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.changes_pane.index is not None and 0 <= self.changes_pane.index < len(self.changes_pane._files):
+                self.show_file_diff(self.changes_pane._files[self.changes_pane.index].path, staged=False)
+        return render_to_main
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view is self.branches_pane:
@@ -4993,14 +5327,14 @@ class PygitzenApp(App):
                     self.commits_pane.highlighted = None
 
 
-def run_textual(repo_dir: str = ".", use_cython: bool = True) -> None:
+def run_textual(repo_dir: str = ".") -> None:
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
     from dulwich.errors import NotGitRepository
     
     try:
-        app = PygitzenApp(repo_dir, use_cython=use_cython)
+        app = PygitzenApp(repo_dir)
         app.run()
     except NotGitRepository:
         console = Console()

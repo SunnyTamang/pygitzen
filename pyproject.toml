@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "Cython>=3.0.0"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -46,7 +46,6 @@ pygitzen = "pygitzen.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Note: Extension modules are defined in setup.py, not here
-# This avoids conflicts when using setup.py directly
+# Python-only version - Cython removed
 
 

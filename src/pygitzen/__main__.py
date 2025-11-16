@@ -47,10 +47,6 @@ def print_help() -> None:
         "[white]Path to a Git repository[/white]\n[dim]Defaults to current directory (.)[/dim]"
     )
     table.add_row(
-        "[cyan]--no-cython[/cyan]",
-        "[white]Force Python-only mode[/white]\n[dim]Disables Cython extension (useful for testing)[/dim]"
-    )
-    table.add_row(
         "[cyan]-h, --help[/cyan]",
         "[white]Show this help message and exit[/white]"
     )
@@ -66,10 +62,6 @@ def print_help() -> None:
     examples_text.append("pygitzen", style="cyan")
     examples_text.append(" /path/to/repo      ", style="dim white")
     examples_text.append("# Launch in specific repository\n", style="dim white")
-    examples_text.append("  ", style="dim white")
-    examples_text.append("pygitzen", style="cyan")
-    examples_text.append(" --no-cython        ", style="dim white")
-    examples_text.append("# Force Python-only mode\n", style="dim white")
     
     # Create footer
     footer_text = Text()
@@ -105,11 +97,6 @@ def main() -> None:
     )
     parser.add_argument("path", nargs="?", default=".", help="Path to a Git repository (defaults to current directory)")
     parser.add_argument(
-        "--no-cython",
-        action="store_true",
-        help="Force Python-only mode (disable Cython extension, useful for testing)"
-    )
-    parser.add_argument(
         "-h", "--help",
         action="store_true",
         help="Show this help message and exit"
@@ -123,7 +110,7 @@ def main() -> None:
         sys.exit(0)
 
     repo_path = Path(args.path).resolve()
-    run_textual(str(repo_path), use_cython=not args.no_cython)
+    run_textual(str(repo_path))
 
 
 if __name__ == "__main__":

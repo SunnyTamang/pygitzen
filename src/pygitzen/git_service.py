@@ -4,9 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-from dulwich.objects import Commit
-from dulwich.repo import Repo
-from dulwich.errors import NotGitRepository
 import stat
 
 
@@ -45,7 +42,18 @@ class StashInfo:
 class GitService:
     def __init__(self, start_dir: Path | str = ".") -> None:
         self.repo_path = self._find_repo_root(Path(start_dir))
-        self.repo = Repo(str(self.repo_path))
+        # Cache for commit counts per branch
+        self._commit_count_cache: dict[str, int] = {}
+        # Track HEAD SHA for cache invalidation
+        self._last_head_sha: dict[str, str] = {}
+        # Cache for remote commits per branch
+        self._remote_commits_cache: dict[str, set[str]] = {}
+        # Cache for branch info (name -> branch_info dict)
+        self._branch_info_cache: dict[str, dict] = {}
+        # Cache for current branch name (invalidated on checkout)
+        self._current_branch_cache: str | None = None
+        # Cache for base branch existence (main/master)
+        self._base_branch_cache: dict[str, bool] = {}
 
     @staticmethod
     def _find_repo_root(path: Path) -> Path:
@@ -55,7 +63,7 @@ class GitService:
             if git_dir.exists() and git_dir.is_dir():
                 return current
             if current.parent == current:
-                raise NotGitRepository(f"No .git found from {path}")
+                raise ValueError(f"No .git found from {path}")
             current = current.parent
 
     def _is_ignored(self, file_path: str) -> bool:
@@ -134,100 +142,132 @@ class GitService:
         return is_ignored
 
     def list_branches(self) -> List[BranchInfo]:
-        heads = self.repo.refs.as_dict(b"refs/heads")
+        """List all local branches using git for-each-ref."""
+        import subprocess
+        
         result: List[BranchInfo] = []
-        for ref, sha in heads.items():
-            name = ref.decode().split("/heads/")[-1]
-            result.append(BranchInfo(name=name, head_sha=sha.hex()))
+        try:
+            # Use git for-each-ref to get branches and their SHAs
+            cmd = ['git', 'for-each-ref', 'refs/heads/', '--format=%(refname:short)|%(objectname)']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    if not line or '|' not in line:
+                        continue
+                    name, sha = line.split('|', 1)
+                    result.append(BranchInfo(name=name.strip(), head_sha=sha.strip()))
+        except Exception:
+            # If git command fails, return empty list
+            pass
+        
         result.sort(key=lambda b: b.name.lower())
         return result
 
-    def _iter_commits(self, head_sha: bytes, max_count: Optional[int] = 100) -> Iterable[Tuple[bytes, Commit]]:
-        seen = set()
-        stack = [head_sha]
-        while stack and (max_count is None or len(seen) < max_count):
-            sha = stack.pop(0)
-            if sha in seen:
-                continue
-            seen.add(sha)
-            commit: Commit = self.repo[sha]
-            yield sha, commit
-            stack.extend(commit.parents)
+    # _iter_commits removed - no longer needed without dulwich
 
     def _get_remote_commits(self, branch: str) -> set[str]:
-        """Get set of commit SHAs that exist on remote."""
+        """Get set of commit SHAs that exist on remote using git rev-list."""
+        import subprocess
+        
+        # Check cache first
+        cache_key = f"{branch}_remote_commits"
+        if cache_key in self._remote_commits_cache:
+            return self._remote_commits_cache[cache_key]
+        
         remote_commits = set()
         try:
-            # Try to get remote ref (e.g., origin/main)
-            remote_ref = f"refs/remotes/origin/{branch}".encode()
-            if remote_ref in self.repo.refs:
-                remote_head = self.repo.refs[remote_ref]
-                # Collect all commits from remote
-                for sha, _ in self._iter_commits(remote_head, max_count=200):
-                    remote_commits.add(sha.hex())
+            # Use git rev-list to get commits from remote branch
+            remote_branch = f"origin/{branch}"
+            cmd = ['git', 'rev-list', remote_branch, '--max-count=200']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    if line.strip():
+                        remote_commits.add(line.strip())
         except Exception:
             # Remote not available or not configured
             pass
+        
+        # Cache the result
+        self._remote_commits_cache[cache_key] = remote_commits
         return remote_commits
     
     def get_merge_base(self, branch: str, base_branch: str = "main") -> str | None:
         """Find the merge-base (common ancestor) between branch and base_branch."""
         import subprocess
-        import os
         
         if base_branch == branch:
             return None
         
-        # Check if base branch exists
-        base_ref = f"refs/heads/{base_branch}".encode()
-        if base_ref not in self.repo.refs:
-            # Try master if main doesn't exist
-            if base_branch == "main":
-                base_branch = "master"
-                base_ref = f"refs/heads/{base_branch}".encode()
-                if base_ref not in self.repo.refs:
+        # Check if base branch exists using git rev-parse
+        try:
+            check_base = subprocess.run(
+                ['git', 'rev-parse', '--verify', base_branch],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if check_base.returncode != 0:
+                # Try master if main doesn't exist
+                if base_branch == "main":
+                    base_branch = "master"
+                    check_base = subprocess.run(
+                        ['git', 'rev-parse', '--verify', base_branch],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                        cwd=str(self.repo_path)
+                    )
+                    if check_base.returncode != 0:
+                        return None
+                else:
                     return None
-            else:
-                return None
+        except Exception:
+            return None
         
         # Check if branch exists
-        branch_ref = f"refs/heads/{branch}".encode()
-        if branch_ref not in self.repo.refs:
+        try:
+            check_branch = subprocess.run(
+                ['git', 'rev-parse', '--verify', branch],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if check_branch.returncode != 0:
+                return None
+        except Exception:
             return None
         
         try:
-            original_cwd = os.getcwd()
-            os.chdir(str(self.repo_path))
-            try:
-                # Use git merge-base command for reliable results
-                result = subprocess.run(
-                    ['git', 'merge-base', base_branch, branch],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    merge_base_sha = result.stdout.strip()
-                    return merge_base_sha
-            finally:
-                os.chdir(original_cwd)
+            # Use git merge-base command for reliable results
+            result = subprocess.run(
+                ['git', 'merge-base', base_branch, branch],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            if result.returncode == 0:
+                merge_base_sha = result.stdout.strip()
+                return merge_base_sha
         except Exception:
-            # Fallback: find common ancestor manually using dulwich
-            try:
-                base_head = self.repo.refs[base_ref]
-                branch_head = self.repo.refs[branch_ref]
-                
-                # Get all ancestors of base branch
-                base_ancestors = set()
-                for sha, _ in self._iter_commits(base_head, max_count=200):
-                    base_ancestors.add(sha)
-                
-                # Walk branch history to find first common ancestor
-                for sha, _ in self._iter_commits(branch_head, max_count=200):
-                    if sha in base_ancestors:
-                        return sha.hex()
-            except Exception:
-                pass
+            pass
         
         return None
 
@@ -261,8 +301,15 @@ class GitService:
             if not show_full_history and branch not in ["main", "master"]:
                 base_branch_names = ["main", "master"]
                 for base_name in base_branch_names:
-                    base_ref = f"refs/heads/{base_name}".encode()
-                    if base_ref in self.repo.refs and base_name != branch:
+                    # Check if base branch exists using git rev-parse
+                    check_base = subprocess.run(
+                        ['git', 'rev-parse', '--verify', base_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=1,
+                        cwd=str(self.repo_path)
+                    )
+                    if check_base.returncode == 0 and base_name != branch:
                         # Use git log with exclusion: branch ^base
                         cmd = [
                             "git", "log",
@@ -286,8 +333,8 @@ class GitService:
             )
             
             if result.returncode != 0:
-                # If git log fails, fallback to dulwich
-                return self.list_commits(branch, max_count, skip, show_full_history)
+                # If git log fails, return empty list
+                return []
             
             # Get remote commits for push status (reuse existing method)
             remote_commits = self._get_remote_commits(branch)
@@ -333,114 +380,20 @@ class GitService:
             return commits
             
         except subprocess.TimeoutExpired:
-            # Timeout - return what we have or fallback
-            if commits:
-                return commits
-            # Fallback to dulwich if timeout and no commits
-            return self.list_commits(branch, max_count, skip, show_full_history)
+            # Timeout - return what we have
+            return commits
         except Exception as e:
-            # On any error, fallback to dulwich
-            import sys
+            # On any error, return empty list
             try:
                 with open("debug_list_commits_native.log", "a", encoding="utf-8") as f:
                     f.write(f"Error in list_commits_native for {branch}: {type(e).__name__}: {e}\n")
             except:
                 pass
-            return self.list_commits(branch, max_count, skip, show_full_history)
+            return []
     
     def list_commits(self, branch: str, max_count: int = 200, skip: int = 0, show_full_history: bool = False) -> List[CommitInfo]:
-        ref = f"refs/heads/{branch}".encode()
-        head = self.repo.refs[ref]
-        
-        # Get remote commits to check push status
-        remote_commits = self._get_remote_commits(branch)
-        
-        # Determine if we should show full history
-        if show_full_history and branch not in ["main", "master"]:
-            # For feature branches with full history, find merge-base and show all commits from there
-            base_branch_names = ["main", "master"]
-            merge_base_sha = None
-            for base_name in base_branch_names:
-                merge_base_sha = self.get_merge_base(branch, base_name)
-                if merge_base_sha:
-                    break
-            
-            commits: List[CommitInfo] = []
-            yielded = 0
-            merge_base_bytes = bytes.fromhex(merge_base_sha) if merge_base_sha else None
-            
-            for index, (sha, commit) in enumerate(self._iter_commits(head, max_count=None)):
-                commit_sha = sha.hex()
-                
-                # Stop at merge-base (don't include merge-base itself, only commits after it)
-                if merge_base_bytes and sha == merge_base_bytes:
-                    break
-                
-                # Apply skip for pagination
-                if yielded < skip:
-                    yielded += 1
-                    continue
-
-                author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
-                summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
-                # Check if commit exists on remote
-                is_pushed = commit_sha in remote_commits
-                commits.append(
-                    CommitInfo(
-                        sha=commit_sha,
-                        summary=summary,
-                        author=author,
-                        timestamp=int(commit.commit_time),
-                        pushed=is_pushed,
-                    )
-                )
-                if len(commits) >= max_count:
-                    break
-            return commits
-        
-        # Original behavior: exclude commits that exist in base branch
-        base_branch_commits = set()
-        base_branch_names = ["main", "master"]
-        for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                # Collect all commits from base branch
-                for sha, _ in self._iter_commits(base_head, max_count=200):
-                    base_branch_commits.add(sha.hex())
-                break  # Use first available base branch
-
-        commits: List[CommitInfo] = []
-        yielded = 0
-        for index, (sha, commit) in enumerate(self._iter_commits(head, max_count=None)):
-            commit_sha = sha.hex()
-            
-            # If not main/master branch, exclude commits that exist in base branch
-            if branch not in ["main", "master"] and commit_sha in base_branch_commits:
-                # This commit is shared with base branch, skip it
-                continue
-
-            # Apply skip for pagination
-            if yielded < skip:
-                yielded += 1
-                continue
-
-            author = commit.author.decode(errors="replace") if isinstance(commit.author, (bytes, bytearray)) else str(commit.author)
-            summary = commit.message.split(b"\n", 1)[0].decode(errors="replace")
-            # Check if commit exists on remote
-            is_pushed = commit_sha in remote_commits
-            commits.append(
-                CommitInfo(
-                    sha=commit_sha,
-                    summary=summary,
-                    author=author,
-                    timestamp=int(commit.commit_time),
-                    pushed=is_pushed,
-                )
-            )
-            if len(commits) >= max_count:
-                break
-        return commits
+        """List commits - uses native git implementation."""
+        return self.list_commits_native(branch, max_count, skip, show_full_history)
 
     def count_commits_native(self, branch: str, timeout: int = 10) -> int:
         """
@@ -468,9 +421,15 @@ class GitService:
             # For other branches, exclude commits from base branch
             base_branch_names = ["main", "master"]
             for base_name in base_branch_names:
-                # Check if base branch exists
-                base_ref = f"refs/heads/{base_name}".encode()
-                if base_ref not in self.repo.refs or base_name == branch:
+                # Check if base branch exists using git rev-parse
+                check_base = subprocess.run(
+                    ['git', 'rev-parse', '--verify', base_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    cwd=str(self.repo_path)
+                )
+                if check_base.returncode != 0 or base_name == branch:
                     continue
                 
                 # Try to get merge-base
@@ -498,55 +457,67 @@ class GitService:
                             pass
                 break
         except subprocess.TimeoutExpired:
-            # Timeout - fallback to dulwich
-            pass
+            # Timeout - return 0
+            return 0
         except Exception as e:
-            # Log error for debugging but continue to fallback
+            # Log error for debugging
             try:
                 with open("debug_count_commits_native.log", "a", encoding="utf-8") as f:
                     f.write(f"Error in count_commits_native for {branch}: {type(e).__name__}: {e}\n")
             except:
                 pass
-            # Fallback to dulwich if git command fails
-            pass
+            return 0
         
-        # Fallback to dulwich (original implementation)
-        return self.count_commits_dulwich(branch)
-    
-    def count_commits_dulwich(self, branch: str) -> int:
-        """Original dulwich-based count_commits (fallback)."""
-        ref = f"refs/heads/{branch}".encode()
-        head = self.repo.refs[ref]
-
-        base_branch_commits = set()
-        base_branch_names = ["main", "master"]
-        for base_name in base_branch_names:
-            base_ref = f"refs/heads/{base_name}".encode()
-            if base_ref in self.repo.refs and base_name != branch:
-                base_head = self.repo.refs[base_ref]
-                for sha, _ in self._iter_commits(base_head, max_count=None):
-                    base_branch_commits.add(sha.hex())
-                break
-
-        count = 0
-        for sha, _ in self._iter_commits(head, max_count=None):
-            if branch not in ["main", "master"] and sha.hex() in base_branch_commits:
-                continue
-            count += 1
-        return count
+        return 0
     
     def count_commits(self, branch: str) -> int:
-        """Count commits for a branch - tries git-native first, falls back to dulwich."""
-        # Try git-native version first (has timeout support, avoids pack file corruption)
-        if hasattr(self, 'count_commits_native'):
+        """Count commits for a branch with caching."""
+        import subprocess
+        
+        # Check cache first - but validate HEAD SHA hasn't changed
+        if branch in self._commit_count_cache:
+            # Check if HEAD has changed
             try:
-                return self.count_commits_native(branch, timeout=10)
+                head_result = subprocess.run(
+                    ['git', 'rev-parse', branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    cwd=str(self.repo_path)
+                )
+                if head_result.returncode == 0:
+                    current_head_sha = head_result.stdout.strip()
+                    if branch in self._last_head_sha and self._last_head_sha[branch] == current_head_sha:
+                        # Cache is valid - return cached count
+                        return self._commit_count_cache[branch]
+                    # HEAD changed - update tracked SHA
+                    self._last_head_sha[branch] = current_head_sha
             except Exception:
-                # Fallback to dulwich if native fails
-                return self.count_commits_dulwich(branch)
-        else:
-            # Fallback to dulwich if native method doesn't exist
-            return self.count_commits_dulwich(branch)
+                # If HEAD check fails, use cache anyway (better than nothing)
+                if branch in self._commit_count_cache:
+                    return self._commit_count_cache[branch]
+        
+        # Cache miss or invalidated - fetch fresh count
+        count = self.count_commits_native(branch, timeout=10)
+        
+        # Update cache
+        self._commit_count_cache[branch] = count
+        
+        # Update HEAD SHA tracking
+        try:
+            head_result = subprocess.run(
+                ['git', 'rev-parse', branch],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if head_result.returncode == 0:
+                self._last_head_sha[branch] = head_result.stdout.strip()
+        except Exception:
+            pass
+        
+        return count
 
     def get_commit_diff(self, sha_hex: str) -> str:
         """Get diff for a commit using git-native command (avoids dulwich hex_to_sha issues)."""
@@ -626,7 +597,59 @@ class GitService:
         # Fallback to dulwich is disabled because it causes AssertionError with hex_to_sha
         # The error has already been returned above if git show failed
         # This code should never be reached, but kept for safety
-        return f"Error: Could not get diff for commit {sha_hex[:8]}. Both git show and dulwich fallback failed.\n"
+    
+    def get_file_diff(self, file_path: str, staged: bool = False) -> str:
+        """Get diff for a specific file (staged or unstaged changes)."""
+        import subprocess
+        
+        try:
+            if staged:
+                # Show staged changes: git diff --cached <file>
+                result = subprocess.run(
+                    ['git', 'diff', '--cached', '--', file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=str(self.repo_path)
+                )
+            else:
+                # Show unstaged changes: git diff <file>
+                result = subprocess.run(
+                    ['git', 'diff', '--', file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=str(self.repo_path)
+                )
+            
+            if result.returncode == 0:
+                return result.stdout if result.stdout else f"No changes in {file_path}"
+            else:
+                # For untracked files, git diff returns nothing, use git status instead
+                if not staged:
+                    # Check if file is untracked
+                    status_result = subprocess.run(
+                        ['git', 'status', '--porcelain', '--', file_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=str(self.repo_path)
+                    )
+                    if status_result.returncode == 0 and status_result.stdout.strip().startswith('??'):
+                        # Untracked file - show file contents
+                        try:
+                            with open(self.repo_path / file_path, 'r', encoding='utf-8', errors='replace') as f:
+                                content = f.read()
+                            return f"diff --git a/{file_path} b/{file_path}\nnew file mode 100644\nindex 0000000..0000000\n--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,{len(content.splitlines())} @@\n{content}"
+                        except Exception:
+                            return f"Untracked file: {file_path}"
+                
+                error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+                return f"Error: Could not get diff for {file_path}. {error_msg[:100]}\n"
+        except subprocess.TimeoutExpired:
+            return f"Error: Timeout getting diff for {file_path}\n"
+        except Exception as e:
+            return f"Error: {type(e).__name__}: {e}\n"
         
         # OLD DULWICH FALLBACK (DISABLED - causes AssertionError)
         # try:
@@ -779,17 +802,6 @@ class GitService:
                                     if len(parent_list) > 1:
                                         refs["is_merge"] = True
                                         refs["merge_parents"] = parent_list
-                                
-                                # Also check merge status from dulwich for accuracy
-                                try:
-                                    commit_bytes = bytes.fromhex(sha)
-                                    commit = self.repo[commit_bytes]
-                                    if len(commit.parents) > 1:
-                                        refs["is_merge"] = True
-                                        if not refs["merge_parents"]:
-                                            refs["merge_parents"] = [p.hex() for p in commit.parents]
-                                except Exception:
-                                    pass
             finally:
                 os.chdir(original_cwd)
         except Exception:
@@ -799,7 +811,9 @@ class GitService:
         return result_map
     
     def get_commit_refs(self, commit_sha: str) -> dict:
-        """Get branch references and metadata for a commit."""
+        """Get branch references and metadata for a commit using native git commands."""
+        import subprocess
+        
         result = {
             "branches": [],  # Local branches pointing to this commit
             "remote_branches": [],  # Remote branches pointing to this commit
@@ -809,50 +823,73 @@ class GitService:
             "merge_parents": [],  # Parent commits if merge
         }
         
-        commit_bytes = bytes.fromhex(commit_sha)
-        
-        # Check if this is HEAD
         try:
-            # Safely resolve HEAD - handle both symbolic and direct refs
-            head_ref = self.repo.refs.get(b"HEAD")
-            if head_ref:
-                # If it's a symbolic ref (starts with refs/), resolve it
-                if isinstance(head_ref, bytes) and len(head_ref) > 10 and head_ref.startswith(b"refs/heads/"):
-                    head_sha = self.repo.refs.get(head_ref)
-                    if head_sha and head_sha == commit_bytes:
-                        result["is_head"] = True
-                elif isinstance(head_ref, bytes) and len(head_ref) == 20:
-                    # Direct SHA (20 bytes)
-                    if head_ref == commit_bytes:
-                        result["is_head"] = True
-        except Exception:
-            pass
-        
-        # Check local branches
-        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/heads").items():
-            if ref_sha == commit_bytes:
-                branch_name = ref_name.decode().split("/heads/")[-1]
-                result["branches"].append(branch_name)
-        
-        # Check remote branches
-        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/remotes").items():
-            if ref_sha == commit_bytes:
-                # Extract remote/branch name (e.g., "origin/main" -> "origin/main")
-                remote_branch = ref_name.decode().replace("refs/remotes/", "")
-                result["remote_branches"].append(remote_branch)
-        
-        # Check tags
-        for ref_name, ref_sha in self.repo.refs.as_dict(b"refs/tags").items():
-            if ref_sha == commit_bytes:
-                tag_name = ref_name.decode().split("/tags/")[-1]
-                result["tags"].append(tag_name)
-        
-        # Check if merge commit
-        try:
-            commit = self.repo[commit_bytes]
-            if len(commit.parents) > 1:
-                result["is_merge"] = True
-                result["merge_parents"] = [p.hex() for p in commit.parents]
+            # Check if this is HEAD
+            head_result = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if head_result.returncode == 0 and head_result.stdout.strip() == commit_sha:
+                result["is_head"] = True
+            
+            # Get branches containing this commit
+            branch_result = subprocess.run(
+                ['git', 'branch', '--contains', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(self.repo_path)
+            )
+            if branch_result.returncode == 0:
+                for line in branch_result.stdout.strip().split('\n'):
+                    branch = line.strip().lstrip('*').strip()
+                    if branch:
+                        result["branches"].append(branch)
+            
+            # Get remote branches containing this commit
+            remote_branch_result = subprocess.run(
+                ['git', 'branch', '-r', '--contains', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(self.repo_path)
+            )
+            if remote_branch_result.returncode == 0:
+                for line in remote_branch_result.stdout.strip().split('\n'):
+                    remote_branch = line.strip()
+                    if remote_branch:
+                        result["remote_branches"].append(remote_branch)
+            
+            # Get tags containing this commit
+            tag_result = subprocess.run(
+                ['git', 'tag', '--contains', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(self.repo_path)
+            )
+            if tag_result.returncode == 0:
+                for line in tag_result.stdout.strip().split('\n'):
+                    tag = line.strip()
+                    if tag:
+                        result["tags"].append(tag)
+            
+            # Check if merge commit (multiple parents)
+            parents_result = subprocess.run(
+                ['git', 'rev-list', '--parents', '-n', '1', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(self.repo_path)
+            )
+            if parents_result.returncode == 0:
+                parts = parents_result.stdout.strip().split()
+                if len(parts) > 2:  # commit_sha + at least 2 parents
+                    result["is_merge"] = True
+                    result["merge_parents"] = parts[1:]  # Skip commit_sha, get parents
         except Exception:
             pass
         
@@ -898,7 +935,17 @@ class GitService:
         return result
     
     def get_branch_info(self, branch: str) -> dict:
-        """Get information about a branch."""
+        """Get information about a branch using native git commands (with caching)."""
+        import subprocess
+        
+        # Check cache first
+        if branch in self._branch_info_cache:
+            cached_info = self._branch_info_cache[branch].copy()
+            # Update is_current from current branch cache (may have changed)
+            if self._current_branch_cache is not None:
+                cached_info["is_current"] = (self._current_branch_cache == branch)
+            return cached_info
+        
         result = {
             "name": branch,
             "head_sha": None,
@@ -907,54 +954,71 @@ class GitService:
             "is_current": False,  # Whether this is the current branch
         }
         
-        try:
-            branch_ref = f"refs/heads/{branch}".encode()
-            if branch_ref in self.repo.refs:
-                result["head_sha"] = self.repo.refs[branch_ref].hex()
-        except Exception:
-            pass
+        # Get current branch (cached)
+        if self._current_branch_cache is None:
+            try:
+                current_branch_result = subprocess.run(
+                    ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    cwd=str(self.repo_path)
+                )
+                if current_branch_result.returncode == 0:
+                    self._current_branch_cache = current_branch_result.stdout.strip()
+            except Exception:
+                pass
         
-        # Check if current branch
+        result["is_current"] = (self._current_branch_cache == branch) if self._current_branch_cache else False
+        
         try:
-            head_ref = self.repo.refs[b"HEAD"]
-            # HEAD can be either a symbolic ref (b"refs/heads/main") or a SHA (40 bytes)
-            # Check if it's a symbolic ref by checking length and prefix
-            if isinstance(head_ref, bytes) and len(head_ref) > 10 and head_ref.startswith(b"refs/heads/"):
-                current_branch = head_ref.decode().split("/heads/")[-1]
-                result["is_current"] = (current_branch == branch)
+            # Get branch SHA
+            sha_result = subprocess.run(
+                ['git', 'rev-parse', branch],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if sha_result.returncode == 0:
+                result["head_sha"] = sha_result.stdout.strip()
         except Exception:
             pass
         
         # Check remote tracking
         try:
-            remote_ref = f"refs/remotes/origin/{branch}".encode()
-            if remote_ref in self.repo.refs:
-                result["remote_tracking"] = f"origin/{branch}"
-                result["upstream"] = branch
+            upstream_result = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', f'{branch}@{{u}}'],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if upstream_result.returncode == 0:
+                upstream = upstream_result.stdout.strip()
+                result["remote_tracking"] = upstream
+                # Extract branch name from upstream (e.g., "origin/main" -> "main")
+                if '/' in upstream:
+                    result["upstream"] = upstream.split('/')[-1]
         except Exception:
             pass
         
+        # Cache the result (excluding is_current which may change)
+        cache_entry = result.copy()
+        self._branch_info_cache[branch] = cache_entry
+        
         return result
+    
+    def invalidate_branch_info_cache(self, branch: str | None = None) -> None:
+        """Invalidate branch info cache (call on branch checkout)."""
+        if branch:
+            self._branch_info_cache.pop(branch, None)
+        else:
+            self._branch_info_cache.clear()
+        # Also invalidate current branch cache
+        self._current_branch_cache = None
 
-    def _find_in_tree(self, tree, path_parts: List[str]) -> Optional[bytes]:
-        """Recursively find file in tree and return its SHA."""
-        if not path_parts:
-            return None
-        name = path_parts[0].encode()
-        if name in tree:
-            entry = tree[name]  # entry is (mode, sha) tuple
-            mode, sha = entry
-            if len(path_parts) == 1:
-                # Last part - it's the file
-                return sha  # Return SHA
-            else:
-                # More parts - it's a directory, recurse
-                if stat.S_ISDIR(mode):
-                    subtree_obj = self.repo[sha]
-                    return self._find_in_tree(subtree_obj, path_parts[1:])
-                else:
-                    return None  # Not a directory, can't continue
-        return None
+    # _find_in_tree removed - no longer needed without dulwich
 
     def get_file_status(self) -> List[FileStatus]:
         """Optimized version using native git status --porcelain (10x faster than dulwich)."""
@@ -979,7 +1043,9 @@ class GitService:
                 except:
                     pass
             if result.returncode == 0:
-                # Get list of actually staged files to verify (fast check)
+                # Get list of actually staged files to verify (needed for edge cases)
+                # Sometimes git status --porcelain shows "M " (staged) even when nothing is staged
+                # This happens when the index was reset but git status hasn't updated
                 staged_files_set = set()
                 try:
                     staged_result = subprocess.run(
@@ -1002,9 +1068,6 @@ class GitService:
                         f.write(f"[DEBUG] Native git status output ({len(output_lines)} lines):\n")
                         for line in output_lines[:10]:  # Log first 10 lines
                             f.write(f"  {line}\n")
-                        f.write(f"[DEBUG] Actually staged files (from git diff --cached): {len(staged_files_set)} files\n")
-                        for staged_file in list(staged_files_set)[:5]:
-                            f.write(f"  {staged_file}\n")
                 except:
                     pass
                 for line in output_lines:
@@ -1078,7 +1141,6 @@ class GitService:
                         if not unstaged:
                             # If working status was ' ' (no unstaged), but file isn't staged,
                             # it means the file has changes but they're not staged
-                            # Check if file exists and has changes
                             unstaged = True
                     
                     # Determine status string

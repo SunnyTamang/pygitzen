@@ -2,5 +2,5 @@ exclude README.md
 include README_PYPI.md
 include LICENSE
 include pyproject.toml
-include git_service_cython.pyx
+# Cython removed - Python-only version
 recursive-include src/pygitzen *.py
