@@ -4131,7 +4131,7 @@ class PygitzenApp(App):
                                                 if sha.strip():
                                                     unpushed_commits.add(sha.strip())
                                             self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref}: fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (no @{u}, using {upstream_branch})")
+                                            _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref}: fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (no @{{u}}, using {upstream_branch})")
                                         else:
                                             _log_timing_message(f"[TIMING] git rev-list {actual_ref} --not {upstream_branch}: {rev_list_elapsed:.4f}s (ERROR: {unpushed_result.stderr})")
                                     else:
