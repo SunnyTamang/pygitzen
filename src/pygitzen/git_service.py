@@ -1154,10 +1154,17 @@ class GitService:
         """Get list of stashes using git stash list command."""
         import subprocess
         import re
+        from pathlib import Path
         
         stashes: List[StashInfo] = []
         
         try:
+            # Ensure repo_path is a Path object and resolve it
+            if isinstance(self.repo_path, str):
+                repo_path = Path(self.repo_path).resolve()
+            else:
+                repo_path = Path(self.repo_path).resolve()
+            
             # Use git stash list to get all stashes
             # Format: stash@{0}: WIP on branch: message
             # Or: stash@{0}: On branch: message
@@ -1166,7 +1173,7 @@ class GitService:
                 capture_output=True,
                 text=True,
                 timeout=5,
-                cwd=str(self.repo_path)
+                cwd=str(repo_path)
             )
             
             if result.returncode == 0 and result.stdout.strip():
@@ -1192,7 +1199,7 @@ class GitService:
                                 capture_output=True,
                                 text=True,
                                 timeout=2,
-                                cwd=str(self.repo_path)
+                                cwd=str(repo_path)
                             )
                             sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
                         except Exception:

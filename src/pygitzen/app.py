@@ -2620,19 +2620,53 @@ class PygitzenApp(App):
             
             # Load stashes immediately (fast operation)
             try:
+                # Get repo_path first (works for both Cython and Python versions)
+                repo_path = None
+                # Method 1: Direct attribute access
+                try:
+                    if hasattr(self.git, 'repo_path'):
+                        repo_path = self.git.repo_path
+                except (AttributeError, TypeError):
+                    pass
+                
+                # Method 2: Use getattr (works even if hasattr returns False for cython)
+                if repo_path is None:
+                    try:
+                        repo_path = getattr(self.git, 'repo_path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Method 3: Try via repo.path
+                if repo_path is None:
+                    try:
+                        if hasattr(self.git, 'repo'):
+                            repo = getattr(self.git, 'repo', None)
+                            if repo and hasattr(repo, 'path'):
+                                repo_path = getattr(repo, 'path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Fallback to current directory
+                if repo_path is None:
+                    repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
+                
+                # Convert to string/Path for consistency
+                if isinstance(repo_path, Path):
+                    repo_path_str = str(repo_path)
+                else:
+                    repo_path_str = str(repo_path) if repo_path else "."
+                
                 # Check if method exists (Cython version might not have it)
                 if hasattr(self.git, 'list_stashes'):
                     stashes = self.git.list_stashes()
                 else:
                     # Fallback to Python version if Cython doesn't have the method
                     from .git_service import GitService
-                    # Get repo_path from git service (both Python and Cython have this)
-                    repo_path = self.git.repo_path if hasattr(self.git, 'repo_path') else "."
-                    python_git = GitService(str(repo_path))
+                    python_git = GitService(repo_path_str)
                     stashes = python_git.list_stashes()
                 self.stash_pane.set_stashes(stashes)
             except Exception as e:
-                # If stash fetching fails, show empty (silently fail to avoid UI disruption)
+                # If stash fetching fails, show empty (log error for debugging)
                 import traceback
                 try:
                     with open("debug_stash.log", "a", encoding="utf-8") as f:
@@ -2714,15 +2748,49 @@ class PygitzenApp(App):
         
         # Update stash pane with actual stash entries
         try:
+            # Get repo_path first (works for both Cython and Python versions)
+            repo_path = None
+            # Method 1: Direct attribute access
+            try:
+                if hasattr(self.git, 'repo_path'):
+                    repo_path = self.git.repo_path
+            except (AttributeError, TypeError):
+                pass
+            
+            # Method 2: Use getattr (works even if hasattr returns False for cython)
+            if repo_path is None:
+                try:
+                    repo_path = getattr(self.git, 'repo_path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Method 3: Try via repo.path
+            if repo_path is None:
+                try:
+                    if hasattr(self.git, 'repo'):
+                        repo = getattr(self.git, 'repo', None)
+                        if repo and hasattr(repo, 'path'):
+                            repo_path = getattr(repo, 'path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Fallback to current directory
+            if repo_path is None:
+                repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
+            
+            # Convert to string/Path for consistency
+            if isinstance(repo_path, Path):
+                repo_path_str = str(repo_path)
+            else:
+                repo_path_str = str(repo_path) if repo_path else "."
+            
             # Check if method exists (Cython version might not have it)
             if hasattr(self.git, 'list_stashes'):
                 stashes = self.git.list_stashes()
             else:
                 # Fallback to Python version if Cython doesn't have the method
                 from .git_service import GitService
-                # Get repo_path from git service (both Python and Cython have this)
-                repo_path = self.git.repo_path if hasattr(self.git, 'repo_path') else "."
-                python_git = GitService(str(repo_path))
+                python_git = GitService(repo_path_str)
                 stashes = python_git.list_stashes()
             self.stash_pane.set_stashes(stashes)
         except Exception as e:
