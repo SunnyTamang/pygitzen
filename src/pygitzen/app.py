@@ -2305,6 +2305,7 @@ class PygitzenApp(App):
             self.loaded_commits = 0
             self._loading_commits = False
             self._loading_file_status = False
+            self._loading_stashes = False
             self._search_query: str = ""
             self._view_mode: str = "patch"  # "patch" or "log"
             
@@ -2772,72 +2773,16 @@ class PygitzenApp(App):
             self.staged_pane.append(ListItem(Static(loading_text)))
             self.changes_pane.append(ListItem(Static(loading_text)))
             
-            # Load stashes immediately (fast operation)
-            try:
-                # Get repo_path first (works for both Cython and Python versions)
-                repo_path = None
-                # Method 1: Direct attribute access
-                try:
-                    if hasattr(self.git, 'repo_path'):
-                        repo_path = self.git.repo_path
-                except (AttributeError, TypeError):
-                    pass
-                
-                # Method 2: Use getattr (works even if hasattr returns False for cython)
-                if repo_path is None:
-                    try:
-                        repo_path = getattr(self.git, 'repo_path', None)
-                    except (AttributeError, TypeError):
-                        pass
-                
-                # Method 3: Try via repo.path
-                if repo_path is None:
-                    try:
-                        if hasattr(self.git, 'repo'):
-                            repo = getattr(self.git, 'repo', None)
-                            if repo and hasattr(repo, 'path'):
-                                repo_path = getattr(repo, 'path', None)
-                    except (AttributeError, TypeError):
-                        pass
-                
-                # Fallback to current directory
-                if repo_path is None:
-                    repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
-                
-                # Convert to string/Path for consistency
-                if isinstance(repo_path, Path):
-                    repo_path_str = str(repo_path)
-                else:
-                    repo_path_str = str(repo_path) if repo_path else "."
-                
-                # Check if method exists (Cython version might not have it)
-                if hasattr(self.git, 'list_stashes'):
-                    stashes = self.git.list_stashes()
-                else:
-                    # Fallback to Python version if Cython doesn't have the method
-                    from .git_service import GitService
-                    python_git = GitService(repo_path_str)
-                    stashes = python_git.list_stashes()
-                # Store stashes for access when selected
-                self.stashes = stashes
-                self.stash_pane.set_stashes(stashes)
-            except Exception as e:
-                # If stash fetching fails, show empty (log error for debugging)
-                import traceback
-                try:
-                    with open("debug_stash.log", "a", encoding="utf-8") as f:
-                        f.write(f"Error loading stashes: {type(e).__name__}: {e}\n")
-                        f.write(f"Traceback:\n{traceback.format_exc()}\n")
-                except:
-                    pass
-                self.stashes = []
-                self.stash_pane.set_stashes([])
+            # Initialize stashes as empty (will be loaded in background)
+            self.stashes = []
+            self.stash_pane.set_stashes([])
             
             # Load heavy operations in background (non-blocking)
             # Store branch for background workers
             self._pending_branch = self.active_branch
             self.load_commits_count_background(self.active_branch)
             self.load_file_status_background()
+            self.load_stashes_background()
             
             total_elapsed = time.perf_counter() - total_start
             _log_timing_message(f"===== refresh_data_fast TOTAL: {total_elapsed:.4f}s =====")
@@ -2903,66 +2848,7 @@ class PygitzenApp(App):
         if self.branches:
             self.branches_pane.set_branches(self.branches, self.active_branch)
         
-        # Update stash pane with actual stash entries
-        try:
-            # Get repo_path first (works for both Cython and Python versions)
-            repo_path = None
-            # Method 1: Direct attribute access
-            try:
-                if hasattr(self.git, 'repo_path'):
-                    repo_path = self.git.repo_path
-            except (AttributeError, TypeError):
-                pass
-            
-            # Method 2: Use getattr (works even if hasattr returns False for cython)
-            if repo_path is None:
-                try:
-                    repo_path = getattr(self.git, 'repo_path', None)
-                except (AttributeError, TypeError):
-                    pass
-            
-            # Method 3: Try via repo.path
-            if repo_path is None:
-                try:
-                    if hasattr(self.git, 'repo'):
-                        repo = getattr(self.git, 'repo', None)
-                        if repo and hasattr(repo, 'path'):
-                            repo_path = getattr(repo, 'path', None)
-                except (AttributeError, TypeError):
-                    pass
-            
-            # Fallback to current directory
-            if repo_path is None:
-                repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
-            
-            # Convert to string/Path for consistency
-            if isinstance(repo_path, Path):
-                repo_path_str = str(repo_path)
-            else:
-                repo_path_str = str(repo_path) if repo_path else "."
-            
-            # Check if method exists (Cython version might not have it)
-            if hasattr(self.git, 'list_stashes'):
-                stashes = self.git.list_stashes()
-            else:
-                # Fallback to Python version if Cython doesn't have the method
-                from .git_service import GitService
-                python_git = GitService(repo_path_str)
-                stashes = python_git.list_stashes()
-            # Store stashes for access when selected
-            self.stashes = stashes
-            self.stash_pane.set_stashes(stashes)
-        except Exception as e:
-            # If stash fetching fails, show empty (log error for debugging)
-            import traceback
-            try:
-                with open("debug_stash.log", "a", encoding="utf-8") as f:
-                    f.write(f"Error loading stashes: {type(e).__name__}: {e}\n")
-                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
-            except:
-                pass
-            self.stashes = []
-            self.stash_pane.set_stashes([])
+        # Stashes are loaded in background (not here to avoid blocking)
         
         # Update command log
         # self.command_log_pane.update_log("Repository refreshed successfully!")
@@ -3330,6 +3216,95 @@ class PygitzenApp(App):
         except Exception:
             pass  # Silently fail if branch changed
     
+    def load_stashes_background(self) -> None:
+        """Load stashes in background (non-blocking)."""
+        if getattr(self, '_loading_stashes', False):
+            return
+        
+        self._loading_stashes = True
+        
+        # Use a thread to load stashes asynchronously without blocking the UI
+        import threading
+        
+        def load_stashes_in_thread():
+            """Load stashes in background thread (non-blocking)."""
+            stash_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background START")
+            try:
+                # Get repo_path (cached if available)
+                repo_path = getattr(self, '_cached_repo_path', None)
+                if repo_path is None:
+                    # Method 1: Direct attribute access
+                    try:
+                        if hasattr(self.git, 'repo_path'):
+                            repo_path = self.git.repo_path
+                    except (AttributeError, TypeError):
+                        pass
+                    
+                    # Method 2: Use getattr
+                    if repo_path is None:
+                        try:
+                            repo_path = getattr(self.git, 'repo_path', None)
+                        except (AttributeError, TypeError):
+                            pass
+                    
+                    # Method 3: Try via repo.path
+                    if repo_path is None:
+                        try:
+                            if hasattr(self.git, 'repo'):
+                                repo = getattr(self.git, 'repo', None)
+                                if repo and hasattr(repo, 'path'):
+                                    repo_path = getattr(repo, 'path', None)
+                        except (AttributeError, TypeError):
+                            pass
+                    
+                    # Fallback
+                    if repo_path is None:
+                        repo_path = self.repo_path if hasattr(self, 'repo_path') else "."
+                    
+                    # Cache it for future use
+                    self._cached_repo_path = repo_path
+                
+                # Convert to string/Path for consistency
+                if isinstance(repo_path, Path):
+                    repo_path_str = str(repo_path)
+                else:
+                    repo_path_str = str(repo_path) if repo_path else "."
+                
+                get_stashes_start = time.perf_counter()
+                # Check if method exists (Cython version might not have it)
+                if hasattr(self.git, 'list_stashes'):
+                    stashes = self.git.list_stashes()
+                else:
+                    # Fallback to Python version if Cython doesn't have the method
+                    from .git_service import GitService
+                    python_git = GitService(repo_path_str)
+                    stashes = python_git.list_stashes()
+                get_stashes_elapsed = time.perf_counter() - get_stashes_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   list_stashes: {get_stashes_elapsed:.4f}s ({len(stashes)} stashes)")
+                
+                # Update UI from main thread (use queue which is thread-safe)
+                stashes_copy = stashes.copy()
+                self._ui_update_queue.put(lambda: self._update_stashes_ui(stashes_copy))
+                
+                stash_total = time.perf_counter() - stash_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_stashes_background TOTAL: {stash_total:.4f}s")
+            except Exception as e:
+                # If stash fetching fails, show empty
+                import traceback
+                try:
+                    with open("debug_stash.log", "a", encoding="utf-8") as f:
+                        f.write(f"Error loading stashes (background): {type(e).__name__}: {e}\n")
+                        f.write(f"Traceback:\n{traceback.format_exc()}\n")
+                except:
+                    pass
+                
+                # Update UI from main thread on error (use queue which is thread-safe)
+                self._ui_update_queue.put(lambda: self._update_stashes_ui([]))
+        
+        thread = threading.Thread(target=load_stashes_in_thread, daemon=True)
+        thread.start()
+    
     def load_file_status_background(self) -> None:
         """Load file status in background (non-blocking)."""
         if self._loading_file_status:
@@ -3385,6 +3360,16 @@ class PygitzenApp(App):
         # Start thread immediately - doesn't block UI
         thread = threading.Thread(target=load_files_in_thread, daemon=True)
         thread.start()
+    
+    def _update_stashes_ui(self, stashes: list) -> None:
+        """Update stashes UI (called from main thread)."""
+        try:
+            self.stashes = stashes
+            self.stash_pane.set_stashes(stashes)
+            self._loading_stashes = False
+        except Exception:
+            # Silently fail if UI update fails
+            self._loading_stashes = False
     
     def _update_file_status_ui(self, files_with_changes: list) -> None:
         """Update file status UI (called from main thread) - optimized for large file lists."""

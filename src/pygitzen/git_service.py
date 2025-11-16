@@ -1151,7 +1151,9 @@ class GitService:
         return []
 
     def list_stashes(self) -> List[StashInfo]:
-        """Get list of stashes using git stash list command."""
+        """Get list of stashes using git stash list command.
+        Optimized: Doesn't fetch SHA (lazy-loaded when needed for performance).
+        """
         import subprocess
         import re
         from pathlib import Path
@@ -1192,24 +1194,13 @@ class GitService:
                         branch = match.group(2).strip()
                         message = match.group(3).strip()
                         
-                        # Get stash SHA using git rev-parse
-                        try:
-                            sha_result = subprocess.run(
-                                ['git', 'rev-parse', f'stash@{{{index}}}'],
-                                capture_output=True,
-                                text=True,
-                                timeout=2,
-                                cwd=str(repo_path)
-                            )
-                            sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
-                        except Exception:
-                            sha = ""
-                        
+                        # Don't fetch SHA here - it's expensive and only needed when showing details
+                        # SHA will be fetched lazily if needed
                         stashes.append(StashInfo(
                             index=index,
                             branch=branch,
                             message=message,
-                            sha=sha
+                            sha=""  # Empty SHA - can be fetched later if needed
                         ))
         except Exception:
             # If git command fails, return empty list
