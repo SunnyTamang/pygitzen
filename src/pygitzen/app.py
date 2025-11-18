@@ -3081,6 +3081,11 @@ class PygitzenApp(App):
         self.branches = self.git.list_branches()
         branch_elapsed = time.perf_counter() - branch_start
         _log_timing_message(f"list_branches: {branch_elapsed:.4f}s")
+        
+        # Calculate sync status for all branches in background
+        if self.branches:
+            self._calculate_all_branches_sync_status()
+        
         if self.branches:
             # Try to restore the previous branch selection if it still exists
             if previous_branch:
@@ -3156,6 +3161,11 @@ class PygitzenApp(App):
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
         self.branches = self.git.list_branches()
+        
+        # Calculate sync status for all branches in background
+        if self.branches:
+            self._calculate_all_branches_sync_status()
+        
         if self.branches:
             # Try to restore the previous branch selection if it still exists
             if previous_branch:
@@ -3179,7 +3189,7 @@ class PygitzenApp(App):
             else:
                 # No previous branch, use first branch
                 self.active_branch = self.branches[0].name
-                self.branches_pane.set_branches(self.branches, self.active_branch)
+                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                 self.branches_pane.index = 0
                 self.branches_pane.highlighted = 0
 
@@ -3187,6 +3197,88 @@ class PygitzenApp(App):
             self.load_commits(self.active_branch)
             self.update_status_info()
 
+    def _calculate_branch_sync_status(self, branch: str) -> dict:
+        """Calculate sync status (behind/ahead counts) for a branch.
+        
+        Returns dict with keys: 'behind', 'ahead', 'synced', 'upstream'
+        """
+        import subprocess
+        
+        repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+        sync_status = {"behind": 0, "ahead": 0, "synced": False, "upstream": None}
+        
+        try:
+            # Get upstream tracking branch
+            upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{branch}@{{u}}"]
+            upstream_result = subprocess.run(
+                upstream_cmd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_path_str
+            )
+            
+            if upstream_result.returncode == 0:
+                upstream = upstream_result.stdout.strip()
+                sync_status["upstream"] = upstream
+                
+                # Calculate behind/ahead using git rev-list --left-right --count
+                # Format: <behind>	<ahead> (tab-separated)
+                rev_list_cmd = ["git", "rev-list", "--left-right", "--count", f"{upstream}...{branch}"]
+                rev_list_result = subprocess.run(
+                    rev_list_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=repo_path_str
+                )
+                
+                if rev_list_result.returncode == 0:
+                    parts = rev_list_result.stdout.strip().split("\t")
+                    if len(parts) == 2:
+                        behind = int(parts[0].strip()) if parts[0].strip().isdigit() else 0
+                        ahead = int(parts[1].strip()) if parts[1].strip().isdigit() else 0
+                        sync_status["behind"] = behind
+                        sync_status["ahead"] = ahead
+                        sync_status["synced"] = (behind == 0 and ahead == 0)
+        except Exception:
+            # If sync status calculation fails, return default values
+            pass
+        
+        return sync_status
+    
+    def _calculate_all_branches_sync_status(self) -> None:
+        """Calculate sync status for all branches in background."""
+        import threading
+        
+        def calculate_sync_in_thread():
+            """Calculate sync status for all branches in background thread."""
+            try:
+                updated_count = 0
+                for branch in self.branches:
+                    branch_name = branch.name
+                    # Skip if already cached (unless we want to refresh)
+                    if branch_name not in self._branch_sync_status_cache:
+                        sync_status = self._calculate_branch_sync_status(branch_name)
+                        self._branch_sync_status_cache[branch_name] = sync_status
+                        updated_count += 1
+                
+                # Update UI once after all branches are calculated (more efficient)
+                if updated_count > 0 and self.branches:
+                    self.call_from_thread(
+                        lambda: self.branches_pane.set_branches(
+                            self.branches, 
+                            self.active_branch, 
+                            self._branch_sync_status_cache
+                        )
+                    )
+            except Exception:
+                pass  # Silently fail if calculation errors
+        
+        # Start background thread
+        thread = threading.Thread(target=calculate_sync_in_thread, daemon=True)
+        thread.start()
+    
     def update_status_info(self) -> None:
         """Update status pane with current branch info."""
         if self.active_branch:
@@ -3210,7 +3302,11 @@ class PygitzenApp(App):
             self.staged_pane.update_files([])
             self.changes_pane.update_files([])
         
-        # Update branches pane with sync status
+        # Calculate sync status for all branches in background
+        if self.branches:
+            self._calculate_all_branches_sync_status()
+        
+        # Update branches pane with sync status (will be updated again when sync status is calculated)
         if self.branches:
             self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
         
