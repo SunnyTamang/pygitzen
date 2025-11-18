@@ -368,9 +368,15 @@ class BranchesPane(ListView):
                 text.append("  ", style="white")
             
             # Recency (time since last commit) - format: "18h ", "1d ", etc.
+            # Pad to fixed width (4 chars) for alignment: "36s ", "2h  ", "2d  ", etc.
             recency = format_recency(branch.timestamp)
             if recency:
-                text.append(f"{recency} ", style="dim white")
+                # Pad recency to 4 characters for consistent alignment
+                recency_padded = f"{recency:<4}"
+                text.append(recency_padded, style="dim white")
+            else:
+                # If no recency, add 4 spaces to maintain alignment
+                text.append("    ", style="dim white")
             
             # Branch name
             text.append(branch.name, style="white")
@@ -442,12 +448,20 @@ class RemotesPane(ListView):
         for remote in remotes:
             from rich.text import Text
             text = Text()
+            
+            # Always use "  " for alignment (matching branches pane format)
             text.append("  ", style="white")
             
             # Recency (time since last commit) - format: "18h ", "1d ", etc.
+            # Pad to fixed width (4 chars) for alignment: "36s ", "2h  ", "2d  ", etc.
             recency = format_recency(remote.timestamp)
             if recency:
-                text.append(f"{recency} ", style="dim white")
+                # Pad recency to 4 characters for consistent alignment
+                recency_padded = f"{recency:<4}"
+                text.append(recency_padded, style="dim white")
+            else:
+                # If no recency, add 4 spaces to maintain alignment
+                text.append("    ", style="dim white")
             
             # Remote branch name (e.g., origin/main)
             text.append(remote.name, style="white")
