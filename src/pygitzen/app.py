@@ -7,7 +7,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
-from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input
+from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input, TabbedContent, TabPane
 from textual.reactive import reactive
 from textual import events
 from textual.binding import Binding
@@ -18,6 +18,51 @@ from rich.syntax import Syntax
 from rich.panel import Panel
 
 from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo
+
+# Helper function to format time recency (e.g., "18h", "1d", "1w")
+def format_recency(timestamp: int) -> str:
+    """Format timestamp as human-readable recency (e.g., '18h', '1d', '1w').
+    
+    Args:
+        timestamp: Unix timestamp (0 if not available)
+    
+    Returns:
+        Formatted string like "18h", "1d", "1w", or empty string if timestamp is 0
+    """
+    if timestamp == 0:
+        return ""
+    
+    import time
+    now = int(time.time())
+    diff_seconds = now - timestamp
+    
+    if diff_seconds < 60:
+        # Less than a minute
+        return f"{diff_seconds}s"
+    elif diff_seconds < 3600:
+        # Less than an hour - show minutes
+        minutes = diff_seconds // 60
+        return f"{minutes}m"
+    elif diff_seconds < 86400:
+        # Less than a day - show hours
+        hours = diff_seconds // 3600
+        return f"{hours}h"
+    elif diff_seconds < 604800:
+        # Less than a week - show days
+        days = diff_seconds // 86400
+        return f"{days}d"
+    elif diff_seconds < 2592000:
+        # Less than a month - show weeks
+        weeks = diff_seconds // 604800
+        return f"{weeks}w"
+    elif diff_seconds < 31536000:
+        # Less than a year - show months
+        months = diff_seconds // 2592000
+        return f"{months}mo"
+    else:
+        # Years
+        years = diff_seconds // 31536000
+        return f"{years}y"
 
 # Performance timing utilities
 _TIMING_LOG_FILE = None
@@ -146,11 +191,39 @@ class StatusPane(Static):
         super().__init__(*args, **kwargs)
         self.border_title = "Status"
     
-    def update_status(self, branch: str, repo_path: str) -> None:
+    def update_status(self, branch: str, repo_path: str, sync_status: dict | None = None) -> None:
+        """Update status pane with branch info and optional sync status.
+        
+        Args:
+            branch: Branch name
+            repo_path: Repository path
+            sync_status: Optional dict with 'behind', 'ahead', 'synced', 'upstream' keys
+        """
         from rich.text import Text
         repo_name = repo_path.split('/')[-1]
         status_text = Text()
-        status_text.append("✓ ", style="green")
+        
+        # Add sync status indicators if available
+        if sync_status:
+            behind = sync_status.get("behind", 0)
+            ahead = sync_status.get("ahead", 0)
+            synced = sync_status.get("synced", False)
+            
+            if synced and behind == 0 and ahead == 0:
+                # Fully synced
+                status_text.append("✓ ", style="green")
+            else:
+                # Show behind/ahead counts
+                if behind > 0:
+                    status_text.append(f"↓{behind} ", style="red")
+                if ahead > 0:
+                    status_text.append(f"↑{ahead} ", style="yellow")
+                if behind == 0 and ahead == 0:
+                    status_text.append("✓ ", style="green")
+        else:
+            # Default checkmark if no sync status
+            status_text.append("✓ ", style="green")
+        
         status_text.append(f"{repo_name} → {branch}", style="white")
         self.update(status_text)
 
@@ -271,22 +344,257 @@ class BranchesPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Local branches"
     
-    def set_branches(self, branches: list[BranchInfo], current_branch: str) -> None:
+    def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
+        """Set branches with optional sync status indicators.
+        
+        Args:
+            branches: List of branch info
+            current_branch: Name of current branch
+            sync_status: Optional dict mapping branch name to sync status dict with keys:
+                'behind', 'ahead', 'synced', 'upstream'
+        """
         self.clear()
+        if sync_status is None:
+            sync_status = {}
+        
         for branch in branches:
             from rich.text import Text
             text = Text()
+            
+            # Current branch indicator
             if branch.name == current_branch:
                 text.append("* ", style="green")
-                text.append(branch.name, style="white")
             else:
                 text.append("  ", style="white")
-                text.append(branch.name, style="white")
+            
+            # Recency (time since last commit) - format: "18h ", "1d ", etc.
+            recency = format_recency(branch.timestamp)
+            if recency:
+                text.append(f"{recency} ", style="dim white")
+            
+            # Branch name
+            text.append(branch.name, style="white")
+            
+            # Sync status indicators
+            branch_sync = sync_status.get(branch.name, {})
+            behind = branch_sync.get("behind", 0)
+            ahead = branch_sync.get("ahead", 0)
+            synced = branch_sync.get("synced", False)
+            
+            # Add sync status indicators
+            if synced and behind == 0 and ahead == 0:
+                # Fully synced
+                text.append(" ✓", style="green")
+            else:
+                # Show behind/ahead counts
+                if behind > 0:
+                    text.append(f" ↓{behind}", style="red")
+                if ahead > 0:
+                    text.append(f" ↑{ahead}", style="yellow")
             
             item = ListItem(Static(text))
             if branch.name == current_branch:
                 item.add_class("current-branch")
             self.append(item)
+
+
+class RemotesPane(ListView):
+    """Remotes pane showing remote branches."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.border_title = "Remotes"
+        self._parent_app = None  # Will be set by parent
+        self._remotes: list[BranchInfo] = []  # Store remotes for selection access
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+        self._last_highlighted = None
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        if highlighted is not None:
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-remote")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if highlighted < len(self.children):
+                try:
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-remote")
+                        self._last_highlighted = highlighted
+                except:
+                    pass
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
+    
+    def set_remotes(self, remotes: list[BranchInfo]) -> None:
+        self.clear()
+        self._remotes = remotes  # Store remotes for selection access
+        
+        for remote in remotes:
+            from rich.text import Text
+            text = Text()
+            text.append("  ", style="white")
+            text.append(remote.name, style="white")
+            
+            item = ListItem(Static(text))
+            self.append(item)
+    
+    def on_list_view_selected(self, event) -> None:
+        """Handle remote selection - show remote info."""
+        if self._on_render_to_main:
+            try:
+                self._on_render_to_main()
+            except Exception:
+                pass
+
+
+class TagsPane(ListView):
+    """Tags pane showing tags with virtual scrolling."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.border_title = "Tags"
+        self._parent_app = None  # Will be set by parent
+        self._tags: list[BranchInfo] = []  # Store all loaded tags
+        self._loaded_tags_count = 0  # How many tags we've loaded
+        self._total_tags_count = 0  # Total number of tags available
+        self._page_size = 200  # Load 200 tags at a time
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+        self._last_highlighted = None
+        self._rendered_count = 0  # Track how many tags are actually rendered in UI
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        if highlighted is not None:
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-tag")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if highlighted < len(self.children):
+                try:
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-tag")
+                        self._last_highlighted = highlighted
+                except:
+                    pass
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
+    
+    def set_tags(self, tags: list[BranchInfo], total_count: int = 0, append: bool = False) -> None:
+        """Set tags in the pane, with support for virtual scrolling.
+        
+        Args:
+            tags: List of tags to display
+            total_count: Total number of tags available (for virtual scrolling)
+            append: If True, append to existing tags; if False, replace
+        """
+        if not append:
+            self.clear()
+            self._tags = []
+            self._loaded_tags_count = 0
+            self._rendered_count = 0  # Reset rendered count on initial load
+            # Store initial tags and set total count
+            self._tags = tags.copy()
+            self._loaded_tags_count = len(self._tags)
+            self._total_tags_count = total_count if total_count > 0 else len(self._tags)
+        else:
+            # Append mode: add new tags to existing list
+            self._tags.extend(tags)
+            self._loaded_tags_count = len(self._tags)
+            # Keep existing total_count (don't overwrite it)
+        
+        # CRITICAL: Limit initial rendering to prevent UI blocking on large repos (59k+ tags)
+        # Only render first 200 tags initially, rest will be loaded on scroll (virtual scrolling)
+        # This matches the approach used for commits - fast initial render, load more on demand
+        if append:
+            # When appending, render the NEW tags that were just passed in (not all tags)
+            # This is for virtual scrolling - we only render the newly loaded batch
+            tags_to_render = tags  # Render only the new tags being appended
+        else:
+            # Initial load: render first 200 tags
+            initial_limit = 200
+            tags_to_render = self._tags[:initial_limit] if len(self._tags) > initial_limit else self._tags
+        
+        # Calculate max widths for proper alignment (like Lazygit's column layout)
+        # Use all tags for width calculation, but only render subset
+        if tags_to_render:
+            # Calculate max recency width (e.g., "1mo" = 3 chars)
+            max_recency_width = 0
+            for tag in tags_to_render:
+                if tag.timestamp > 0:
+                    recency = format_recency(tag.timestamp)
+                    if recency:
+                        max_recency_width = max(max_recency_width, len(recency))
+            
+            # Calculate max tag name width for alignment
+            max_name_width = max(len(tag.name) for tag in tags_to_render) if tags_to_render else 0
+            # Add some padding for better readability
+            max_name_width = max(max_name_width, 15)  # Minimum width for alignment
+        else:
+            max_recency_width = 0
+            max_name_width = 15
+        
+        # Only render the limited subset (not all 59k tags)
+        for tag in tags_to_render:
+            from rich.text import Text
+            text = Text()
+            
+            # Add recency with fixed width (right-aligned, like Lazygit)
+            if tag.timestamp > 0:
+                recency = format_recency(tag.timestamp)
+                if recency:
+                    # Right-align recency in fixed-width column
+                    text.append(f"{recency:>{max_recency_width}} ", style="dim white")
+                else:
+                    # Empty recency, add padding
+                    text.append(" " * (max_recency_width + 1), style="dim white")
+            else:
+                # No timestamp, add padding
+                text.append(" " * (max_recency_width + 1), style="dim white")
+            
+            # Add tag name with fixed width (left-aligned, like Lazygit column 1)
+            text.append(f"{tag.name:<{max_name_width}} ", style="white")
+            
+            # Add tag message (like Lazygit column 2) - shown in yellow
+            message = getattr(tag, 'message', '')
+            if message:
+                text.append(message, style="yellow")
+            
+            item = ListItem(Static(text))
+            self.append(item)
+        
+        # Update rendered count
+        self._rendered_count = len(self.children)
+    
+    def append_tags(self, tags: list[BranchInfo]) -> None:
+        """Append more tags (for virtual scrolling)."""
+        self.set_tags(tags, append=True)
+    
+    def on_list_view_selected(self, event) -> None:
+        """Handle tag selection - show tag info and git log graph."""
+        if self._on_render_to_main:
+            try:
+                self._on_render_to_main()
+            except Exception:
+                pass
 
 
 class CommitsPane(ListView):
@@ -587,6 +895,12 @@ class StashPane(ListView):
             from textual.widgets import ListItem, Static
             
             text = Text()
+            
+            # Recency (time since stash creation) - format: "18h ", "1d ", etc.
+            recency = format_recency(stash.timestamp)
+            if recency:
+                text.append(f"{recency} ", style="dim white")
+            
             # Format: stash@{index}: branch: message
             text.append(f"stash@{{{stash.index}}}", style="cyan")
             text.append(": ", style="white")
@@ -595,7 +909,7 @@ class StashPane(ListView):
             
             # Show full message, wrap if too long
             message = stash.message
-            max_line_length = 55  # Maximum characters per line (allowing for indentation)
+            max_line_length = 50  # Maximum characters per line (adjusted for recency)
             
             if len(message) <= max_line_length:
                 # Short message, show on one line
@@ -1978,15 +2292,46 @@ class PygitzenApp(App):
         border: solid green;
     }
     
-    #branches-pane {
-        height: 4;
+    #branches-tabbed {
+        height: 9;
         border: solid white;
+        background: #1e1e1e;
+    }
+    
+    #branches-tabbed:focus,
+    #branches-tabbed:focus-within {
+        border: solid green;
+    }
+    
+    #branches-tabbed > TabbedContent > Tab {
+        background: #1e1e1e;
+        color: #cccccc;
+    }
+    
+    #branches-tabbed > TabbedContent > Tab.--active {
+        background: #2d2d2d;
+        color: white;
+    }
+    
+    #branches-pane {
+        height: 1fr;
+        border: none;
         background: #1e1e1e;
         overflow: auto;
     }
     
-    #branches-pane:focus {
-        border: solid green;
+    #remotes-pane {
+        height: 1fr;
+        border: none;
+        background: #1e1e1e;
+        overflow: auto;
+    }
+    
+    #tags-pane {
+        height: 1fr;
+        border: none;
+        background: #1e1e1e;
+        overflow: auto;
     }
     
     #commits-pane {
@@ -2016,7 +2361,7 @@ class PygitzenApp(App):
     }
     
     #stash-pane {
-        height: 5;
+        height: 8;
         border: solid white;
         background: #1e1e1e;
         overflow: auto;
@@ -2326,6 +2671,9 @@ class PygitzenApp(App):
             # Maps branch -> remote HEAD SHA (for remote branches)
             self._last_remote_head_sha: dict[str, str] = {}
             
+            # Cache branch sync status (behind/ahead counts)
+            self._branch_sync_status_cache: dict[str, dict] = {}
+            
             init_elapsed = time.perf_counter() - init_start
             _log_timing_message(f"[TIMING] ===== PygitzenApp.__init__ TOTAL: {init_elapsed:.4f}s =====")
         except NotGitRepository:
@@ -2340,7 +2688,10 @@ class PygitzenApp(App):
                 self.status_pane = StatusPane(id="status-pane")
                 self.staged_pane = StagedPane(id="staged-pane")
                 self.changes_pane = ChangesPane(id="changes-pane")
+                # Create branches/remotes/tags panes
                 self.branches_pane = BranchesPane(id="branches-pane")
+                self.remotes_pane = RemotesPane(id="remotes-pane")
+                self.tags_pane = TagsPane(id="tags-pane")
                 self.commits_pane = CommitsPane(id="commits-pane")
                 self.search_input = CommitSearchInput(id="commit-search-input")
                 self.stash_pane = StashPane(id="stash-pane")
@@ -2353,7 +2704,15 @@ class PygitzenApp(App):
                     yield self.staged_pane
                     yield self.changes_pane
                 
-                yield self.branches_pane
+                # TabbedContent for branches/remotes/tags
+                with TabbedContent(id="branches-tabbed", initial="branches-tab") as self.branches_tabbed:
+                    with TabPane("Local branches", id="branches-tab"):
+                        yield self.branches_pane
+                    with TabPane("Remotes", id="remotes-tab"):
+                        yield self.remotes_pane
+                    with TabPane("Tags", id="tags-tab"):
+                        yield self.tags_pane
+                
                 yield self.commits_pane
                 yield self.search_input
                 yield self.stash_pane
@@ -2708,6 +3067,12 @@ class PygitzenApp(App):
         total_start = time.perf_counter()
         _log_timing_message("===== refresh_data_fast START =====")
         
+        # Clear caches on refresh to ensure fresh data
+        self._remote_commits_cache.clear()
+        self._commit_count_cache.clear()
+        self._last_head_sha.clear()
+        self._last_remote_head_sha.clear()
+        
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
         
@@ -2726,14 +3091,14 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     # Ensure BranchesPane ListView selection matches (set after list is populated)
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
                     # Branch was deleted, fall back to first branch
                     self.active_branch = self.branches[0].name
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     self.branches_pane.index = 0
                     self.branches_pane.highlighted = 0
             else:
@@ -2801,14 +3166,14 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     # Ensure BranchesPane ListView selection matches (set after list is populated)
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
                     # Branch was deleted, fall back to first branch
                     self.active_branch = self.branches[0].name
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     self.branches_pane.index = 0
                     self.branches_pane.highlighted = 0
             else:
@@ -2825,7 +3190,8 @@ class PygitzenApp(App):
     def update_status_info(self) -> None:
         """Update status pane with current branch info."""
         if self.active_branch:
-            self.status_pane.update_status(self.active_branch, self.repo_path)
+            current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
+            self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
         
         # Update staged and changes panes with actual file status
         try:
@@ -2844,9 +3210,9 @@ class PygitzenApp(App):
             self.staged_pane.update_files([])
             self.changes_pane.update_files([])
         
-        # Update branches pane
+        # Update branches pane with sync status
         if self.branches:
-            self.branches_pane.set_branches(self.branches, self.active_branch)
+            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
         
         # Stashes are loaded in background (not here to avoid blocking)
         
@@ -3938,13 +4304,14 @@ class PygitzenApp(App):
                         commit.pushed = normalized_sha not in normalized_unpushed
                 else:
                     # No cache yet - set merged status at least
-                    # Assume commits NOT on main are pushed (yellow) until background thread determines otherwise
-                    # This matches lazygit behavior
+                    # Don't assume push status - wait for background thread to determine it correctly
+                    # This prevents showing incorrect yellow (pushed) status on refresh
                     for commit in commits:
                         normalized_sha = _normalize_commit_sha(commit.sha)
                         commit.merged = normalized_sha in normalized_merged
-                        # Assume pushed if not merged (will be corrected by background thread if wrong)
-                        commit.pushed = normalized_sha not in normalized_merged
+                        # Don't set pushed status yet - let background thread determine it
+                        # This prevents incorrect status on refresh
+                        commit.pushed = False  # Will be updated by background thread
             
             # Start background thread to update commit count and push status
             def update_commits_metadata_background():
@@ -4766,16 +5133,57 @@ class PygitzenApp(App):
         if event.list_view is self.branches_pane:
             index = event.index
             if 0 <= index < len(self.branches):
-                self.active_branch = self.branches[index].name
-                # Switch to log view when branch is selected
-                self._view_mode = "log"
-                self.patch_pane.styles.display = "none"
-                self.log_pane.styles.display = "block"
-                # Load commits for the selected branch (matching lazygit - shows branch-specific commits)
-                self.load_commits(self.active_branch)
-                # Load commits with full history for feature branches (for log pane)
-                self.load_commits_for_log(self.active_branch)
-                self.update_status_info()
+                selected_branch = self.branches[index].name
+                should_reload = False
+                
+                if selected_branch != self.active_branch:
+                    # Different branch - always reload
+                    should_reload = True
+                    cache_key = f"{selected_branch}_unpushed"
+                    self._remote_commits_cache.pop(cache_key, None)
+                    self.active_branch = selected_branch
+                else:
+                    # Same branch - check if HEAD has changed (new commits were made)
+                    import subprocess
+                    try:
+                        repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+                        head_sha_cmd = ["git", "rev-parse", selected_branch]
+                        head_sha_result = subprocess.run(
+                            head_sha_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                            cwd=repo_path_str
+                        )
+                        if head_sha_result.returncode == 0:
+                            current_head_sha = head_sha_result.stdout.strip()
+                            # Check if HEAD changed (new commits)
+                            if selected_branch in self._last_head_sha:
+                                if self._last_head_sha[selected_branch] != current_head_sha:
+                                    # HEAD changed - new commits were made, reload
+                                    should_reload = True
+                                    _log_timing_message(f"[BRANCH] HEAD changed for {selected_branch}: {self._last_head_sha[selected_branch][:8]} → {current_head_sha[:8]}, reloading commits")
+                            else:
+                                # First time loading this branch, reload
+                                should_reload = True
+                    except Exception:
+                        # If we can't check HEAD, reload to be safe
+                        should_reload = True
+                
+                if should_reload:
+                    # Switch to log view when branch is selected
+                    self._view_mode = "log"
+                    self.patch_pane.styles.display = "none"
+                    self.log_pane.styles.display = "block"
+                    # Load commits for the selected branch (matching lazygit - shows branch-specific commits)
+                    self.load_commits(self.active_branch)
+                    # Load commits with full history for feature branches (for log pane)
+                    self.load_commits_for_log(self.active_branch)
+                    self.update_status_info()
+                else:
+                    # Same branch, no new commits - just update status info, don't reload commits
+                    # This preserves the correct commit status that was already determined
+                    self.update_status_info()
         elif event.list_view is self.commits_pane:
             # Switch to patch view when commit is selected
             self._view_mode = "patch"
