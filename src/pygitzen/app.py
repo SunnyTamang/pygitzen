@@ -443,6 +443,13 @@ class RemotesPane(ListView):
             from rich.text import Text
             text = Text()
             text.append("  ", style="white")
+            
+            # Recency (time since last commit) - format: "18h ", "1d ", etc.
+            recency = format_recency(remote.timestamp)
+            if recency:
+                text.append(f"{recency} ", style="dim white")
+            
+            # Remote branch name (e.g., origin/main)
             text.append(remote.name, style="white")
             
             item = ListItem(Static(text))
@@ -2638,6 +2645,7 @@ class PygitzenApp(App):
                 self.git_python = self.git  # Same instance
                 self._using_cython = False
             self.branches: list[BranchInfo] = []
+            self.remotes: list[BranchInfo] = []
             self.commits: list[CommitInfo] = []  # Commits for commits pane (left side)
             self.stashes: list[StashInfo] = []  # Stashes for stash pane
             self.all_commits: list[CommitInfo] = []  # Store all commits for search (commits pane)
@@ -3082,6 +3090,24 @@ class PygitzenApp(App):
         branch_elapsed = time.perf_counter() - branch_start
         _log_timing_message(f"list_branches: {branch_elapsed:.4f}s")
         
+        # Load remotes immediately (fast, ~0.1s)
+        remotes_start = time.perf_counter()
+        # Use Python version if Cython version doesn't have the method
+        if hasattr(self.git, 'list_remote_branches'):
+            self.remotes = self.git.list_remote_branches()
+        else:
+            # Fallback to Python version (create if needed)
+            if not hasattr(self, 'git_python') or self.git_python is None:
+                from pygitzen.git_service import GitService
+                self.git_python = GitService(self.repo_path)
+            self.remotes = self.git_python.list_remote_branches()
+        remotes_elapsed = time.perf_counter() - remotes_start
+        _log_timing_message(f"list_remote_branches: {remotes_elapsed:.4f}s")
+        
+        # Update remotes pane
+        if self.remotes:
+            self.remotes_pane.set_remotes(self.remotes)
+        
         # Calculate sync status for all branches in background
         if self.branches:
             self._calculate_all_branches_sync_status()
@@ -3161,6 +3187,19 @@ class PygitzenApp(App):
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
         self.branches = self.git.list_branches()
+        # Use Python version if Cython version doesn't have the method
+        if hasattr(self.git, 'list_remote_branches'):
+            self.remotes = self.git.list_remote_branches()
+        else:
+            # Fallback to Python version (create if needed)
+            if not hasattr(self, 'git_python') or self.git_python is None:
+                from pygitzen.git_service import GitService
+                self.git_python = GitService(self.repo_path)
+            self.remotes = self.git_python.list_remote_branches()
+        
+        # Update remotes pane
+        if self.remotes:
+            self.remotes_pane.set_remotes(self.remotes)
         
         # Calculate sync status for all branches in background
         if self.branches:

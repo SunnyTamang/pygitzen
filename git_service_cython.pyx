@@ -374,6 +374,55 @@ cdef class GitServiceCython:
         result.sort(key=get_sort_key)
         return result
     
+    def list_remote_branches(self):
+        """List all remote branches using git for-each-ref with timestamps."""
+        import subprocess
+        
+        result = []
+        try:
+            # Use git for-each-ref to get remote branches, SHAs, and commit timestamps
+            # Format: name|sha|timestamp
+            # Remote branches are in refs/remotes/ and format as origin/branch-name
+            cmd = ['git', 'for-each-ref', 'refs/remotes/', '--format=%(refname:short)|%(objectname)|%(committerdate:unix)']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    if not line or '|' not in line:
+                        continue
+                    parts = line.split('|')
+                    # Remote branch name format: origin/branch-name
+                    name = parts[0].strip()
+                    sha = parts[1].strip() if len(parts) > 1 else ""
+                    timestamp = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                    result.append(BranchInfo(name=name, head_sha=sha, timestamp=timestamp))
+        except Exception:
+            # If git command fails, fallback to dulwich method
+            refs_prefix = b"refs/remotes/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    sha = self.repo.refs[ref_name]
+                    # ref format: b"refs/remotes/origin/branch-name"
+                    # Extract: origin/branch-name
+                    ref_str = ref_name.decode(errors="replace")
+                    if "/remotes/" in ref_str:
+                        name = ref_str.split("/remotes/")[-1]
+                        result.append(BranchInfo(name=name, head_sha=sha.hex(), timestamp=0))
+        
+        # Sort by recency (most recent first), then alphabetically
+        # Branches with no timestamp (0) go to the end
+        def get_sort_key(branch):
+            return (branch.timestamp == 0, -branch.timestamp, branch.name.lower())
+        
+        result.sort(key=get_sort_key)
+        return result
+    
     def get_merge_base(self, str branch, str base_branch="main"):
         """Find the merge-base (common ancestor) between branch and base_branch."""
         import subprocess

@@ -173,6 +173,50 @@ class GitService:
         result.sort(key=lambda b: (b.timestamp == 0, -b.timestamp, b.name.lower()))
         return result
 
+    def list_remote_branches(self) -> List[BranchInfo]:
+        """List all remote branches using git for-each-ref with timestamps."""
+        import subprocess
+        
+        result: List[BranchInfo] = []
+        try:
+            # Use git for-each-ref to get remote branches, SHAs, and commit timestamps
+            # Format: name|sha|timestamp
+            # Remote branches are in refs/remotes/ and format as origin/branch-name
+            cmd = ['git', 'for-each-ref', 'refs/remotes/', '--format=%(refname:short)|%(objectname)|%(committerdate:unix)']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    if not line or '|' not in line:
+                        continue
+                    parts = line.split('|')
+                    # Remote branch name format: origin/branch-name
+                    name = parts[0].strip()
+                    sha = parts[1].strip() if len(parts) > 1 else ""
+                    timestamp = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                    result.append(BranchInfo(name=name, head_sha=sha, timestamp=timestamp))
+        except Exception:
+            # If git command fails, fallback to dulwich method
+            remotes = self.repo.refs.as_dict(b"refs/remotes")
+            for ref, sha in remotes.items():
+                # ref format: b"refs/remotes/origin/branch-name"
+                # Extract: origin/branch-name
+                ref_str = ref.decode()
+                if "/remotes/" in ref_str:
+                    name = ref_str.split("/remotes/")[-1]
+                    result.append(BranchInfo(name=name, head_sha=sha.hex(), timestamp=0))
+        
+        # Sort by recency (most recent first), then alphabetically
+        # Branches with no timestamp (0) go to the end
+        result.sort(key=lambda b: (b.timestamp == 0, -b.timestamp, b.name.lower()))
+        return result
+
     def _iter_commits(self, head_sha: bytes, max_count: Optional[int] = 100) -> Iterable[Tuple[bytes, Commit]]:
         seen = set()
         stack = [head_sha]
