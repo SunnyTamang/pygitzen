@@ -11,6 +11,7 @@ import stat
 class BranchInfo:
     name: str
     head_sha: str
+    timestamp: int = 0  # Unix timestamp of last commit (0 if not available)
 
 
 @dataclass
@@ -37,6 +38,7 @@ class StashInfo:
     branch: str  # Branch where stash was created
     message: str  # Stash message
     sha: str  # Stash commit SHA
+    timestamp: int = 0  # Unix timestamp of stash creation (0 if not available)
 
 
 class GitService:
@@ -142,13 +144,15 @@ class GitService:
         return is_ignored
 
     def list_branches(self) -> List[BranchInfo]:
-        """List all local branches using git for-each-ref."""
+        """List all local branches using git for-each-ref with timestamps."""
         import subprocess
+        import time
         
         result: List[BranchInfo] = []
         try:
-            # Use git for-each-ref to get branches and their SHAs
-            cmd = ['git', 'for-each-ref', 'refs/heads/', '--format=%(refname:short)|%(objectname)']
+            # Use git for-each-ref to get branches, SHAs, and commit timestamps
+            # Format: name|sha|timestamp
+            cmd = ['git', 'for-each-ref', 'refs/heads/', '--format=%(refname:short)|%(objectname)|%(committerdate:unix)']
             process = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -161,8 +165,11 @@ class GitService:
                 for line in process.stdout.strip().split('\n'):
                     if not line or '|' not in line:
                         continue
-                    name, sha = line.split('|', 1)
-                    result.append(BranchInfo(name=name.strip(), head_sha=sha.strip()))
+                    parts = line.split('|')
+                    name = parts[0].strip()
+                    sha = parts[1].strip() if len(parts) > 1 else ""
+                    timestamp = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                    result.append(BranchInfo(name=name, head_sha=sha, timestamp=timestamp))
         except Exception:
             # If git command fails, return empty list
             pass
@@ -170,8 +177,203 @@ class GitService:
         result.sort(key=lambda b: b.name.lower())
         return result
 
+    def list_remotes(self) -> List[BranchInfo]:
+        """List all remotes (not remote branches) using git remote.
+        
+        Returns:
+            List of remotes as BranchInfo objects (name only, no SHA needed)
+        """
+        import subprocess
+        
+        result: List[BranchInfo] = []
+        try:
+            # Use git remote to get remote names (like Lazygit)
+            cmd = ['git', 'remote']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    remote_name = line.strip()
+                    if remote_name:
+                        result.append(BranchInfo(name=remote_name, head_sha="", timestamp=0))
+        except Exception:
+            # If git command fails, return empty list
+            pass
+        
+        # Sort with origin first (like Lazygit)
+        result.sort(key=lambda b: (b.name != "origin", b.name.lower()))
+        return result
+
+    def list_tags(self, max_count: int = 0, skip: int = 0, get_timestamps: bool = True) -> tuple[List[BranchInfo], int]:
+        """List tags using git tag --list (like Lazygit).
+        
+        KEY FINDING: Lazygit loads ALL tags at once (no pagination) because:
+        - git tag --list -n --sort=-creatordate is fast (~0.5s for 56k tags)
+        - They don't show recency (no timestamps needed)
+        - ASYNC mode makes it non-blocking
+        
+        Args:
+            max_count: Maximum number of tags to return (0 = all tags, like Lazygit)
+            skip: Number of tags to skip (for pagination, but Lazygit doesn't paginate)
+            get_timestamps: Whether to fetch timestamps for recency display (adds overhead)
+        
+        Returns:
+            Tuple of (list of tags, total count). Tags are sorted by -creatordate (most recent first, like Lazygit)
+        """
+        import subprocess
+        import re
+        
+        result: List[BranchInfo] = []
+        total_count = 0
+        
+        try:
+            # Use EXACTLY the same command as Lazygit: git tag --list -n --sort=-creatordate
+            # This is fast (~0.5s for 56k tags) because git optimizes tag listing
+            # Format: "tag_name    message" or "tag_name"
+            cmd = ['git', 'tag', '--list', '-n', '--sort=-creatordate']
+            
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                errors='replace',  # Handle binary data in tag messages
+                timeout=30,  # Increased timeout for very large repos (56k+ tags)
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                lines = process.stdout.strip().split('\n')
+                total_count = len([line for line in lines if line.strip()])
+                
+                # Apply pagination only if max_count is specified (Lazygit doesn't paginate)
+                if max_count > 0:
+                    paginated_lines = lines[skip:skip + max_count]
+                else:
+                    paginated_lines = lines[skip:] if skip > 0 else lines
+                
+                # Parse lines using the SAME regex as Lazygit
+                # Lazygit uses: regexp.MustCompile(`^([^\s]+)(\s+)?(.*)$`)
+                line_regex = re.compile(r'^([^\s]+)(\s+)?(.*)$')
+                
+                # Parse tag names and messages (same as Lazygit)
+                tag_data = {}  # {tag_name: message}
+                tag_names = []
+                
+                for line in paginated_lines:
+                    if not line.strip():
+                        continue
+                    
+                    # Parse line: "tag_name    message" or "tag_name" (same as Lazygit)
+                    match = line_regex.match(line)
+                    if match:
+                        name = match.group(1).strip()
+                        message = match.group(3).strip() if len(match.groups()) > 2 and match.group(3) else ""
+                        tag_data[name] = message
+                        tag_names.append(name)
+                
+                # Get timestamps ONLY if requested (adds overhead but needed for recency display)
+                # Lazygit doesn't do this - they don't show recency for tags
+                timestamp_map = {}  # {tag_name: timestamp}
+                if get_timestamps and tag_names:
+                    try:
+                        # OPTIMIZED: Use single git for-each-ref call for all tags (faster than individual calls)
+                        # Only get timestamps for the tags we're displaying (not all 56k)
+                        timestamp_cmd = ['git', 'for-each-ref', '--format=%(refname:short)|%(creatordate:unix)']
+                        # Add specific tag refs (only the ones we need)
+                        for name in tag_names:
+                            timestamp_cmd.append(f'refs/tags/{name}')
+                        
+                        timestamp_process = subprocess.run(
+                            timestamp_cmd,
+                            capture_output=True,
+                            text=True,
+                            errors='replace',
+                            timeout=10,  # Timeout for timestamp lookup
+                            cwd=str(self.repo_path)
+                        )
+                        
+                        if timestamp_process.returncode == 0:
+                            for line in timestamp_process.stdout.strip().split('\n'):
+                                if '|' in line:
+                                    parts = line.split('|', 1)
+                                    tag_name = parts[0].strip()
+                                    timestamp_str = parts[1].strip() if len(parts) > 1 else "0"
+                                    if timestamp_str and timestamp_str.isdigit():
+                                        timestamp_map[tag_name] = int(timestamp_str)
+                    except Exception:
+                        # If timestamp lookup fails, continue without timestamps (like Lazygit)
+                        pass
+                
+                # Build result list with tags, messages, and timestamps
+                for name in tag_names:
+                    message = tag_data.get(name, "")
+                    timestamp = timestamp_map.get(name, 0) if get_timestamps else 0
+                    
+                    tag_info = BranchInfo(name=name, head_sha="", timestamp=timestamp)
+                    # Store message as a custom attribute (same as Lazygit stores in Tag.Message)
+                    setattr(tag_info, 'message', message)
+                    result.append(tag_info)
+        except Exception:
+            # If git command fails, return empty list
+            pass
+        
+        # Tags are already in reverse chronological order (most recent first) from --sort=-creatordate
+        return (result, total_count)
+
     # _iter_commits removed - no longer needed without dulwich
 
+    def get_tag_timestamps_batch(self, tag_names: list[str]) -> dict[str, int]:
+        """Get timestamps for a batch of tags (optimized for displayed tags only).
+        
+        Args:
+            tag_names: List of tag names to get timestamps for
+            
+        Returns:
+            Dictionary mapping tag names to timestamps (0 if not available)
+        """
+        import subprocess
+        
+        if not tag_names:
+            return {}
+        
+        timestamp_map = {}
+        try:
+            # Use single git for-each-ref call for all tags (faster than individual calls)
+            # Only get timestamps for the tags we're displaying (not all 56k)
+            timestamp_cmd = ['git', 'for-each-ref', '--format=%(refname:short)|%(creatordate:unix)']
+            # Add specific tag refs (only the ones we need)
+            for name in tag_names:
+                timestamp_cmd.append(f'refs/tags/{name}')
+            
+            timestamp_process = subprocess.run(
+                timestamp_cmd,
+                capture_output=True,
+                text=True,
+                errors='replace',
+                timeout=10,  # Timeout for timestamp lookup
+                cwd=str(self.repo_path)
+            )
+            
+            if timestamp_process.returncode == 0:
+                for line in timestamp_process.stdout.strip().split('\n'):
+                    if '|' in line:
+                        parts = line.split('|', 1)
+                        tag_name = parts[0].strip()
+                        timestamp_str = parts[1].strip() if len(parts) > 1 else "0"
+                        if timestamp_str and timestamp_str.isdigit():
+                            timestamp_map[tag_name] = int(timestamp_str)
+        except Exception:
+            # If timestamp lookup fails, return empty map (tags will show without recency)
+            pass
+        
+        return timestamp_map
+    
     def _get_remote_commits(self, branch: str) -> set[str]:
         """Get set of commit SHAs that exist on remote using git rev-list."""
         import subprocess
@@ -1009,6 +1211,63 @@ class GitService:
         
         return result
     
+    def get_branch_sync_status(self, branch: str) -> dict:
+        """Get sync status (behind/ahead counts) for a branch relative to its upstream.
+        Returns dict with 'behind', 'ahead', 'synced', and 'upstream' keys.
+        """
+        import subprocess
+        
+        result = {
+            "behind": 0,
+            "ahead": 0,
+            "synced": False,
+            "upstream": None,
+        }
+        
+        try:
+            # Get upstream tracking branch
+            upstream_result = subprocess.run(
+                ['git', 'rev-parse', '--abbrev-ref', f'{branch}@{{u}}'],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=str(self.repo_path)
+            )
+            
+            if upstream_result.returncode != 0:
+                # No upstream configured
+                return result
+            
+            upstream = upstream_result.stdout.strip()
+            result["upstream"] = upstream
+            
+            # Use git rev-list --left-right to get commits that are in one but not the other
+            # Format: < for commits in branch but not upstream (ahead)
+            #         > for commits in upstream but not branch (behind)
+            rev_list_cmd = ['git', 'rev-list', '--left-right', '--count', f'{upstream}...{branch}']
+            rev_list_result = subprocess.run(
+                rev_list_cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if rev_list_result.returncode == 0:
+                # Output format: "behind_count\tahead_count"
+                parts = rev_list_result.stdout.strip().split('\t')
+                if len(parts) == 2:
+                    behind = int(parts[0])
+                    ahead = int(parts[1])
+                    result["behind"] = behind
+                    result["ahead"] = ahead
+                    result["synced"] = (behind == 0 and ahead == 0)
+        except Exception:
+            # If calculation fails, return default values
+            pass
+        
+        return result
+    
     def invalidate_branch_info_cache(self, branch: str | None = None) -> None:
         """Invalidate branch info cache (call on branch checkout)."""
         if branch:
@@ -1229,10 +1488,8 @@ class GitService:
             else:
                 repo_path = Path(self.repo_path).resolve()
             
-            # Use git stash list to get all stashes
-            # Format: stash@{0}: WIP on branch: message
-            # Or: stash@{0}: On branch: message
-            result = subprocess.run(
+            # Get the full stash list for parsing message and branch
+            stash_list_result = subprocess.run(
                 ['git', 'stash', 'list'],
                 capture_output=True,
                 text=True,
@@ -1240,9 +1497,9 @@ class GitService:
                 cwd=str(repo_path)
             )
             
-            if result.returncode == 0 and result.stdout.strip():
+            if stash_list_result.returncode == 0 and stash_list_result.stdout.strip():
                 # Parse each line
-                for line in result.stdout.strip().split('\n'):
+                for line in stash_list_result.stdout.strip().split('\n'):
                     if not line.strip():
                         continue
                     
@@ -1256,13 +1513,32 @@ class GitService:
                         branch = match.group(2).strip()
                         message = match.group(3).strip()
                         
+                        # Get timestamp for this stash using git show
+                        timestamp = 0
+                        try:
+                            timestamp_result = subprocess.run(
+                                ['git', 'show', '-s', '--format=%at', f'stash@{{{index}}}'],
+                                capture_output=True,
+                                text=True,
+                                timeout=2,
+                                cwd=str(repo_path)
+                            )
+                            if timestamp_result.returncode == 0 and timestamp_result.stdout.strip():
+                                timestamp_str = timestamp_result.stdout.strip()
+                                if timestamp_str.isdigit():
+                                    timestamp = int(timestamp_str)
+                        except Exception:
+                            # If timestamp fetch fails, continue with 0
+                            pass
+                        
                         # Don't fetch SHA here - it's expensive and only needed when showing details
                         # SHA will be fetched lazily if needed
                         stashes.append(StashInfo(
                             index=index,
                             branch=branch,
                             message=message,
-                            sha=""  # Empty SHA - can be fetched later if needed
+                            sha="",  # Empty SHA - can be fetched later if needed
+                            timestamp=timestamp
                         ))
         except Exception:
             # If git command fails, return empty list
@@ -1318,5 +1594,107 @@ class GitService:
             pass
         
         return (diff_text, stat_text)
+    
+    def is_tag_annotated(self, tag_name: str) -> bool:
+        """Check if a tag is annotated (vs lightweight).
+        
+        Args:
+            tag_name: Name of the tag (without refs/tags/ prefix)
+        
+        Returns:
+            True if tag is annotated, False if lightweight
+        """
+        import subprocess
+        from pathlib import Path
+        
+        try:
+            result = subprocess.run(
+                ['git', 'cat-file', '-t', f'refs/tags/{tag_name}'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0:
+                # Annotated tags have type "tag", lightweight tags have type "commit"
+                return result.stdout.strip() == "tag"
+        except Exception:
+            pass
+        
+        return False
+    
+    def get_tag_annotation_info(self, tag_name: str) -> str:
+        """Get annotation information for an annotated tag (without tag message).
+        
+        Args:
+            tag_name: Name of the tag (without refs/tags/ prefix)
+        
+        Returns:
+            String with tagger info only (no tag message), or empty string if not annotated
+        """
+        import subprocess
+        from pathlib import Path
+        
+        try:
+            result = subprocess.run(
+                ['git', 'for-each-ref', 
+                 '--format=Tagger:     %(taggername) %(taggeremail)%0aTaggerDate: %(taggerdate)',
+                 f'refs/tags/{tag_name}'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0:
+                output = result.stdout.strip()
+                # Filter out PGP signature (between BEGIN and END markers)
+                lines = output.split('\n')
+                filtered_lines = []
+                in_pgp = False
+                for line in lines:
+                    if line == "-----END PGP SIGNATURE-----":
+                        in_pgp = False
+                        continue
+                    if line == "-----BEGIN PGP SIGNATURE-----":
+                        in_pgp = True
+                        continue
+                    if not in_pgp:
+                        filtered_lines.append(line)
+                return '\n'.join(filtered_lines)
+        except Exception:
+            pass
+        
+        return ""
+    
+    def get_remote_urls(self, remote_name: str) -> list[str]:
+        """Get all URLs for a remote.
+        
+        Args:
+            remote_name: Name of the remote (e.g., "origin")
+        
+        Returns:
+            List of URLs for the remote
+        """
+        import subprocess
+        from pathlib import Path
+        
+        urls = []
+        try:
+            result = subprocess.run(
+                ['git', 'remote', 'get-url', '--all', remote_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if result.returncode == 0:
+                urls = [url.strip() for url in result.stdout.strip().split('\n') if url.strip()]
+        except Exception:
+            pass
+        
+        return urls
 
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
-from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input
+from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input, TabbedContent, TabPane
 from textual.reactive import reactive
 from textual import events
 from textual.binding import Binding
@@ -19,6 +19,51 @@ from rich.syntax import Syntax
 from rich.panel import Panel
 
 from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo
+
+# Helper function to format time recency (e.g., "18h", "1d", "1w")
+def format_recency(timestamp: int) -> str:
+    """Format timestamp as human-readable recency (e.g., '18h', '1d', '1w').
+    
+    Args:
+        timestamp: Unix timestamp (0 if not available)
+    
+    Returns:
+        Formatted string like "18h", "1d", "1w", or empty string if timestamp is 0
+    """
+    if timestamp == 0:
+        return ""
+    
+    import time
+    now = int(time.time())
+    diff_seconds = now - timestamp
+    
+    if diff_seconds < 60:
+        # Less than a minute
+        return f"{diff_seconds}s"
+    elif diff_seconds < 3600:
+        # Less than an hour - show minutes
+        minutes = diff_seconds // 60
+        return f"{minutes}m"
+    elif diff_seconds < 86400:
+        # Less than a day - show hours
+        hours = diff_seconds // 3600
+        return f"{hours}h"
+    elif diff_seconds < 604800:
+        # Less than a week - show days
+        days = diff_seconds // 86400
+        return f"{days}d"
+    elif diff_seconds < 2592000:
+        # Less than a month - show weeks
+        weeks = diff_seconds // 604800
+        return f"{weeks}w"
+    elif diff_seconds < 31536000:
+        # Less than a year - show months
+        months = diff_seconds // 2592000
+        return f"{months}mo"
+    else:
+        # Years
+        years = diff_seconds // 31536000
+        return f"{years}y"
 
 # Performance timing utilities
 _TIMING_LOG_FILE = None
@@ -141,11 +186,39 @@ class StatusPane(Static):
         super().__init__(*args, **kwargs)
         self.border_title = "Status"
     
-    def update_status(self, branch: str, repo_path: str) -> None:
+    def update_status(self, branch: str, repo_path: str, sync_status: dict | None = None) -> None:
+        """Update status pane with branch info and optional sync status.
+        
+        Args:
+            branch: Branch name
+            repo_path: Repository path
+            sync_status: Optional dict with 'behind', 'ahead', 'synced', 'upstream' keys
+        """
         from rich.text import Text
         repo_name = repo_path.split('/')[-1]
         status_text = Text()
-        status_text.append("✓ ", style="green")
+        
+        # Add sync status indicators if available
+        if sync_status:
+            behind = sync_status.get("behind", 0)
+            ahead = sync_status.get("ahead", 0)
+            synced = sync_status.get("synced", False)
+            
+            if synced and behind == 0 and ahead == 0:
+                # Fully synced
+                status_text.append("✓ ", style="green")
+            else:
+                # Show behind/ahead counts
+                if behind > 0:
+                    status_text.append(f"↓{behind} ", style="red")
+                if ahead > 0:
+                    status_text.append(f"↑{ahead} ", style="yellow")
+                if behind == 0 and ahead == 0:
+                    status_text.append("✓ ", style="green")
+        else:
+            # Default checkmark if no sync status
+            status_text.append("✓ ", style="green")
+        
         status_text.append(f"{repo_name} → {branch}", style="white")
         self.update(status_text)
 
@@ -339,23 +412,284 @@ class BranchesPane(ListView):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Local branches"
+        self._last_highlighted = None
     
-    def set_branches(self, branches: list[BranchInfo], current_branch: str) -> None:
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        if highlighted is not None:
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-branch")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if highlighted < len(self.children):
+                try:
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-branch")
+                        self._last_highlighted = highlighted
+                except:
+                    pass
+    
+    def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
+        """Set branches with optional sync status indicators.
+        
+        Args:
+            branches: List of branch info
+            current_branch: Name of current branch
+            sync_status: Optional dict mapping branch name to sync status dict with keys:
+                'behind', 'ahead', 'synced', 'upstream'
+        """
         self.clear()
+        if sync_status is None:
+            sync_status = {}
+        
         for branch in branches:
             from rich.text import Text
             text = Text()
+            
+            # Current branch indicator
             if branch.name == current_branch:
                 text.append("* ", style="green")
-                text.append(branch.name, style="white")
             else:
                 text.append("  ", style="white")
-                text.append(branch.name, style="white")
+            
+            # Recency (time since last commit) - format: "18h ", "1d ", etc.
+            recency = format_recency(branch.timestamp)
+            if recency:
+                text.append(f"{recency} ", style="dim white")
+            
+            # Branch name
+            text.append(branch.name, style="white")
+            
+            # Sync status indicators
+            branch_sync = sync_status.get(branch.name, {})
+            behind = branch_sync.get("behind", 0)
+            ahead = branch_sync.get("ahead", 0)
+            synced = branch_sync.get("synced", False)
+            
+            # Add sync status indicators
+            if synced and behind == 0 and ahead == 0:
+                # Fully synced
+                text.append(" ✓", style="green")
+            else:
+                # Show behind/ahead counts
+                if behind > 0:
+                    text.append(f" ↓{behind}", style="red")
+                if ahead > 0:
+                    text.append(f" ↑{ahead}", style="yellow")
             
             item = ListItem(Static(text))
             if branch.name == current_branch:
                 item.add_class("current-branch")
             self.append(item)
+    
+
+
+class RemotesPane(ListView):
+    """Remotes pane showing remote branches."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.border_title = "Remotes"
+        self._parent_app = None  # Will be set by parent
+        self._remotes: list[BranchInfo] = []  # Store remotes for selection access
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+        self._last_highlighted = None
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        if highlighted is not None:
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-remote")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if highlighted < len(self.children):
+                try:
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-remote")
+                        self._last_highlighted = highlighted
+                except:
+                    pass
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
+    
+    def set_remotes(self, remotes: list[BranchInfo]) -> None:
+        self.clear()
+        self._remotes = remotes  # Store remotes for selection access
+        
+        for remote in remotes:
+            from rich.text import Text
+            text = Text()
+            text.append("  ", style="white")
+            text.append(remote.name, style="white")
+            
+            item = ListItem(Static(text))
+            self.append(item)
+    
+    def on_list_view_selected(self, event) -> None:
+        """Handle remote selection - show remote info."""
+        if self._on_render_to_main:
+            try:
+                self._on_render_to_main()
+            except Exception:
+                pass
+    
+
+
+class TagsPane(ListView):
+    """Tags pane showing tags with virtual scrolling."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.border_title = "Tags"
+        self._parent_app = None  # Will be set by parent
+        self._tags: list[BranchInfo] = []  # Store all loaded tags
+        self._loaded_tags_count = 0  # How many tags we've loaded
+        self._total_tags_count = 0  # Total number of tags available
+        self._page_size = 200  # Load 200 tags at a time
+        self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
+        self._last_highlighted = None
+        self._rendered_count = 0  # Track how many tags are actually rendered in UI
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        if highlighted is not None:
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-tag")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if highlighted < len(self.children):
+                try:
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-tag")
+                        self._last_highlighted = highlighted
+                except:
+                    pass
+    
+    def set_on_render_to_main(self, callback: callable) -> None:
+        """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
+        self._on_render_to_main = callback
+    
+    def set_tags(self, tags: list[BranchInfo], total_count: int = 0, append: bool = False) -> None:
+        """Set tags in the pane, with support for virtual scrolling.
+        
+        Args:
+            tags: List of tags to display
+            total_count: Total number of tags available (for virtual scrolling)
+            append: If True, append to existing tags; if False, replace
+        """
+        if not append:
+            self.clear()
+            self._tags = []
+            self._loaded_tags_count = 0
+            self._rendered_count = 0  # Reset rendered count on initial load
+            # Store initial tags and set total count
+            self._tags = tags.copy()
+            self._loaded_tags_count = len(self._tags)
+            self._total_tags_count = total_count if total_count > 0 else len(self._tags)
+        else:
+            # Append mode: add new tags to existing list
+            self._tags.extend(tags)
+            self._loaded_tags_count = len(self._tags)
+            # Keep existing total_count (don't overwrite it)
+        
+        # CRITICAL: Limit initial rendering to prevent UI blocking on large repos (59k+ tags)
+        # Only render first 200 tags initially, rest will be loaded on scroll (virtual scrolling)
+        # This matches the approach used for commits - fast initial render, load more on demand
+        if append:
+            # When appending, render the NEW tags that were just passed in (not all tags)
+            # This is for virtual scrolling - we only render the newly loaded batch
+            tags_to_render = tags  # Render only the new tags being appended
+        else:
+            # Initial load: render first 200 tags
+            initial_limit = 200
+            tags_to_render = self._tags[:initial_limit] if len(self._tags) > initial_limit else self._tags
+        
+        # Calculate max widths for proper alignment (like Lazygit's column layout)
+        # Use all tags for width calculation, but only render subset
+        if tags_to_render:
+            # Calculate max recency width (e.g., "1mo" = 3 chars)
+            max_recency_width = 0
+            for tag in tags_to_render:
+                if tag.timestamp > 0:
+                    recency = format_recency(tag.timestamp)
+                    if recency:
+                        max_recency_width = max(max_recency_width, len(recency))
+            
+            # Calculate max tag name width for alignment
+            max_name_width = max(len(tag.name) for tag in tags_to_render) if tags_to_render else 0
+            # Add some padding for better readability
+            max_name_width = max(max_name_width, 15)  # Minimum width for alignment
+        else:
+            max_recency_width = 0
+            max_name_width = 15
+        
+        # Only render the limited subset (not all 59k tags)
+        for tag in tags_to_render:
+            from rich.text import Text
+            text = Text()
+            
+            # Add recency with fixed width (right-aligned, like Lazygit)
+            if tag.timestamp > 0:
+                recency = format_recency(tag.timestamp)
+                if recency:
+                    # Right-align recency in fixed-width column
+                    text.append(f"{recency:>{max_recency_width}} ", style="dim white")
+                else:
+                    # Empty recency, add padding
+                    text.append(" " * (max_recency_width + 1), style="dim white")
+            else:
+                # No timestamp, add padding
+                text.append(" " * (max_recency_width + 1), style="dim white")
+            
+            # Add tag name with fixed width (left-aligned, like Lazygit column 1)
+            text.append(f"{tag.name:<{max_name_width}} ", style="white")
+            
+            # Add tag message (like Lazygit column 2) - shown in yellow
+            message = getattr(tag, 'message', '')
+            if message:
+                text.append(message, style="yellow")
+            
+            item = ListItem(Static(text))
+            self.append(item)
+        
+        # Update rendered count
+        self._rendered_count = len(self.children)
+    
+    def append_tags(self, tags: list[BranchInfo]) -> None:
+        """Append more tags (for virtual scrolling)."""
+        self.set_tags(tags, append=True)
+    
+    def on_list_view_selected(self, event) -> None:
+        """Handle tag selection - show tag info and git log graph."""
+        if self._on_render_to_main:
+            try:
+                self._on_render_to_main()
+            except Exception:
+                pass
+    
 
 
 class CommitsPane(ListView):
@@ -367,6 +701,7 @@ class CommitsPane(ListView):
         self._parent_app = None  # Will be set by parent
         self._last_index = None  # Track index changes
         self._last_highlighted = None  # Track highlighted changes
+        self._last_focused_index = None  # Remember last selected index when focus is lost
         self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
 
     def set_branch(self, branch: str) -> None:
@@ -409,6 +744,21 @@ class CommitsPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only highlight if commits pane has focus
+        # Exception: if we're highlighting index 0 and last_highlighted is None, allow it
+        # This handles the case where on_focus sets highlighting before has_focus is fully updated
+        if not self.has_focus and not (index == 0 and self._last_highlighted is None):
+            # Clear all highlights if pane doesn't have focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-commit")
+                except:
+                    pass
+            self._last_highlighted = None
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -428,6 +778,22 @@ class CommitsPane(ListView):
             except:
                 pass
     
+    def on_blur(self) -> None:
+        """Handle blur event - clear highlighting and remember last selected index."""
+        # Remember the current selection before clearing
+        if self.index is not None:
+            self._last_focused_index = self.index
+        
+        # Clear highlighting when pane loses focus
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-commit")
+            except:
+                pass
+        self._last_highlighted = None
+    
     def _update_patch_for_index(self, index: int | None) -> None:
         """Update patch panel for the given index."""
         if index is not None and self._parent_app:
@@ -443,8 +809,11 @@ class CommitsPane(ListView):
         """Handle focus event - restore previous selection or use first commit, show patch."""
         if len(self.children) > 0:
             # Restore previous selection if available, otherwise use first commit
-            if self._parent_app and self._parent_app.selected_commit_index >= 0:
-                # Use the previously selected commit index
+            if self._last_focused_index is not None and 0 <= self._last_focused_index < len(self.children):
+                # Restore the last selected index
+                selected_idx = self._last_focused_index
+            elif self._parent_app and self._parent_app.selected_commit_index >= 0:
+                # Use the app's stored selected index if available
                 selected_idx = self._parent_app.selected_commit_index
                 # Ensure index is within bounds
                 if selected_idx >= len(self.children):
@@ -456,13 +825,19 @@ class CommitsPane(ListView):
             # Set index and highlighted to restore selection
             self.index = selected_idx
             self.highlighted = selected_idx
-            self._update_highlighting(selected_idx)
             
             # Force update patch panel by calling _update_patch_for_index
             # This ensures patch is shown even if index hasn't changed
             # Reset _last_index temporarily to force update
             self._last_index = None
             self._update_patch_for_index(selected_idx)
+            
+            # Update highlighting - call after a brief delay to ensure focus is fully established
+            # Use call_later to ensure highlighting happens after focus is set
+            self.call_later(self._update_highlighting, selected_idx)
+            
+            # Also call immediately in case call_later isn't needed
+            self._update_highlighting(selected_idx)
             
             # Ensure patch pane is visible (in case view mode was changed)
             if self._parent_app:
@@ -480,10 +855,14 @@ class CommitsPane(ListView):
         self._commit_shas = []
         self._commit_info_map = {}  # SHA -> CommitInfo for quick lookup
         
-        # Virtual scrolling: limit initial commits to 200 for performance
-        # ListView has built-in virtual scrolling, but we still need to limit initial DOM elements
-        initial_limit = 200
+        # CRITICAL: Limit initial commits to prevent UI blocking on large repos
+        # Show only first 50 commits initially, rest will be loaded on scroll (virtual scrolling)
+        # This matches Lazygit's behavior - fast initial render, load more on demand
+        initial_limit = 50  # Reduced from 200 to prevent blocking
         commits_to_render = commits[:initial_limit] if len(commits) > initial_limit else commits
+        
+        # Store all commits for later (virtual scrolling will load more)
+        self._all_commits = commits
         
         for commit in commits_to_render:
             from rich.text import Text
@@ -733,6 +1112,12 @@ class StashPane(ListView):
             from textual.widgets import ListItem, Static
             
             text = Text()
+            
+            # Recency (time since stash creation) - format: "18h ", "1d ", etc.
+            recency = format_recency(stash.timestamp)
+            if recency:
+                text.append(f"{recency} ", style="dim white")
+            
             # Format: stash@{index}: branch: message
             text.append(f"stash@{{{stash.index}}}", style="cyan")
             text.append(": ", style="white")
@@ -741,7 +1126,7 @@ class StashPane(ListView):
             
             # Show full message, wrap if too long
             message = stash.message
-            max_line_length = 55  # Maximum characters per line (allowing for indentation)
+            max_line_length = 50  # Maximum characters per line (adjusted for recency)
             
             if len(message) <= max_line_length:
                 # Short message, show on one line
@@ -764,9 +1149,14 @@ class StashPane(ListView):
                 
                 # Add first line
                 text.append(lines[0], style="white")
-                # Add continuation lines with indentation
+                # Add continuation lines with proper indentation
+                # Calculate indent: recency (if any) + "stash@{N}: " + branch + ": "
+                indent_prefix = ""
+                if recency:
+                    indent_prefix = " " * (len(recency) + 1)  # recency + space
+                indent_prefix += "     "  # Additional indent for continuation
                 for i, line in enumerate(lines[1:], 1):
-                    text.append("\n     ", style="white")  # Indent continuation lines
+                    text.append(f"\n{indent_prefix}", style="white")  # Properly indented continuation lines
                     text.append(line, style="dim white")
             
             self.append(ListItem(Static(text)))
@@ -853,9 +1243,17 @@ class LogPane(Static):
         import time
         self._time = time
         # Native git log virtual scrolling
-        self._native_git_log_lines: list = []  # Cached lines from git log
-        self._native_git_log_count = 50  # Current limit for git log
+        self._native_git_log_lines: list = []  # Cached lines from git log (all parsed lines)
+        self._native_git_log_count = 50  # Current limit for git log (how many commits to fetch)
         self._native_git_log_loading = False  # Prevent concurrent loads
+        self._native_git_log_rendered_count = 0  # How many lines we've rendered so far
+        # PTY streaming mode - enabled by default for better performance
+        # Can be disabled via environment variable: PYGITZEN_USE_PTY=0
+        import os
+        self._use_pty_streaming = os.getenv('PYGITZEN_USE_PTY', '1') != '0'  # Enabled by default
+        self._pty_streaming_active = False  # Track if PTY streaming is currently active
+        if not self._use_pty_streaming:
+            _log_timing_message("[INFO] PTY streaming mode DISABLED (set PYGITZEN_USE_PTY=0)")
         # Start with blank log - don't update here, let it be empty initially
     
     def show_branch_log(self, branch: str, commits: list[CommitInfo], branch_info: dict, git_service, append: bool = False, total_commits_count_override: int = None) -> None:
@@ -948,7 +1346,11 @@ class LogPane(Static):
                     
                     # Pass git_service directly to _show_native_git_log (it should already have repo_path)
                     # Don't validate path existence here - let git command handle it (it will fail gracefully)
-                    self._show_native_git_log(branch, branch_info, git_service, append=append)
+                    # Use PTY streaming (default) or fallback to subprocess if disabled
+                    if self._use_pty_streaming:
+                        self._show_native_git_log(branch, branch_info, git_service, append=append)
+                    else:
+                        self._show_native_git_log_subprocess(branch, branch_info, git_service, append=append)
                 else:
                     # No repo_path found or invalid - log for debugging
                     try:
@@ -1000,9 +1402,9 @@ class LogPane(Static):
         
         return header
     
-    def _show_native_git_log(self, branch: str, branch_info: dict, git_service, append: bool = False) -> None:
+    def _show_native_git_log_subprocess(self, branch: str, branch_info: dict, git_service, append: bool = False) -> None:
         """
-        Display native git log --graph --color=always output directly.
+        Display native git log using subprocess (fallback when PTY is disabled).
         This shows exactly what git outputs, preserving all colors and formatting.
         Supports virtual scrolling - loads more commits as user scrolls.
         """
@@ -1010,7 +1412,6 @@ class LogPane(Static):
         from rich.console import Group
         from pathlib import Path
         import subprocess
-        from pygitzen.git_graph import parse_ansi_to_rich_text
         
         # Prevent concurrent loads
         if self._native_git_log_loading:
@@ -1090,7 +1491,7 @@ class LogPane(Static):
                 capture_output=True,
                 text=False,  # Get bytes first
                 cwd=str(repo_path),
-                timeout=5  # Short timeout for fast feedback
+                timeout=20  # Longer timeout for large repos (haiku has 69k+ commits)
             )
             
             # Decode with error handling for non-UTF-8 characters
@@ -1127,18 +1528,29 @@ class LogPane(Static):
             output_lines = output_text.split('\n')
             new_log_lines = []
             
-            # Convert each line from ANSI to Rich Text
-            # Process in batches for better performance
-            for line in output_lines:
+            # Limit initial processing to prevent blocking on large repos
+            # Process first 100 lines immediately, rest in background
+            max_initial_lines = 100
+            lines_to_process = output_lines[:max_initial_lines] if len(output_lines) > max_initial_lines else output_lines
+            remaining_lines = output_lines[max_initial_lines:] if len(output_lines) > max_initial_lines else []
+            
+            # Convert each line from ANSI to Rich Text using Text.from_ansi() (faster than manual parsing)
+            # Process initial batch for immediate display
+            for line in lines_to_process:
                 if line:  # Only process non-empty lines
                     try:
-                        rich_line = parse_ansi_to_rich_text(line)
+                        # Use Rich's built-in ANSI parser (much faster than manual parsing)
+                        rich_line = Text.from_ansi(line)
                         new_log_lines.append(rich_line)
                     except Exception:
                         # If parsing fails, strip ANSI and add as plain text
                         from pygitzen.git_graph import strip_ansi_codes
                         plain_line = strip_ansi_codes(line)
                         new_log_lines.append(Text(plain_line, style="white"))
+            
+            # Store remaining lines for background processing
+            if remaining_lines:
+                self._pending_log_lines = remaining_lines
             
             # If appending, only add new lines (skip already loaded ones)
             if append and self._native_git_log_lines:
@@ -1160,24 +1572,586 @@ class LogPane(Static):
                 log_lines.extend(new_log_lines)
                 self._native_git_log_lines = log_lines
             
-            # Update the pane
-            if self._native_git_log_lines:
-                full_content = Group(*self._native_git_log_lines)
-                self.update(full_content)
+            # Update the pane - queue the update instead of calling directly
+            # This ensures it runs on the main thread and doesn't block
+            if hasattr(self, 'app') and self.app is not None:
+                # Queue the UI update to run on main thread
+                def update_ui():
+                    try:
+                        if self._native_git_log_lines:
+                            # Virtual scrolling: render all available lines (they're already limited to 100 initially)
+                            # The virtual scroll mechanism will load more when user scrolls
+                            full_content = Group(*self._native_git_log_lines)
+                            self.update(full_content)
+                            # Track how many lines we've rendered
+                            self._native_git_log_rendered_count = len(self._native_git_log_lines)
+                        else:
+                            self.update(Text())
+                            self._native_git_log_rendered_count = 0
+                        
+                        # Update cache
+                        self._cached_branch = branch
+                        self._cached_branch_info = branch_info.copy()
+                    except Exception as e:
+                        _log_timing_message(f"[WARNING] Error in queued UI update: {type(e).__name__}: {e}")
+                
+                # Queue the update if app has the queue
+                try:
+                    if hasattr(self.app, '_ui_update_queue'):
+                        self.app._ui_update_queue.put(update_ui)
+                    else:
+                        # Fallback: try direct update
+                        update_ui()
+                except RuntimeError as e:
+                    # RuntimeError often indicates event loop issues
+                    error_msg = str(e).lower()
+                    if "no running event loop" in error_msg or "event loop" in error_msg:
+                        _log_timing_message(f"[WARNING] Event loop not available for log pane update: {e}")
+                        # Don't show error to user - this is a timing issue that will resolve
+                    else:
+                        # Re-raise if it's a different RuntimeError
+                        raise
+                except Exception as queue_error:
+                    # Other queue errors - log but don't crash
+                    _log_timing_message(f"[WARNING] Error queueing log pane update: {type(queue_error).__name__}: {queue_error}")
             else:
-                self.update(Text())
+                # Widget not mounted - skip update
+                _log_timing_message(f"[WARNING] Skipping log pane update - widget not mounted")
             
-            # Update cache
-            self._cached_branch = branch
-            self._cached_branch_info = branch_info.copy()
+        except Exception as e:
+            # On error, show error message - but only if we can safely update
+            try:
+                # Check if widget is mounted before trying to update
+                if not hasattr(self, 'app') or self.app is None:
+                    _log_timing_message(f"[ERROR] Cannot show error message - widget not mounted: {e}")
+                    return
+                
+                error_text = Text()
+                error_text.append(f"Error showing native git log: {e}\n", style="red")
+                self.update(error_text)
+            except RuntimeError as update_error:
+                # If update fails due to event loop, just log it
+                error_msg = str(update_error).lower()
+                if "no running event loop" in error_msg or "event loop" in error_msg:
+                    _log_timing_message(f"[ERROR] Event loop not available when showing error: {e} (update_error: {update_error})")
+                else:
+                    _log_timing_message(f"[ERROR] Error showing native git log: {e} (update_error: {update_error})")
+            except Exception as update_error:
+                _log_timing_message(f"[ERROR] Error showing native git log: {e} (update_error: {update_error})")
+        finally:
+            self._native_git_log_loading = False
+    
+    def _show_native_git_log(self, branch: str, branch_info: dict, git_service, append: bool = False) -> None:
+        """
+        Display native git log using PTY streaming (like Lazygit).
+        Streams output as it's generated and updates UI incrementally.
+        This is the default implementation for better performance.
+        """
+        import pty
+        import os
+        import select
+        import subprocess
+        import threading
+        import fcntl
+        from rich.text import Text
+        from rich.console import Group
+        from pathlib import Path
+        
+        # Prevent concurrent loads
+        if self._native_git_log_loading or self._pty_streaming_active:
+            return
+        
+        self._native_git_log_loading = True
+        self._pty_streaming_active = True
+        
+        try:
+            # Get repo path (same logic as _show_native_git_log)
+            repo_path = None
+            
+            try:
+                if hasattr(git_service, 'repo_path'):
+                    repo_path = git_service.repo_path
+            except (AttributeError, TypeError):
+                pass
+            
+            if repo_path is None:
+                try:
+                    repo_path = getattr(git_service, 'repo_path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            if repo_path is None:
+                try:
+                    if hasattr(git_service, 'repo'):
+                        repo = getattr(git_service, 'repo', None)
+                        if repo and hasattr(repo, 'path'):
+                            repo_path = getattr(repo, 'path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            if repo_path:
+                if isinstance(repo_path, str):
+                    repo_path = Path(repo_path)
+                elif not isinstance(repo_path, Path):
+                    repo_path = Path(str(repo_path))
+            else:
+                repo_path = Path(".")
+            
+            # Resolve "." to absolute path
+            if str(repo_path) == ".":
+                repo_path = Path(".").resolve()
+            
+            # If appending, increase the limit; otherwise reset
+            if not append:
+                self._native_git_log_count = 50
+                self._native_git_log_lines = []
+            else:
+                self._native_git_log_count += 50
+            
+            # Build git command (using Lazygit's default format)
+            # Limit to reasonable number of commits to prevent long execution times
+            max_commits = min(self._native_git_log_count, 100)  # Cap at 100 commits max
+            cmd = [
+                'git', 'log',
+                '--graph',
+                '--color=always',
+                '--abbrev-commit',
+                '--decorate',
+                '--date=relative',
+                '--pretty=medium',
+                f'-{max_commits}'
+            ]
+            
+            # Add branch if specified
+            if branch and branch.strip():
+                if branch.startswith('refs/'):
+                    cmd.append(branch)
+                elif '/' in branch:
+                    cmd.append(f'refs/heads/{branch}')
+                else:
+                    cmd.append(branch)
+            
+            cmd.append('--')
+            
+            # Set up environment for PTY
+            env = os.environ.copy()
+            env['TERM'] = 'dumb'  # Tell git we're a simple terminal
+            env['GIT_PAGER'] = 'cat'  # Disable pager, output directly
+            
+            # Build header
+            header = self._build_header(branch, branch_info)
+            
+            # Initialize lines list
+            if not append:
+                self._native_git_log_lines = [header, Text()]  # Header + empty line
+            
+            def stream_in_background():
+                """Background thread that streams output from PTY."""
+                master_fd = None
+                process = None
+                
+                try:
+                    # Create master/slave PTY pair
+                    master_fd, slave_fd = pty.openpty()
+                    
+                    # Start the process with PTY
+                    # Note: We can't use timeout parameter with Popen, so we'll handle timeout in wait()
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        cwd=str(repo_path),
+                        env=env,
+                        start_new_session=True
+                    )
+                    
+                    # Close slave_fd in parent (we use master_fd)
+                    os.close(slave_fd)
+                    
+                    # Set non-blocking mode for streaming
+                    flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+                    fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    
+                    buffer = b''
+                    lines_collected = []
+                    update_counter = 0
+                    
+                    # Stream output line by line
+                    while process.poll() is None or buffer:
+                        # Check if process is done and no more data
+                        if process.poll() is not None and not buffer:
+                            # Try one more read
+                            try:
+                                data = os.read(master_fd, 4096)
+                                if not data:
+                                    break
+                                buffer += data
+                            except OSError:
+                                break
+                        
+                        # Read available data
+                        try:
+                            ready, _, _ = select.select([master_fd], [], [], 0.1)
+                            if ready:
+                                data = os.read(master_fd, 4096)
+                                if not data:
+                                    if process.poll() is not None:
+                                        break
+                                    continue
+                                buffer += data
+                        except (OSError, ValueError):
+                            # No data available or error
+                            if process.poll() is not None:
+                                break
+                            continue
+                        
+                        # Process complete lines
+                        while b'\n' in buffer:
+                            line_bytes, buffer = buffer.split(b'\n', 1)
+                            line = line_bytes.decode('utf-8', errors='replace')
+                            
+                            if line.strip():  # Skip empty lines
+                                # Parse ANSI to Rich Text (still needed for Textual)
+                                try:
+                                    rich_line = Text.from_ansi(line)
+                                    lines_collected.append(rich_line)
+                                    update_counter += 1
+                                    
+                                    # Update UI every 10 lines (balance between responsiveness and performance)
+                                    if update_counter % 10 == 0:
+                                        if hasattr(self, 'app') and self.app is not None:
+                                            def update_ui():
+                                                try:
+                                                    # Append new lines
+                                                    self._native_git_log_lines.extend(lines_collected)
+                                                    lines_collected.clear()
+                                                    
+                                                    # Update UI
+                                                    full_content = Group(*self._native_git_log_lines)
+                                                    self.update(full_content)
+                                                except Exception as e:
+                                                    _log_timing_message(f"[WARNING] Error in PTY UI update: {type(e).__name__}: {e}")
+                                            
+                                            # Queue the update
+                                            try:
+                                                if hasattr(self.app, '_ui_update_queue'):
+                                                    self.app._ui_update_queue.put(update_ui)
+                                                else:
+                                                    # Fallback: try direct update
+                                                    if hasattr(self.app, 'call_from_thread'):
+                                                        self.app.call_from_thread(update_ui)
+                                                    else:
+                                                        update_ui()
+                                            except Exception as queue_error:
+                                                _log_timing_message(f"[WARNING] Error queueing PTY UI update: {type(queue_error).__name__}: {queue_error}")
+                                
+                                except Exception as e:
+                                    # Fallback: strip ANSI and use plain text
+                                    try:
+                                        from pygitzen.git_graph import strip_ansi_codes
+                                        plain = strip_ansi_codes(line)
+                                        rich_line = Text(plain, style="white")
+                                        lines_collected.append(rich_line)
+                                        update_counter += 1
+                                    except Exception:
+                                        pass  # Skip this line if parsing fails
+                    
+                    # Wait for process to finish (with timeout)
+                    if process.poll() is None:
+                        try:
+                            # Wait with timeout (30 seconds max)
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            # Kill the process if it times out
+                            process.kill()
+                            _log_timing_message("[WARNING] git log --graph process timed out, killed")
+                        finally:
+                            # Cancel alarm if it was set
+                            try:
+                                signal.alarm(0)
+                            except (AttributeError, ValueError):
+                                pass
+                    
+                    # Final update with any remaining lines
+                    if lines_collected:
+                        if hasattr(self, 'app') and self.app is not None:
+                            def final_update():
+                                try:
+                                    # Append remaining lines
+                                    self._native_git_log_lines.extend(lines_collected)
+                                    
+                                    # Update UI
+                                    full_content = Group(*self._native_git_log_lines)
+                                    self.update(full_content)
+                                    self._native_git_log_rendered_count = len(self._native_git_log_lines)
+                                    
+                                    # Update cache
+                                    self._cached_branch = branch
+                                    self._cached_branch_info = branch_info.copy()
+                                except Exception as e:
+                                    _log_timing_message(f"[WARNING] Error in PTY final UI update: {type(e).__name__}: {e}")
+                            
+                            try:
+                                if hasattr(self.app, '_ui_update_queue'):
+                                    self.app._ui_update_queue.put(final_update)
+                                else:
+                                    if hasattr(self.app, 'call_from_thread'):
+                                        self.app.call_from_thread(final_update)
+                                    else:
+                                        final_update()
+                            except Exception as queue_error:
+                                _log_timing_message(f"[WARNING] Error queueing PTY final UI update: {type(queue_error).__name__}: {queue_error}")
+                
+                except Exception as e:
+                    # Show error message
+                    if hasattr(self, 'app') and self.app is not None:
+                        def show_error():
+                            try:
+                                error_text = Text()
+                                error_text.append(f"Error streaming git log: {e}\n", style="red")
+                                self.update(error_text)
+                            except Exception:
+                                pass
+                        
+                        try:
+                            if hasattr(self.app, '_ui_update_queue'):
+                                self.app._ui_update_queue.put(show_error)
+                            else:
+                                if hasattr(self.app, 'call_from_thread'):
+                                    self.app.call_from_thread(show_error)
+                                else:
+                                    show_error()
+                        except Exception:
+                            pass
+                    
+                    _log_timing_message(f"[ERROR] Error in PTY streaming: {type(e).__name__}: {e}")
+                
+                finally:
+                    # Cleanup
+                    if master_fd is not None:
+                        try:
+                            os.close(master_fd)
+                        except Exception:
+                            pass
+                    
+                    if process is not None and process.poll() is None:
+                        try:
+                            process.terminate()
+                            process.wait()
+                        except Exception:
+                            pass
+                    
+                    self._native_git_log_loading = False
+                    self._pty_streaming_active = False
+            
+            # Start streaming in background thread
+            thread = threading.Thread(target=stream_in_background, daemon=True)
+            thread.start()
             
         except Exception as e:
             # On error, show error message
-            error_text = Text()
-            error_text.append(f"Error showing native git log: {e}\n", style="red")
-            self.update(error_text)
-        finally:
+            try:
+                if hasattr(self, 'app') and self.app is not None:
+                    error_text = Text()
+                    error_text.append(f"Error starting PTY streaming: {e}\n", style="red")
+                    self.update(error_text)
+            except Exception:
+                pass
+            
+            _log_timing_message(f"[ERROR] Error starting PTY streaming: {type(e).__name__}: {e}")
             self._native_git_log_loading = False
+            self._pty_streaming_active = False
+    
+    def _stream_git_command_pty(self, cmd: list, repo_path: Path, target_widget, prefix: str = "", update_interval: int = 10) -> None:
+        """
+        Generic PTY streaming helper for git commands.
+        Streams output from a git command to a target widget incrementally.
+        
+        Args:
+            cmd: Git command as list (e.g., ['git', 'diff', '--color=always', 'file.txt'])
+            repo_path: Repository path
+            target_widget: Widget to update (e.g., self.patch_pane)
+            prefix: Optional prefix text to add before output
+            update_interval: Update UI every N lines (default: 10)
+        """
+        import pty
+        import os
+        import select
+        import subprocess
+        import threading
+        import fcntl
+        from rich.text import Text
+        from rich.console import Group
+        
+        def stream_in_background():
+            """Background thread that streams output from PTY."""
+            master_fd = None
+            process = None
+            
+            try:
+                # Set up environment for PTY
+                env = os.environ.copy()
+                env['TERM'] = 'dumb'
+                env['GIT_PAGER'] = 'cat'
+                
+                # Create master/slave PTY pair
+                master_fd, slave_fd = pty.openpty()
+                
+                # Start the process with PTY
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=str(repo_path),
+                    env=env,
+                    start_new_session=True
+                )
+                
+                os.close(slave_fd)
+                
+                # Set non-blocking mode for streaming
+                flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+                fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                
+                buffer = b''
+                lines_collected = []
+                update_counter = 0
+                
+                # Initialize content with prefix if provided
+                if prefix:
+                    lines_collected.append(Text(prefix))
+                    lines_collected.append(Text())  # Empty line
+                
+                # Stream output line by line
+                while process.poll() is None or buffer:
+                    if process.poll() is not None and not buffer:
+                        try:
+                            data = os.read(master_fd, 4096)
+                            if not data:
+                                break
+                            buffer += data
+                        except OSError:
+                            break
+                    
+                    try:
+                        ready, _, _ = select.select([master_fd], [], [], 0.1)
+                        if ready:
+                            data = os.read(master_fd, 4096)
+                            if not data:
+                                if process.poll() is not None:
+                                    break
+                                continue
+                            buffer += data
+                    except (OSError, ValueError):
+                        if process.poll() is not None:
+                            break
+                        continue
+                    
+                    # Process complete lines
+                    while b'\n' in buffer:
+                        line_bytes, buffer = buffer.split(b'\n', 1)
+                        line = line_bytes.decode('utf-8', errors='replace')
+                        
+                        if line.strip():
+                            try:
+                                rich_line = Text.from_ansi(line)
+                                lines_collected.append(rich_line)
+                                update_counter += 1
+                                
+                                # Update UI periodically
+                                if update_counter % update_interval == 0:
+                                    if hasattr(target_widget, 'app') and target_widget.app is not None:
+                                        def update_ui():
+                                            try:
+                                                full_content = Group(*lines_collected)
+                                                target_widget.update(full_content)
+                                            except Exception as e:
+                                                _log_timing_message(f"[WARNING] Error in PTY UI update: {type(e).__name__}: {e}")
+                                        
+                                        try:
+                                            if hasattr(target_widget.app, '_ui_update_queue'):
+                                                target_widget.app._ui_update_queue.put(update_ui)
+                                            else:
+                                                if hasattr(target_widget.app, 'call_from_thread'):
+                                                    target_widget.app.call_from_thread(update_ui)
+                                                else:
+                                                    update_ui()
+                                        except Exception as queue_error:
+                                            _log_timing_message(f"[WARNING] Error queueing PTY UI update: {type(queue_error).__name__}: {queue_error}")
+                            except Exception as e:
+                                try:
+                                    from pygitzen.git_graph import strip_ansi_codes
+                                    plain = strip_ansi_codes(line)
+                                    rich_line = Text(plain, style="white")
+                                    lines_collected.append(rich_line)
+                                    update_counter += 1
+                                except Exception:
+                                    pass
+                
+                if process.poll() is None:
+                    process.wait()
+                
+                # Final update with remaining lines
+                if lines_collected:
+                    if hasattr(target_widget, 'app') and target_widget.app is not None:
+                        def final_update():
+                            try:
+                                full_content = Group(*lines_collected)
+                                target_widget.update(full_content)
+                            except Exception as e:
+                                _log_timing_message(f"[WARNING] Error in PTY final UI update: {type(e).__name__}: {e}")
+                        
+                        try:
+                            if hasattr(target_widget.app, '_ui_update_queue'):
+                                target_widget.app._ui_update_queue.put(final_update)
+                            else:
+                                if hasattr(target_widget.app, 'call_from_thread'):
+                                    target_widget.app.call_from_thread(final_update)
+                                else:
+                                    final_update()
+                        except Exception as queue_error:
+                            _log_timing_message(f"[WARNING] Error queueing PTY final UI update: {type(queue_error).__name__}: {queue_error}")
+            
+            except Exception as e:
+                if hasattr(target_widget, 'app') and target_widget.app is not None:
+                    def show_error():
+                        try:
+                            error_text = Text()
+                            error_text.append(f"Error streaming git command: {e}\n", style="red")
+                            target_widget.update(error_text)
+                        except Exception:
+                            pass
+                    
+                    try:
+                        if hasattr(target_widget.app, '_ui_update_queue'):
+                            target_widget.app._ui_update_queue.put(show_error)
+                        else:
+                            if hasattr(target_widget.app, 'call_from_thread'):
+                                target_widget.app.call_from_thread(show_error)
+                            else:
+                                show_error()
+                    except Exception:
+                        pass
+                
+                _log_timing_message(f"[ERROR] Error in PTY streaming: {type(e).__name__}: {e}")
+            
+            finally:
+                if master_fd is not None:
+                    try:
+                        os.close(master_fd)
+                    except Exception:
+                        pass
+                
+                if process is not None and process.poll() is None:
+                    try:
+                        process.terminate()
+                        process.wait()
+                    except Exception:
+                        pass
+        
+        # Start streaming in background thread
+        thread = threading.Thread(target=stream_in_background, daemon=True)
+        thread.start()
     
     def _build_graph_structure(self, commits: list[CommitInfo], git_service) -> dict:
         """
@@ -2172,15 +3146,46 @@ class PygitzenApp(App):
         border: solid green;
     }
     
-    #branches-pane {
-        height: 4;
+    #branches-tabbed {
+        height: 9;
         border: solid white;
+        background: #1e1e1e;
+    }
+    
+    #branches-tabbed:focus,
+    #branches-tabbed:focus-within {
+        border: solid green;
+    }
+    
+    #branches-tabbed > TabbedContent > Tab {
+        background: #1e1e1e;
+        color: #cccccc;
+    }
+    
+    #branches-tabbed > TabbedContent > Tab.--active {
+        background: #2d2d2d;
+        color: white;
+    }
+    
+    #branches-pane {
+        height: 1fr;
+        border: none;
         background: #1e1e1e;
         overflow: auto;
     }
     
-    #branches-pane:focus {
-        border: solid green;
+    #remotes-pane {
+        height: 1fr;
+        border: none;
+        background: #1e1e1e;
+        overflow: auto;
+    }
+    
+    #tags-pane {
+        height: 1fr;
+        border: none;
+        background: #1e1e1e;
+        overflow: auto;
     }
     
     #commits-pane {
@@ -2210,7 +3215,7 @@ class PygitzenApp(App):
     }
     
     #stash-pane {
-        height: 5;
+        height: 8;
         border: solid white;
         background: #1e1e1e;
         overflow: auto;
@@ -2263,6 +3268,7 @@ class PygitzenApp(App):
         color: white;
     }
     
+    /* General highlight rule - but specific panes override this */
     ListItem.--highlight {
         background: #404040;
         color: white;
@@ -2304,23 +3310,65 @@ class PygitzenApp(App):
         text-style: bold;
     }
     
-    #commits-pane ListItem.highlighted-commit:focus {
-        background: #2f6aa3;
-        color: #ffffff;
-        text-style: bold;
-    }
-
-    /* Selected/highlighted item styling for branches pane */
-    #branches-pane ListItem.--highlight {
+    #commits-pane:focus ListItem.highlighted-commit {
         background: #357ABD;
         color: #ffffff;
         text-style: bold;
     }
     
-    #branches-pane ListItem.--highlight:focus {
+    #commits-pane ListItem.highlighted-commit:focus {
         background: #2f6aa3;
         color: #ffffff;
         text-style: bold;
+    }
+    
+    /* Note: Highlighting when not focused is handled in code via on_blur() */
+
+    /* Hover and highlight styling for branches, remotes, and tags panes */
+    #branches-pane ListItem:hover,
+    #remotes-pane ListItem:hover,
+    #tags-pane ListItem:hover {
+        background: #357ABD;
+        color: #ffffff;
+    }
+    
+    /* Blue highlighting for branches, remotes, and tags panes - using custom classes like commits pane */
+    #branches-pane ListItem.highlighted-branch,
+    #remotes-pane ListItem.highlighted-remote,
+    #tags-pane ListItem.highlighted-tag {
+        background: #357ABD; /* blue for strong contrast */
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #branches-pane ListItem.highlighted-branch:focus,
+    #remotes-pane ListItem.highlighted-remote:focus,
+    #tags-pane ListItem.highlighted-tag:focus {
+        background: #2f6aa3; /* slightly darker when focused */
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #branches-pane:focus ListItem.highlighted-branch,
+    #remotes-pane:focus ListItem.highlighted-remote,
+    #tags-pane:focus ListItem.highlighted-tag {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
+    }
+    
+    #branches-pane ListItem.highlighted-branch > Static,
+    #remotes-pane ListItem.highlighted-remote > Static,
+    #tags-pane ListItem.highlighted-tag > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+    
+    #branches-pane ListItem:hover > Static,
+    #remotes-pane ListItem:hover > Static,
+    #tags-pane ListItem:hover > Static {
+        background: transparent;
+        color: #ffffff;
     }
     
     /* Selected/highlighted item styling for stash pane */
@@ -2433,6 +3481,8 @@ class PygitzenApp(App):
         Binding("s", "stash", "Stash"),
         Binding("+", "load_more", "More"),
         Binding("g", "toggle_graph_style", "Toggle Graph Style"),
+        Binding("[", "prev_tab", "Prev Tab"),
+        Binding("]", "next_tab", "Next Tab"),
     ]
 
     active_branch: reactive[str | None] = reactive(None)
@@ -2493,6 +3543,9 @@ class PygitzenApp(App):
             # Cache merged commits (shared across all branches - commits on main/master)
             self._merged_commits_cache: set[str] = set()
             
+            # Cache for branch sync status (branch name -> sync status dict)
+            self._branch_sync_status_cache: dict[str, dict] = {}
+            
             # Track HEAD SHA for invalidation detection
             # Maps branch -> HEAD SHA (for local branches)
             self._last_head_sha: dict[str, str] = {}
@@ -2516,7 +3569,12 @@ class PygitzenApp(App):
                 # Set parent app reference for file panes
                 self.staged_pane._parent_app = self
                 self.changes_pane._parent_app = self
+                
+                # Create branches/remotes/tags panes
                 self.branches_pane = BranchesPane(id="branches-pane")
+                self.remotes_pane = RemotesPane(id="remotes-pane")
+                self.tags_pane = TagsPane(id="tags-pane")
+                
                 self.commits_pane = CommitsPane(id="commits-pane")
                 self.search_input = CommitSearchInput(id="commit-search-input")
                 self.stash_pane = StashPane(id="stash-pane")
@@ -2529,7 +3587,15 @@ class PygitzenApp(App):
                     yield self.staged_pane
                     yield self.changes_pane
                 
-                yield self.branches_pane
+                # TabbedContent for branches/remotes/tags
+                with TabbedContent(id="branches-tabbed", initial="branches-tab") as self.branches_tabbed:
+                    with TabPane("Local branches", id="branches-tab"):
+                        yield self.branches_pane
+                    with TabPane("Remotes", id="remotes-tab"):
+                        yield self.remotes_pane
+                    with TabPane("Tags", id="tags-tab"):
+                        yield self.tags_pane
+                
                 yield self.commits_pane
                 yield self.search_input
                 yield self.stash_pane
@@ -2567,9 +3633,17 @@ class PygitzenApp(App):
         # Check more frequently (0.2s) for more responsive virtual scrolling
         self.set_interval(0.2, self._check_virtual_scroll_expansion)
         self.set_interval(0.2, self._check_commits_pane_scroll)  # Check commits pane scrolling
+        self.set_interval(0.2, self._check_tags_pane_scroll)  # Check tags pane scrolling
         
         # Set up periodic processing of UI update queue from background threads
         self.set_interval(0.05, self._process_ui_update_queue)  # Check every 50ms
+        
+        # Set up periodic footer update to reflect current focus
+        self.set_interval(0.1, self._update_footer)
+        
+        # Watch for tab changes to load tags lazily (only when tags tab is selected)
+        if hasattr(self, 'branches_tabbed'):
+            self.watch(self.branches_tabbed, "active", self._on_tab_changed)
         
         mount_elapsed = time.perf_counter() - mount_start
         _log_timing_message(f"[TIMING] ===== on_mount TOTAL: {mount_elapsed:.4f}s =====")
@@ -2585,19 +3659,54 @@ class PygitzenApp(App):
         self.stash_pane.set_on_render_to_main(self._get_stash_render_to_main())
         self.staged_pane.set_on_render_to_main(self._get_staged_render_to_main())
         self.changes_pane.set_on_render_to_main(self._get_changes_render_to_main())
+        self.tags_pane.set_on_render_to_main(self._get_tags_render_to_main())
+        self.remotes_pane.set_on_render_to_main(self._get_remotes_render_to_main())
     
     def _process_ui_update_queue(self) -> None:
         """Process UI updates from background threads (called periodically from main thread)."""
         try:
-            # Process all pending updates (non-blocking)
-            while True:
+            # Process updates in batches to prevent blocking
+            processed_count = 0
+            max_updates_per_cycle = 5  # Limit to prevent blocking on large queues
+            while processed_count < max_updates_per_cycle:
                 try:
                     update_func = self._ui_update_queue.get_nowait()
+                    update_start = time.perf_counter()
                     update_func()
+                    update_elapsed = time.perf_counter() - update_start
+                    processed_count += 1
+                    if update_elapsed > 0.1:  # Log slow updates
+                        _log_timing_message(f"[UI_QUEUE] Slow update #{processed_count}: {update_elapsed:.4f}s")
                 except queue.Empty:
                     break
+            if processed_count > 0:
+                _log_timing_message(f"[UI_QUEUE] Processed {processed_count} updates")
+        except Exception as e:
+            _log_timing_message(f"[UI_QUEUE] ERROR processing queue: {type(e).__name__}: {e}")
+            import traceback
+            _log_timing_message(f"[UI_QUEUE] TRACEBACK:\n{traceback.format_exc()}")
+    
+    def _check_tags_pane_scroll(self) -> None:
+        """Periodically check if we need to load more tags in tags pane (fallback if scroll events don't fire)."""
+        try:
+            if hasattr(self, 'tags_pane') and self.tags_pane._total_tags_count > 0:
+                if self.tags_pane._loaded_tags_count < self.tags_pane._total_tags_count:
+                    # Check scroll position
+                    try:
+                        scroll_y = self.tags_pane.scroll_y if hasattr(self.tags_pane, 'scroll_y') else 0
+                        max_scroll_y = self.tags_pane.max_scroll_y if hasattr(self.tags_pane, 'max_scroll_y') else 0
+                        
+                        if max_scroll_y > 0:
+                            scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                            
+                            # If scrolled near bottom (85%), load more tags
+                            if scroll_percent >= 0.85:
+                                _log_timing_message(f"[TIMING] [PERIODIC] Tags pane: Loading more tags (scroll_percent={scroll_percent:.2f}, loaded={self.tags_pane._loaded_tags_count}, total={self.tags_pane._total_tags_count})")
+                                self.load_more_tags()
+                    except Exception:
+                        pass
         except Exception:
-            pass  # Silently fail if processing errors occur
+            pass
     
     def _check_commits_pane_scroll(self) -> None:
         """Periodically check if we need to load more commits in commits pane (fallback if scroll events don't fire)."""
@@ -2657,37 +3766,82 @@ class PygitzenApp(App):
                 if max_scroll_y > 0 and not self.log_pane._native_git_log_loading:
                     scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
                     
-                    # If scrolled near bottom (85%), load more commits
+                    # Check if we have more lines available to render (from pending lines)
+                    has_pending_lines = hasattr(self.log_pane, '_pending_log_lines') and self.log_pane._pending_log_lines
+                    
+                    # If scrolled near bottom (85%), either render more pending lines or load more commits
                     if scroll_percent >= 0.85:
-                        _log_timing_message(f"[TIMING] [PERIODIC CHECK] Log pane: Loading more commits (scroll_percent={scroll_percent:.2f}, current_count={self.log_pane._native_git_log_count})")
-                        # Load more commits - use same wrapper approach as load_commits_for_log
-                        if self.active_branch and self.git:
-                            # Get repo_path (same logic as load_commits_for_log)
-                            repo_path_to_use = None
-                            if hasattr(self, 'repo_path') and self.repo_path:
-                                repo_path_to_use = self.repo_path
-                            elif hasattr(self.git, 'repo_path'):
-                                try:
-                                    repo_path_to_use = self.git.repo_path
-                                except:
-                                    pass
-                            elif hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
-                                try:
-                                    repo_path_to_use = self.git.repo.path
-                                except:
-                                    pass
+                        if has_pending_lines:
+                            # Process pending lines in chunks
+                            _log_timing_message(f"[TIMING] [PERIODIC CHECK] Log pane: Processing pending lines (scroll_percent={scroll_percent:.2f}, pending={len(self.log_pane._pending_log_lines)})")
+                            # Process next 50 lines from pending
+                            from rich.text import Text
+                            chunk_size = 50
+                            lines_to_process = self.log_pane._pending_log_lines[:chunk_size]
+                            remaining_pending = self.log_pane._pending_log_lines[chunk_size:]
                             
-                            # Create wrapper with repo_path
-                            class GitServiceWithPath:
-                                def __init__(self, git_service, repo_path):
-                                    self.git_service = git_service
-                                    self.repo_path = Path(repo_path) if repo_path else None
-                                    if hasattr(git_service, 'repo'):
-                                        self.repo = git_service.repo
+                            new_rich_lines = []
+                            for line in lines_to_process:
+                                if line:
+                                    try:
+                                        # Use Rich's built-in ANSI parser (faster than manual parsing)
+                                        rich_line = Text.from_ansi(line)
+                                        new_rich_lines.append(rich_line)
+                                    except Exception:
+                                        from pygitzen.git_graph import strip_ansi_codes
+                                        plain_line = strip_ansi_codes(line)
+                                        new_rich_lines.append(Text(plain_line, style="white"))
                             
-                            git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use or ".")
-                            basic_branch_info = {"name": self.active_branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
-                            self.log_pane._show_native_git_log(self.active_branch, basic_branch_info, git_service_wrapper, append=True)
+                            # Append new lines to existing ones
+                            if self.log_pane._native_git_log_lines:
+                                self.log_pane._native_git_log_lines.extend(new_rich_lines)
+                            else:
+                                self.log_pane._native_git_log_lines = new_rich_lines
+                            
+                            # Update pending lines
+                            self.log_pane._pending_log_lines = remaining_pending
+                            
+                            # Queue UI update
+                            def update_with_more_lines():
+                                if self.log_pane._native_git_log_lines:
+                                    from rich.console import Group
+                                    full_content = Group(*self.log_pane._native_git_log_lines)
+                                    self.log_pane.update(full_content)
+                                    self.log_pane._native_git_log_rendered_count = len(self.log_pane._native_git_log_lines)
+                            
+                            if hasattr(self, '_ui_update_queue'):
+                                self._ui_update_queue.put(update_with_more_lines)
+                        else:
+                            # No pending lines, load more commits from git
+                            _log_timing_message(f"[TIMING] [PERIODIC CHECK] Log pane: Loading more commits (scroll_percent={scroll_percent:.2f}, current_count={self.log_pane._native_git_log_count})")
+                            # Load more commits - use same wrapper approach as load_commits_for_log
+                            if self.active_branch and self.git:
+                                # Get repo_path (same logic as load_commits_for_log)
+                                repo_path_to_use = None
+                                if hasattr(self, 'repo_path') and self.repo_path:
+                                    repo_path_to_use = self.repo_path
+                                elif hasattr(self.git, 'repo_path'):
+                                    try:
+                                        repo_path_to_use = self.git.repo_path
+                                    except:
+                                        pass
+                                elif hasattr(self.git, 'repo') and hasattr(self.git.repo, 'path'):
+                                    try:
+                                        repo_path_to_use = self.git.repo.path
+                                    except:
+                                        pass
+                                
+                                # Create wrapper with repo_path
+                                class GitServiceWithPath:
+                                    def __init__(self, git_service, repo_path):
+                                        self.git_service = git_service
+                                        self.repo_path = Path(repo_path) if repo_path else None
+                                        if hasattr(git_service, 'repo'):
+                                            self.repo = git_service.repo
+                                
+                                git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use or ".")
+                                basic_branch_info = {"name": self.active_branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
+                                self.log_pane._show_native_git_log(self.active_branch, basic_branch_info, git_service_wrapper, append=True)
                         return
             except Exception:
                 pass  # Silently fail if check fails
@@ -2804,6 +3958,127 @@ class PygitzenApp(App):
     def action_refresh(self) -> None:
         # self.refresh_data()
         self.refresh_data_fast()
+    
+    def action_prev_tab(self) -> None:
+        """Handle previous tab action - switch to previous tab in branches/remotes/tags."""
+        try:
+            tabbed_content = self.query_one("#branches-tabbed", None)
+            if tabbed_content:
+                # Get current active tab
+                current_tab = tabbed_content.active
+                tabs = ["branches-tab", "remotes-tab", "tags-tab"]
+                if current_tab in tabs:
+                    current_index = tabs.index(current_tab)
+                    # Switch to previous tab (wrap around)
+                    prev_index = (current_index - 1) % len(tabs)
+                    tabbed_content.active = tabs[prev_index]
+        except Exception as e:
+            _log_timing_message(f"[ACTION] Error switching to previous tab: {type(e).__name__}: {e}")
+    
+    def action_next_tab(self) -> None:
+        """Handle next tab action - switch to next tab in branches/remotes/tags."""
+        try:
+            tabbed_content = self.query_one("#branches-tabbed", None)
+            if tabbed_content:
+                # Get current active tab
+                current_tab = tabbed_content.active
+                tabs = ["branches-tab", "remotes-tab", "tags-tab"]
+                if current_tab in tabs:
+                    current_index = tabs.index(current_tab)
+                    # Switch to next tab (wrap around)
+                    next_index = (current_index + 1) % len(tabs)
+                    tabbed_content.active = tabs[next_index]
+        except Exception as e:
+            _log_timing_message(f"[ACTION] Error switching to next tab: {type(e).__name__}: {e}")
+    
+    def _on_tab_changed(self, active_tab: str) -> None:
+        """Handle tab change - load tags lazily when tags tab is selected."""
+        if active_tab == "tags-tab":
+            # Check if tags are already loaded
+            if not hasattr(self.tags_pane, '_tags') or len(self.tags_pane._tags) == 0:
+                # Load tags in background (lazy loading - like Lazygit loads them async)
+                _log_timing_message("[TAGS] Loading tags lazily (tags tab selected)")
+                self.load_tags_background()
+    
+    def _update_tabbed_border(self) -> None:
+        """Update tabbed panel border to green when any child pane has focus.
+        Also automatically focus the active tab's content pane when tabbed panel receives focus."""
+        try:
+            if not hasattr(self, 'branches_tabbed'):
+                return
+            
+            # Check if any child pane has focus
+            has_focus = (
+                self.branches_pane.has_focus or
+                (hasattr(self, 'remotes_pane') and self.remotes_pane.has_focus) or
+                (hasattr(self, 'tags_pane') and self.tags_pane.has_focus)
+            )
+            
+            # If tabbed container has focus but no child pane has focus, focus the active tab's content
+            if self.branches_tabbed.has_focus and not has_focus:
+                # Get the active tab and focus the corresponding pane
+                active_tab = getattr(self.branches_tabbed, 'active', None)
+                if active_tab == "branches-tab":
+                    self.branches_pane.focus()
+                elif active_tab == "remotes-tab":
+                    if hasattr(self, 'remotes_pane'):
+                        self.remotes_pane.focus()
+                elif active_tab == "tags-tab":
+                    if hasattr(self, 'tags_pane'):
+                        self.tags_pane.focus()
+            
+            # Update border color based on focus
+            if has_focus or self.branches_tabbed.has_focus:
+                self.branches_tabbed.styles.border = ("solid", "green")
+            else:
+                self.branches_tabbed.styles.border = ("solid", "white")
+        except Exception:
+            # Silently fail if border update fails
+            pass
+    
+    def _update_footer(self) -> None:
+        """Update footer with context-appropriate actions based on focused panel."""
+        try:
+            footer = self.query_one("Footer", None)
+            if not footer:
+                return
+            
+            # Update tabbed border based on focus
+            self._update_tabbed_border()
+            
+            # Determine which panel has focus
+            footer_text = ""
+            
+            if self.staged_pane.has_focus or self.changes_pane.has_focus:
+                # Files focused
+                footer_text = "Stage: <space> | Discard: d | Reset: D | Quit: q | Refresh: r"
+            elif (self.branches_pane.has_focus or 
+                  (hasattr(self, 'remotes_pane') and self.remotes_pane.has_focus) or 
+                  (hasattr(self, 'tags_pane') and self.tags_pane.has_focus)):
+                # Branches/Remotes/Tags focused
+                footer_text = "Checkout: c | New: n | Delete: D | Prev Tab: [ | Next Tab: ] | Quit: q | Refresh: r"
+            elif self.commits_pane.has_focus:
+                # Commits focused
+                footer_text = "Show diff: <enter> | Search: / | Quit: q | Refresh: r"
+            elif self.stash_pane.has_focus:
+                # Stash focused
+                footer_text = "Apply: a | Pop: p | Drop: d | Quit: q | Refresh: r"
+            else:
+                # Default footer
+                footer_text = "Quit: q | Refresh: r | Navigate: j/k | Select: <space>/<enter>"
+            
+            # Update footer if text changed
+            if hasattr(footer, '_footer_text') and footer._footer_text == footer_text:
+                return  # No change needed
+            
+            footer._footer_text = footer_text
+            # Update footer using Textual's footer API
+            from rich.text import Text
+            footer_text_obj = Text(footer_text, style="white")
+            footer.update(footer_text_obj)
+        except Exception as e:
+            # Silently fail if footer update fails
+            pass
 
     def action_down(self) -> None:
         if self.commits_pane.has_focus:
@@ -2834,7 +4109,8 @@ class PygitzenApp(App):
                     self.load_commits_for_log(self.active_branch)
                     # Update status pane immediately
                     if self.active_branch:
-                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                        current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
+                        self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
                     self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
@@ -2865,7 +4141,8 @@ class PygitzenApp(App):
                     self.load_commits_for_log(self.active_branch)
                     # Update status pane immediately
                     if self.active_branch:
-                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                        current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
+                        self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
                     self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
@@ -2904,6 +4181,44 @@ class PygitzenApp(App):
         self.branches = self.git.list_branches()
         branch_elapsed = time.perf_counter() - branch_start
         _log_timing_message(f"list_branches: {branch_elapsed:.4f}s")
+        
+        # Load remotes, tags, and sync status in background (parallel)
+        # OPTIMIZATION: Load tags WITHOUT timestamps first (fast, like Lazygit ~0.6s for 56k tags)
+        # Lazygit loads ALL tags at once (no pagination) because git tag --list is fast
+        # Timestamps add ~0.9s overhead - load them in background after initial display
+        self.load_remotes_background()
+        self.load_tags_background(get_timestamps=False)  # Fast initial load (like Lazygit)
+        self.load_branch_sync_status_background()
+        
+        # Load timestamps in background after initial tag load (for recency display)
+        # This is optional - tags work fine without timestamps (Lazygit doesn't show recency)
+        # IMPORTANT: Only update timestamps for already-displayed tags, don't reload all 56k tags
+        def load_tag_timestamps_later():
+            """Load timestamps for tags in background (optional, for recency display)."""
+            self._ui_ready.wait()
+            time.sleep(0.5)  # Wait a bit for initial tag load to complete
+            if hasattr(self, 'tags_pane') and len(self.tags_pane._tags) > 0:
+                # Only update timestamps for tags that are already displayed (first page)
+                # Don't reload all 56k tags - that would block the UI
+                displayed_tags = self.tags_pane._tags[:self.tags_pane._page_size]  # Only first page
+                if displayed_tags:
+                    _log_timing_message(f"[TIMING] [BACKGROUND] Loading timestamps for {len(displayed_tags)} displayed tags...")
+                    # Fetch timestamps in batch for displayed tags only
+                    tag_names = [tag.name for tag in displayed_tags]
+                    timestamp_map = self.git.get_tag_timestamps_batch(tag_names)
+                    # Update tags with timestamps
+                    for tag in displayed_tags:
+                        if tag.name in timestamp_map:
+                            tag.timestamp = timestamp_map[tag.name]
+                    # Update UI with timestamps (only for displayed tags)
+                    self._ui_update_queue.put(lambda: self._update_tags_ui_with_timestamps(displayed_tags))
+        
+        # Explicitly import threading here to avoid UnboundLocalError
+        # (threading is imported at module level, but Python may see it as local due to other local imports)
+        import threading as _threading_module
+        thread = _threading_module.Thread(target=load_tag_timestamps_later, daemon=True)
+        thread.start()
+        
         if self.branches:
             # Try to restore the previous branch selection if it still exists
             if previous_branch:
@@ -2914,20 +4229,20 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     # Ensure BranchesPane ListView selection matches (set after list is populated)
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
                     # Branch was deleted, fall back to first branch
                     self.active_branch = self.branches[0].name
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     self.branches_pane.index = 0
                     self.branches_pane.highlighted = 0
             else:
                 # No previous branch, use first branch
                 self.active_branch = self.branches[0].name
-                self.branches_pane.set_branches(self.branches, self.active_branch)
+                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                 self.branches_pane.index = 0
                 self.branches_pane.highlighted = 0
 
@@ -2937,17 +4252,20 @@ class PygitzenApp(App):
             self.commits_pane.border_title = f"Commits ({self.active_branch})" if self.active_branch else "Commits (HEAD)"
             
             # On initial load, show log view for the selected branch
+            # BUT don't load the log graph on startup (matches Lazygit behavior)
+            # The log graph will load when user selects a branch or interacts with the UI
             self._view_mode = "log"
             self.patch_pane.styles.display = "none"
             self.log_pane.styles.display = "block"
             
-            # Show loading message in log pane
+            # Show empty log pane initially (matches Lazygit - no expensive git log --graph on startup)
             from rich.text import Text
-            loading_text = Text("Loading commits...", style="dim white")
-            self.log_pane.update(loading_text)
+            empty_text = Text()
+            self.log_pane.update(empty_text)
             
             # Load commits in background (non-blocking) - this allows UI to appear immediately
             # Similar to lazygit: wait for UI to be ready before starting background work
+            # NOTE: We only load the commit LIST, not the log graph (matches Lazygit)
             def load_commits_background():
                 """Load commits in background thread (waits for UI to be ready)."""
                 try:
@@ -2959,15 +4277,15 @@ class PygitzenApp(App):
                     branch_to_load = self.active_branch
                     
                     # Load commits data (load_commits() handles thread-safe UI updates internally)
+                    # This loads the commit LIST (git log --oneline), not the graph
                     self.load_commits(branch_to_load)
                     commits_load_elapsed = time.perf_counter() - commits_load_start
                     _log_timing_message(f"load_commits (background): {commits_load_elapsed:.4f}s")
                     
-                    # Load log view in background as well
-                    log_load_start = time.perf_counter()
-                    self.load_commits_for_log(branch_to_load)
-                    log_load_elapsed = time.perf_counter() - log_load_start
-                    _log_timing_message(f"load_commits_for_log (background): {log_load_elapsed:.4f}s")
+                    # DON'T load log graph on startup (matches Lazygit behavior exactly)
+                    # Lazygit only loads the log graph when user explicitly views it (e.g., clicks branch)
+                    # The log graph (git log --graph) is expensive and will be loaded lazily
+                    # when the user selects a branch via action_down/action_up or explicitly views the log
                     
                     # Signal completion to barrier (similar to lazygit's wg.Done())
                     try:
@@ -2988,9 +4306,14 @@ class PygitzenApp(App):
             commits_thread = threading.Thread(target=load_commits_background, daemon=True)
             commits_thread.start()
             
+            # DON'T load log graph on startup at all (matches Lazygit exactly)
+            # The log graph will only load when user explicitly selects a branch
+            # This prevents any blocking operations during startup
+            
             # Update status pane immediately (fast)
             if self.active_branch:
-                self.status_pane.update_status(self.active_branch, self.repo_path)
+                current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
+                self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
             
             # Show loading placeholders for file status
             self.staged_pane.update_files([])
@@ -3028,20 +4351,20 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     # Ensure BranchesPane ListView selection matches (set after list is populated)
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
                     # Branch was deleted, fall back to first branch
                     self.active_branch = self.branches[0].name
-                    self.branches_pane.set_branches(self.branches, self.active_branch)
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                     self.branches_pane.index = 0
                     self.branches_pane.highlighted = 0
             else:
                 # No previous branch, use first branch
                 self.active_branch = self.branches[0].name
-                self.branches_pane.set_branches(self.branches, self.active_branch)
+                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
                 self.branches_pane.index = 0
                 self.branches_pane.highlighted = 0
 
@@ -3052,7 +4375,8 @@ class PygitzenApp(App):
     def update_status_info(self) -> None:
         """Update status pane with current branch info."""
         if self.active_branch:
-            self.status_pane.update_status(self.active_branch, self.repo_path)
+            current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
+            self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
         
         # Update staged and changes panes with actual file status
         try:
@@ -3073,7 +4397,7 @@ class PygitzenApp(App):
         
         # Update branches pane
         if self.branches:
-            self.branches_pane.set_branches(self.branches, self.active_branch)
+            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
         
         # Stashes are loaded in background (not here to avoid blocking)
         
@@ -3264,9 +4588,20 @@ class PygitzenApp(App):
                 except:
                     pass
             
-            self.log_pane.show_branch_log(branch, [], basic_branch_info, git_service_wrapper, append=not reset)
-            show_log_elapsed = time.perf_counter() - show_log_start
-            _log_timing_message(f"  show_branch_log (native git): {show_log_elapsed:.4f}s")
+            # Queue show_branch_log to run in background thread (it already handles UI updates via queue)
+            # This prevents blocking the main thread when loading large repos
+            def show_log_in_background():
+                try:
+                    self.log_pane.show_branch_log(branch, [], basic_branch_info, git_service_wrapper, append=not reset)
+                    show_log_elapsed = time.perf_counter() - show_log_start
+                    _log_timing_message(f"  show_branch_log (native git): {show_log_elapsed:.4f}s")
+                except Exception as e:
+                    _log_timing_message(f"  show_branch_log error: {type(e).__name__}: {e}")
+            
+            # Run in background thread to avoid blocking
+            import threading as _threading_module
+            thread = _threading_module.Thread(target=show_log_in_background, daemon=True)
+            thread.start()
         except Exception as e:
             # Log error if show_branch_log fails
             import sys
@@ -3542,6 +4877,213 @@ class PygitzenApp(App):
         
         thread = threading.Thread(target=load_stashes_in_thread, daemon=True)
         thread.start()
+    
+    def load_remotes_background(self) -> None:
+        """Load remotes in background (non-blocking)."""
+        if getattr(self, '_loading_remotes', False):
+            return
+        
+        self._loading_remotes = True
+        
+        def load_remotes_in_thread():
+            """Load remotes in background thread."""
+            self._ui_ready.wait()
+            remotes_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_remotes_background START")
+            try:
+                remotes = self.git.list_remotes()
+                get_remotes_elapsed = time.perf_counter() - remotes_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   list_remotes: {get_remotes_elapsed:.4f}s ({len(remotes)} remotes)")
+                
+                # Update UI from main thread
+                remotes_copy = remotes.copy()
+                self._ui_update_queue.put(lambda: self._update_remotes_ui(remotes_copy))
+                
+                remotes_total = time.perf_counter() - remotes_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_remotes_background TOTAL: {remotes_total:.4f}s")
+            except Exception as e:
+                import traceback
+                _log_timing_message(f"[TIMING] [BACKGROUND] Error loading remotes: {type(e).__name__}: {e}")
+                self._ui_update_queue.put(lambda: self._update_remotes_ui([]))
+            finally:
+                self._loading_remotes = False
+        
+        thread = threading.Thread(target=load_remotes_in_thread, daemon=True)
+        thread.start()
+    
+    def load_tags_background(self, skip: int = 0, append: bool = False, get_timestamps: bool = True) -> None:
+        """Load tags in background (non-blocking), like Lazygit.
+        
+        KEY: Lazygit loads ALL tags at once (no pagination) because git tag --list is fast.
+        We do the same, but optionally get timestamps for recency display (adds overhead).
+        
+        Args:
+            skip: Number of tags to skip (for pagination, but Lazygit doesn't paginate)
+            append: If True, append to existing tags; if False, replace
+            get_timestamps: Whether to fetch timestamps (adds overhead, Lazygit doesn't do this)
+        """
+        if getattr(self, '_loading_tags', False):
+            return
+        
+        self._loading_tags = True
+        
+        def load_tags_in_thread():
+            """Load tags in background thread (like Lazygit's ASYNC refresh)."""
+            self._ui_ready.wait()
+            tags_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_tags_background START (skip={skip}, append={append}, get_timestamps={get_timestamps})")
+            try:
+                # For virtual scrolling: load first page initially, then load more on scroll
+                # Initial load: load first page (200 tags) + get total count
+                # Append load: load next page (200 tags) for virtual scrolling
+                if append:
+                    # Loading more for virtual scrolling - load next page
+                    max_count = self.tags_pane._page_size
+                else:
+                    # Initial load: get total count first, then load first page
+                    # First get total count without loading all tags
+                    _, total_count = self.git.list_tags(max_count=0, skip=0, get_timestamps=False)
+                    # Now load only first page
+                    max_count = self.tags_pane._page_size
+                
+                tags, total_count_returned = self.git.list_tags(max_count=max_count, skip=skip, get_timestamps=get_timestamps)
+                # Use the total_count we got earlier if this is initial load, otherwise use returned count
+                if not append and total_count == 0:
+                    # If we didn't get total_count earlier, use returned count
+                    total_count = total_count_returned
+                elif append:
+                    # When appending, keep the existing total_count
+                    total_count = self.tags_pane._total_tags_count if hasattr(self.tags_pane, '_total_tags_count') else total_count_returned
+                get_tags_elapsed = time.perf_counter() - tags_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   list_tags: {get_tags_elapsed:.4f}s ({len(tags)} tags, total={total_count})")
+                
+                # Update UI from main thread
+                tags_copy = tags.copy()
+                self._ui_update_queue.put(lambda: self._update_tags_ui(tags_copy, total_count, append))
+                
+                tags_total = time.perf_counter() - tags_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_tags_background TOTAL: {tags_total:.4f}s")
+            except Exception as e:
+                import traceback
+                _log_timing_message(f"[TIMING] [BACKGROUND] Error loading tags: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                self._ui_update_queue.put(lambda: self._update_tags_ui([], 0, append))
+            finally:
+                self._loading_tags = False
+        
+        thread = threading.Thread(target=load_tags_in_thread, daemon=True)
+        thread.start()
+    
+    def _update_remotes_ui(self, remotes: list) -> None:
+        """Update remotes pane UI (called from main thread)."""
+        try:
+            self.remotes_pane.set_remotes(remotes)
+        except Exception as e:
+            _log_timing_message(f"[UI_UPDATE] Error updating remotes UI: {type(e).__name__}: {e}")
+    
+    def _update_tags_ui(self, tags: list, total_count: int = 0, append: bool = False) -> None:
+        """Update tags pane UI (called from main thread)."""
+        try:
+            self.tags_pane.set_tags(tags, total_count=total_count, append=append)
+        except Exception as e:
+            _log_timing_message(f"[UI_UPDATE] Error updating tags UI: {type(e).__name__}: {e}")
+    
+    def _update_tags_ui_with_timestamps(self, tags: list) -> None:
+        """Update only the displayed tags with timestamps (without reloading all tags).
+        
+        This is used to add recency information to already-displayed tags without
+        blocking the UI by reloading all 56k tags.
+        """
+        try:
+            # Update the internal tag list with new timestamps
+            tag_dict = {tag.name: tag for tag in tags}
+            for existing_tag in self.tags_pane._tags[:len(tags)]:
+                if existing_tag.name in tag_dict:
+                    existing_tag.timestamp = tag_dict[existing_tag.name].timestamp
+            
+            # Re-render only the displayed items by calling set_tags with just the displayed tags
+            # This will clear and re-render only the first page, not all 56k tags
+            displayed_count = min(len(tags), len(self.tags_pane._tags))
+            if displayed_count > 0:
+                displayed_tags = self.tags_pane._tags[:displayed_count]
+                # Save the rest of the tags
+                remaining_tags = self.tags_pane._tags[displayed_count:]
+                # Clear and re-render only displayed items
+                self.tags_pane.clear()
+                self.tags_pane._tags = displayed_tags + remaining_tags
+                # Only render the displayed items (not all 56k)
+                self.tags_pane.set_tags(displayed_tags, append=True)
+        except Exception as e:
+            _log_timing_message(f"[UI_UPDATE] Error updating tags UI with timestamps: {type(e).__name__}: {e}")
+    
+    def load_more_tags(self) -> None:
+        """Load more tags for virtual scrolling."""
+        if self.tags_pane._loaded_tags_count < self.tags_pane._total_tags_count:
+            skip = self.tags_pane._loaded_tags_count
+            # Don't load timestamps for virtual scrolling to keep it fast and consistent with initial load
+            self.load_tags_background(skip=skip, append=True, get_timestamps=False)
+    
+    def load_branch_sync_status_background(self) -> None:
+        """Load sync status for all branches in background (non-blocking)."""
+        if getattr(self, '_loading_sync_status', False):
+            return
+        
+        self._loading_sync_status = True
+        
+        def load_sync_status_in_thread():
+            """Load sync status in background thread."""
+            self._ui_ready.wait()
+            sync_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_branch_sync_status_background START")
+            try:
+                # Get list of branches
+                branches = getattr(self, 'branches', [])
+                if not branches:
+                    return
+                
+                sync_status_map = {}
+                for branch in branches:
+                    try:
+                        sync_status = self.git.get_branch_sync_status(branch.name)
+                        sync_status_map[branch.name] = sync_status
+                    except Exception as e:
+                        _log_timing_message(f"[TIMING] [BACKGROUND] Error getting sync status for {branch.name}: {type(e).__name__}: {e}")
+                        # Use default empty status
+                        sync_status_map[branch.name] = {"behind": 0, "ahead": 0, "synced": False, "upstream": None}
+                
+                get_sync_elapsed = time.perf_counter() - sync_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   get_branch_sync_status for {len(branches)} branches: {get_sync_elapsed:.4f}s")
+                
+                # Update cache and UI from main thread
+                sync_status_map_copy = sync_status_map.copy()
+                self._ui_update_queue.put(lambda: self._update_sync_status_ui(sync_status_map_copy))
+                
+                sync_total = time.perf_counter() - sync_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_branch_sync_status_background TOTAL: {sync_total:.4f}s")
+            except Exception as e:
+                import traceback
+                _log_timing_message(f"[TIMING] [BACKGROUND] Error loading sync status: {type(e).__name__}: {e}")
+            finally:
+                self._loading_sync_status = False
+        
+        thread = threading.Thread(target=load_sync_status_in_thread, daemon=True)
+        thread.start()
+    
+    def _update_sync_status_ui(self, sync_status_map: dict[str, dict]) -> None:
+        """Update branches pane and status pane with sync status (called from main thread)."""
+        try:
+            # Update cache
+            self._branch_sync_status_cache = sync_status_map
+            
+            # Update branches pane if it exists and has branches
+            if hasattr(self, 'branches') and self.branches:
+                self.branches_pane.set_branches(self.branches, self.active_branch, sync_status_map)
+            
+            # Update status pane with current branch sync status
+            if self.active_branch and self.active_branch in sync_status_map:
+                current_sync_status = sync_status_map[self.active_branch]
+                self.status_pane.update_status(self.active_branch, self.repo_path, current_sync_status)
+        except Exception as e:
+            _log_timing_message(f"[UI_UPDATE] Error updating sync status UI: {type(e).__name__}: {e}")
     
     def load_file_status_background(self) -> None:
         """Load file status in background (non-blocking)."""
@@ -4567,8 +6109,10 @@ class PygitzenApp(App):
         print(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
         
         # OPTIMIZATION: Show commits to UI immediately (critical path)
-        # Use call_from_thread to ensure thread safety (may be called from background thread)
+        # CRITICAL: Queue the UI update to prevent blocking - set_commits can be slow for many commits
+        # This ensures the UI remains responsive during startup even for large repos
         def update_commits_ui():
+            # set_commits now limits to 50 commits initially to prevent blocking
             self.commits_pane.set_commits(self.commits)
             self._update_commits_title()
             if self.commits:
@@ -4579,15 +6123,23 @@ class PygitzenApp(App):
                 self.commits_pane.index = 0
                 self.commits_pane.highlighted = 0
         
-        # Check if we're in the main thread (Textual apps run in main thread)
-        # If called from background thread, use call_from_thread
-        import threading
-        if threading.current_thread() is threading.main_thread():
+        # Always queue UI update to prevent blocking (even if on main thread, queue it)
+        # This ensures the UI remains responsive during startup
+        def update_with_highlighting():
             update_commits_ui()
+            # Apply highlighting to first item (after commits are set)
+            if self.commits:
+                self.commits_pane._update_highlighting(0)
+        
+        if hasattr(self, '_ui_update_queue'):
+            self._ui_update_queue.put(update_with_highlighting)
         else:
-            self.call_from_thread(update_commits_ui)
-            # Apply highlighting to first item
-            self.commits_pane._update_highlighting(0)
+            # Fallback: use call_from_thread if queue not available
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                update_with_highlighting()
+            else:
+                self.call_from_thread(update_with_highlighting)
             # OPTIMIZATION: Defer patch loading (non-critical, can load after UI is shown)
             # Only show patch if in patch mode (but do it after commits are shown)
             if self._view_mode == "patch":
@@ -5021,52 +6573,102 @@ class PygitzenApp(App):
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
             import sys
+            from pathlib import Path
             diff_start = time.perf_counter()
             ci = self.commits[index]
-            get_diff_start = time.perf_counter()
             # Normalize SHA before using it
             normalized_sha = _normalize_commit_sha(ci.sha)
-            diff = self.git.get_commit_diff(normalized_sha)
-            get_diff_elapsed = time.perf_counter() - get_diff_start
-            _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {normalized_sha[:8]})")
-            show_start = time.perf_counter()
-            self.patch_pane.show_commit_info(ci, diff)
-            show_elapsed = time.perf_counter() - show_start
-            _log_timing_message(f"[TIMING] show_commit_info: {show_elapsed:.4f}s")
+            
+            # Use PTY streaming if enabled (default)
+            if self.log_pane._use_pty_streaming:
+                # Build git show command with colors
+                cmd = ['git', 'show', '--color=always', '--stat', '--decorate', '-p', normalized_sha]
+                repo_path = Path(self.repo_path) if hasattr(self, 'repo_path') else Path(".")
+                self.log_pane._stream_git_command_pty(cmd, repo_path, self.patch_pane, update_interval=10)
+            else:
+                # Fallback to subprocess
+                get_diff_start = time.perf_counter()
+                diff = self.git.get_commit_diff(normalized_sha)
+                get_diff_elapsed = time.perf_counter() - get_diff_start
+                _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {normalized_sha[:8]})")
+                show_start = time.perf_counter()
+                self.patch_pane.show_commit_info(ci, diff)
+                show_elapsed = time.perf_counter() - show_start
+                _log_timing_message(f"[TIMING] show_commit_info: {show_elapsed:.4f}s")
+            
             diff_total = time.perf_counter() - diff_start
             _log_timing_message(f"[TIMING] show_commit_diff TOTAL: {diff_total:.4f}s")
     
     def show_stash_diff(self, index: int) -> None:
         """Show stash diff in patch pane when stash is selected."""
         if 0 <= index < len(self.stashes):
+            from pathlib import Path
             stash = self.stashes[index]
             # Switch to patch view when stash is selected
             self._view_mode = "patch"
             self.log_pane.styles.display = "none"
             self.patch_pane.styles.display = "block"
             
-            # Get stash diff and stat
-            try:
-                # Get stash diff using Python GitService
-                diff_text, stat_text = self.git.get_stash_diff(stash.index)
-                self.patch_pane.show_stash_info(stash, diff_text, stat_text)
-            except Exception as e:
-                # If stash diff fetching fails, show error
-                from rich.text import Text
-                error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
-                self.patch_pane.update(error_text)
+            # Use PTY streaming if enabled (default)
+            if self.log_pane._use_pty_streaming:
+                try:
+                    # Build git stash show command with colors (like Lazygit)
+                    cmd = [
+                        'git', 'stash', 'show',
+                        '-p', '--stat', '-u',
+                        '--color=always',
+                        f'stash@{{{stash.index}}}'
+                    ]
+                    repo_path = Path(self.repo_path) if hasattr(self, 'repo_path') else Path(".")
+                    prefix = f"stash@{stash.index}: On {stash.branch}: {stash.message}\n\n"
+                    self.log_pane._stream_git_command_pty(cmd, repo_path, self.patch_pane, prefix=prefix, update_interval=10)
+                except Exception as e:
+                    from rich.text import Text
+                    error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
+                    self.patch_pane.update(error_text)
+            else:
+                # Fallback to subprocess
+                try:
+                    # Get stash diff using Python GitService
+                    diff_text, stat_text = self.git.get_stash_diff(stash.index)
+                    self.patch_pane.show_stash_info(stash, diff_text, stat_text)
+                except Exception as e:
+                    # If stash diff fetching fails, show error
+                    from rich.text import Text
+                    error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
+                    self.patch_pane.update(error_text)
     
     def show_file_diff(self, file_path: str, staged: bool = False) -> None:
         """Show file diff in patch pane when file is selected."""
-        try:
-            # Get file diff using GitService
-            diff_text = self.git.get_file_diff(file_path, staged=staged)
-            self.patch_pane.show_file_info(file_path, diff_text, staged=staged)
-        except Exception as e:
-            # If file diff fetching fails, show error
-            from rich.text import Text
-            error_text = Text(f"Error loading file diff: {type(e).__name__}: {e}", style="red")
-            self.patch_pane.update(error_text)
+        from pathlib import Path
+        # Use PTY streaming if enabled (default)
+        if self.log_pane._use_pty_streaming:
+            try:
+                # Build git diff command with colors (like Lazygit)
+                if staged:
+                    cmd = ['git', 'diff', '--cached', '--color=always', '--', file_path]
+                    prefix = f"Staged changes: {file_path}\n\n"
+                else:
+                    cmd = ['git', 'diff', '--color=always', '--', file_path]
+                    prefix = f"Unstaged changes: {file_path}\n\n"
+                
+                repo_path = Path(self.repo_path) if hasattr(self, 'repo_path') else Path(".")
+                self.log_pane._stream_git_command_pty(cmd, repo_path, self.patch_pane, prefix=prefix, update_interval=10)
+            except Exception as e:
+                from rich.text import Text
+                error_text = Text(f"Error loading file diff: {type(e).__name__}: {e}", style="red")
+                self.patch_pane.update(error_text)
+        else:
+            # Fallback to subprocess
+            try:
+                # Get file diff using GitService
+                diff_text = self.git.get_file_diff(file_path, staged=staged)
+                self.patch_pane.show_file_info(file_path, diff_text, staged=staged)
+            except Exception as e:
+                # If file diff fetching fails, show error
+                from rich.text import Text
+                error_text = Text(f"Error loading file diff: {type(e).__name__}: {e}", style="red")
+                self.patch_pane.update(error_text)
     
     def _get_commits_render_to_main(self) -> callable:
         """Get callback for automatic commit patch updates (lazygit GetOnRenderToMain pattern)."""
@@ -5095,6 +6697,229 @@ class PygitzenApp(App):
             if self.changes_pane.index is not None and 0 <= self.changes_pane.index < len(self.changes_pane._files):
                 self.show_file_diff(self.changes_pane._files[self.changes_pane.index].path, staged=False)
         return render_to_main
+    
+    def _get_tags_render_to_main(self) -> callable:
+        """Get callback for automatic tag patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.tags_pane.index is not None and 0 <= self.tags_pane.index < len(self.tags_pane._tags):
+                self.show_tag_info(self.tags_pane._tags[self.tags_pane.index].name)
+        return render_to_main
+    
+    def _get_remotes_render_to_main(self) -> callable:
+        """Get callback for automatic remote patch updates (lazygit GetOnRenderToMain pattern)."""
+        def render_to_main() -> None:
+            if self.remotes_pane.index is not None and 0 <= self.remotes_pane.index < len(self.remotes_pane._remotes):
+                self.show_remote_info(self.remotes_pane._remotes[self.remotes_pane.index].name)
+        return render_to_main
+    
+    def show_tag_info(self, tag_name: str) -> None:
+        """Show tag info and git log graph in patch pane when tag is selected.
+        Uses non-PTY approach (like Lazygit's RunCommandTaskWithPrefix) for better performance during scrolling.
+        """
+        from pathlib import Path
+        import subprocess
+        import threading
+        import os
+        from rich.text import Text
+        from rich.console import Group
+        
+        # Switch to patch view when tag is selected
+        self._view_mode = "patch"
+        self.log_pane.styles.display = "none"
+        self.patch_pane.styles.display = "block"
+        
+        def load_tag_info_in_background():
+            """Load tag info and git log in background thread (non-blocking, like Lazygit)."""
+            # Wait for UI to be ready (like other background operations)
+            if hasattr(self, '_ui_ready'):
+                self._ui_ready.wait()
+            
+            try:
+                _log_timing_message(f"[TAG_INFO] Loading tag info for {tag_name} in background thread")
+                
+                # Check if tag is annotated
+                is_annotated = self.git.is_tag_annotated(tag_name)
+                _log_timing_message(f"[TAG_INFO] Tag {tag_name} is annotated: {is_annotated}")
+                
+                # Build tag info prefix
+                if is_annotated:
+                    annotation_info = self.git.get_tag_annotation_info(tag_name)
+                    prefix = f"Annotated tag: {tag_name}\n\n"
+                    if annotation_info:
+                        prefix += annotation_info + "\n\n"
+                    prefix += "---\n\n"
+                else:
+                    prefix = f"Lightweight tag: {tag_name}\n\n---\n\n"
+                
+                # Build git log graph command (like Lazygit's GetGraphCmdObj)
+                # Limit output to 200 commits to prevent huge outputs and encoding issues
+                repo_path = Path(self.repo_path) if hasattr(self, 'repo_path') else Path(".")
+                cmd = [
+                    'git', 'log',
+                    '--graph',
+                    '--color=always',
+                    '--abbrev-commit',
+                    '--decorate',
+                    '--date=relative',
+                    '--pretty=medium',
+                    '-200',  # Limit to 200 commits (like Lazygit limits commits pane)
+                    f'refs/tags/{tag_name}',
+                    '--'
+                ]
+                
+                _log_timing_message(f"[TAG_INFO] Running git log command for tag {tag_name} (limited to 200 commits)")
+                
+                # Run command and collect output (non-PTY, like Lazygit's RunCommandTaskWithPrefix)
+                # Use errors='replace' to handle binary data in commit messages
+                process = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    errors='replace',  # Replace invalid UTF-8 bytes instead of failing
+                    timeout=20,  # Timeout for large repos
+                    cwd=str(repo_path),
+                    env={**os.environ, 'TERM': 'dumb', 'GIT_PAGER': 'cat'}
+                )
+                
+                _log_timing_message(f"[TAG_INFO] Git log command completed: returncode={process.returncode}, stdout_len={len(process.stdout) if process.stdout else 0}")
+                
+                # Build content with prefix + git log output
+                lines = [Text(prefix)]
+                
+                if process.returncode == 0 and process.stdout:
+                    # Parse ANSI output to Rich Text
+                    line_count = 0
+                    for line in process.stdout.split('\n'):
+                        if line.strip():
+                            try:
+                                rich_line = Text.from_ansi(line)
+                                lines.append(rich_line)
+                                line_count += 1
+                            except Exception:
+                                # Fallback: plain text if ANSI parsing fails
+                                lines.append(Text(line, style="white"))
+                                line_count += 1
+                    _log_timing_message(f"[TAG_INFO] Parsed {line_count} lines from git log output")
+                else:
+                    # Show error if command failed
+                    error_msg = process.stderr if process.stderr else f"Git command failed with return code {process.returncode}"
+                    _log_timing_message(f"[TAG_INFO] Git command failed: {error_msg}")
+                    lines.append(Text(f"Error: {error_msg}", style="red"))
+                
+                # Update UI from main thread (single update, no frequent updates during scroll)
+                # Capture lines in closure to ensure they're available when update_ui is called
+                lines_to_display = lines.copy()
+                def update_ui():
+                    try:
+                        _log_timing_message(f"[TAG_INFO] Updating UI with {len(lines_to_display)} lines")
+                        full_content = Group(*lines_to_display)
+                        patch_pane_ref.update(full_content)
+                        _log_timing_message(f"[TAG_INFO] UI update completed successfully")
+                    except Exception as e:
+                        import traceback
+                        _log_timing_message(f"[ERROR] Error updating tag info UI: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+                        error_text = Text(f"Error loading tag info: {type(e).__name__}: {e}", style="red")
+                        patch_pane_ref.update(error_text)
+                
+                # Queue UI update (non-blocking) - use the same pattern as other background operations
+                _log_timing_message(f"[TAG_INFO] Queueing UI update (has _ui_update_queue: {hasattr(self, '_ui_update_queue')})")
+                
+                # Use UI update queue (same pattern as load_tags_background, load_remotes_background, etc.)
+                if hasattr(self, '_ui_update_queue') and self._ui_update_queue is not None:
+                    try:
+                        self._ui_update_queue.put(update_ui)
+                        _log_timing_message(f"[TAG_INFO] UI update queued successfully")
+                    except Exception as queue_error:
+                        _log_timing_message(f"[ERROR] Failed to queue UI update: {type(queue_error).__name__}: {queue_error}")
+                        # Fallback: use Textual's call_from_thread if available
+                        try:
+                            if hasattr(self, 'call_from_thread'):
+                                self.call_from_thread(update_ui)
+                            else:
+                                # Use call_later as fallback
+                                self.call_later(update_ui)
+                        except Exception as fallback_error:
+                            _log_timing_message(f"[ERROR] Fallback UI update failed: {type(fallback_error).__name__}: {fallback_error}")
+                else:
+                    # No queue available, use Textual's thread-safe method
+                    _log_timing_message(f"[TAG_INFO] No UI update queue, using Textual call_later")
+                    try:
+                        self.call_later(update_ui)
+                    except Exception as call_error:
+                        _log_timing_message(f"[ERROR] call_later failed: {type(call_error).__name__}: {call_error}")
+                        # Last resort: try direct call (might fail if not on main thread)
+                        try:
+                            update_ui()
+                        except Exception as direct_error:
+                            _log_timing_message(f"[ERROR] Direct UI update failed: {type(direct_error).__name__}: {direct_error}")
+                        
+            except Exception as e:
+                import traceback
+                error_type = type(e).__name__
+                error_str = str(e)
+                error_msg = f"[ERROR] Error loading tag info: {error_type}: {error_str}\n{traceback.format_exc()}"
+                _log_timing_message(error_msg)
+                
+                # Capture error info in closure to avoid NameError
+                error_type_captured = error_type
+                error_str_captured = error_str
+                def show_error():
+                    error_text = Text(f"Error loading tag info: {error_type_captured}: {error_str_captured}", style="red")
+                    patch_pane_ref.update(error_text)
+                
+                if hasattr(self, '_ui_update_queue') and self._ui_update_queue is not None:
+                    try:
+                        self._ui_update_queue.put(show_error)
+                    except Exception:
+                        if hasattr(self, 'call_from_thread'):
+                            self.call_from_thread(show_error)
+                        else:
+                            show_error()
+                else:
+                    if hasattr(self, 'call_from_thread'):
+                        self.call_from_thread(show_error)
+                    else:
+                        show_error()
+        
+        # Show loading indicator immediately
+        self.patch_pane.update(Text(f"Loading tag info for {tag_name}...", style="dim white"))
+        
+        # Capture patch_pane reference to ensure it's available in the background thread
+        patch_pane_ref = self.patch_pane
+        
+        # Load in background thread (non-blocking, like Lazygit)
+        thread = threading.Thread(target=load_tag_info_in_background, daemon=True)
+        thread.start()
+    
+    def show_remote_info(self, remote_name: str) -> None:
+        """Show remote info (name and URLs) in patch pane when remote is selected."""
+        # Switch to patch view when remote is selected
+        self._view_mode = "patch"
+        self.log_pane.styles.display = "none"
+        self.patch_pane.styles.display = "block"
+        
+        try:
+            # Get remote URLs
+            urls = self.git.get_remote_urls(remote_name)
+            
+            # Build remote info display (like Lazygit)
+            from rich.text import Text
+            info_text = Text()
+            info_text.append(remote_name, style="green")
+            info_text.append("\nUrls:\n", style="white")
+            
+            if urls:
+                for url in urls:
+                    info_text.append(url, style="white")
+                    info_text.append("\n", style="white")
+            else:
+                info_text.append("No URLs configured", style="dim white")
+            
+            self.patch_pane.update(info_text)
+        except Exception as e:
+            from rich.text import Text
+            error_text = Text(f"Error loading remote info: {type(e).__name__}: {e}", style="red")
+            self.patch_pane.update(error_text)
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view is self.branches_pane:
@@ -5163,6 +6988,31 @@ class PygitzenApp(App):
                     if scroll_percent >= 0.85 and self.loaded_commits < self.total_commits:
                         _log_timing_message(f"[TIMING] [SCROLL] Commits pane: Loading more commits (scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits})")
                         self.load_more_commits()
+            except Exception:
+                pass  # Silently fail if scroll detection fails
+        
+        # Handle scroll for tags pane (virtual scrolling)
+        if widget_id == "tags-pane" or (hasattr(widget, 'id') and widget.id == "tags-pane"):
+            try:
+                # Get scroll position
+                scroll_y = 0
+                max_scroll_y = 0
+                
+                if hasattr(widget, 'scroll_y'):
+                    scroll_y = widget.scroll_y
+                if hasattr(widget, 'max_scroll_y'):
+                    max_scroll_y = widget.max_scroll_y
+                elif hasattr(widget, 'virtual_size'):
+                    max_scroll_y = widget.virtual_size.height if hasattr(widget.virtual_size, 'height') else 0
+                
+                # Check if we need to load more tags
+                if max_scroll_y > 0 and self.tags_pane._total_tags_count > 0:
+                    scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                    
+                    # If scrolled near bottom (85%), auto-load more tags
+                    if scroll_percent >= 0.85 and self.tags_pane._loaded_tags_count < self.tags_pane._total_tags_count:
+                        _log_timing_message(f"[TIMING] [SCROLL] Tags pane: Loading more tags (scroll_percent={scroll_percent:.2f}, loaded={self.tags_pane._loaded_tags_count}, total={self.tags_pane._total_tags_count})")
+                        self.load_more_tags()
             except Exception:
                 pass  # Silently fail if scroll detection fails
         
