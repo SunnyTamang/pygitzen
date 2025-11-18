@@ -174,7 +174,38 @@ class GitService:
             # If git command fails, return empty list
             pass
         
-        result.sort(key=lambda b: b.name.lower())
+        # Sort branches by recency (most recent first) - matching Lazygit behavior
+        # Branches with timestamp=0 (no timestamp) go to the end
+        result.sort(key=lambda b: (b.timestamp == 0, -b.timestamp, b.name.lower()))
+        # This sorts by:
+        # 1. Branches with timestamp=0 go last (True sorts after False)
+        # 2. Then by timestamp descending (most recent first) - negative for descending
+        # 3. Then alphabetically for ties
+        
+        # Move current branch to first position (matching Lazygit behavior)
+        # Lazygit ensures current branch is always first so GetCheckedOutRef() returns branches[0]
+        try:
+            current_branch_result = subprocess.run(
+                ['git', 'branch', '--show-current'],  # Match Lazygit's CurrentBranchName() command
+                capture_output=True,
+                text=True,
+                timeout=1,
+                cwd=str(self.repo_path)
+            )
+            if current_branch_result.returncode == 0:
+                current_branch_name = current_branch_result.stdout.strip()
+                if current_branch_name:
+                    # Find and move current branch to first position
+                    for i, branch in enumerate(result):
+                        if branch.name == current_branch_name:
+                            if i > 0:
+                                # Move to first position
+                                result.insert(0, result.pop(i))
+                            break
+        except Exception:
+            # If we can't get current branch, just return sorted list
+            pass
+        
         return result
 
     def list_remotes(self) -> List[BranchInfo]:
@@ -1187,29 +1218,44 @@ class GitService:
         except Exception:
             pass
         
-        # Check remote tracking
+        # Cache the result
+        self._branch_info_cache[branch] = result.copy()
+        
+        return result
+    
+    def get_current_branch(self) -> str | None:
+        """Get the current branch name (matching Lazygit's CurrentBranchName()).
+        
+        Uses git branch --show-current (matching Lazygit's command).
+        Returns empty string if HEAD is detached.
+        
+        Returns:
+            Current branch name, or None if error or detached HEAD
+        """
+        import subprocess
+        
+        # Use cached value if available
+        if self._current_branch_cache is not None:
+            return self._current_branch_cache
+        
         try:
-            upstream_result = subprocess.run(
-                ['git', 'rev-parse', '--abbrev-ref', f'{branch}@{{u}}'],
+            # Match Lazygit's CurrentBranchName() which uses git branch --show-current
+            current_branch_result = subprocess.run(
+                ['git', 'branch', '--show-current'],
                 capture_output=True,
                 text=True,
                 timeout=1,
                 cwd=str(self.repo_path)
             )
-            if upstream_result.returncode == 0:
-                upstream = upstream_result.stdout.strip()
-                result["remote_tracking"] = upstream
-                # Extract branch name from upstream (e.g., "origin/main" -> "main")
-                if '/' in upstream:
-                    result["upstream"] = upstream.split('/')[-1]
+            if current_branch_result.returncode == 0:
+                current_branch_name = current_branch_result.stdout.strip()
+                # Cache the result
+                self._current_branch_cache = current_branch_name if current_branch_name else None
+                return self._current_branch_cache
         except Exception:
             pass
         
-        # Cache the result (excluding is_current which may change)
-        cache_entry = result.copy()
-        self._branch_info_cache[branch] = cache_entry
-        
-        return result
+        return None
     
     def get_branch_sync_status(self, branch: str) -> dict:
         """Get sync status (behind/ahead counts) for a branch relative to its upstream.

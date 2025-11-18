@@ -882,12 +882,16 @@ class CommitsPane(ListView):
             
             # Show push status if available (will be updated by background thread if needed)
             # Three-tier status display (lazygit-style):
+            # 1. Merged (green ✓): Commit exists on main/master
+            # 2. Pushed (yellow ↑): Commit is pushed but NOT merged
+            # 3. Unpushed (red -): Commit is not pushed
             if commit.merged:
                 text.append("✓ ", style="green")  # StatusMerged
-            elif hasattr(commit, 'pushed') and commit.pushed:
-                text.append("↑ ", style="yellow")  # StatusPushed
-            elif hasattr(commit, 'pushed') and not commit.pushed:
-                text.append("- ", style="red")  # StatusUnpushed
+            elif hasattr(commit, 'pushed'):
+                if commit.pushed:
+                    text.append("↑ ", style="yellow")  # StatusPushed
+                else:
+                    text.append("- ", style="red")  # StatusUnpushed
             # else: don't show anything initially (will be updated by background thread)
             
             # Wrap long commit messages
@@ -4112,7 +4116,9 @@ class PygitzenApp(App):
                         current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
                         self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
-                    self.load_commits_count_background(self.active_branch)
+                    # DISABLED: Don't load commit count separately - we use len(commits) from load_commits() (matching Lazygit)
+                    # This eliminates race conditions where git.count_commits() returns wrong values
+                    # self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
 
     def action_up(self) -> None:
@@ -4144,7 +4150,9 @@ class PygitzenApp(App):
                         current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
                         self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
-                    self.load_commits_count_background(self.active_branch)
+                    # DISABLED: Don't load commit count separately - we use len(commits) from load_commits() (matching Lazygit)
+                    # This eliminates race conditions where git.count_commits() returns wrong values
+                    # self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
 
     def action_toggle_command_log(self) -> None:
@@ -4172,6 +4180,18 @@ class PygitzenApp(App):
         """Load UI immediately with minimal data (fast, non-blocking)."""
         total_start = time.perf_counter()
         _log_timing_message("===== refresh_data_fast START =====")
+        
+        # CRITICAL: Clear current branch cache to ensure fresh data during refresh
+        # This prevents stale cache from causing wrong ref_spec in load_commits()
+        if hasattr(self.git, '_current_branch_cache'):
+            self.git._current_branch_cache = None
+            _log_timing_message("[DEBUG] refresh_data_fast: Cleared _current_branch_cache")
+        
+        # CRITICAL: Clear commit count cache to prevent stale cached values (like 2) from overwriting correct counts (like 62)
+        # This cache can have stale values from previous sessions or different branches
+        if hasattr(self, '_commit_count_cache'):
+            self._commit_count_cache.clear()
+            _log_timing_message("[DEBUG] refresh_data_fast: Cleared _commit_count_cache")
         
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
@@ -4220,34 +4240,52 @@ class PygitzenApp(App):
         thread.start()
         
         if self.branches:
-            # Try to restore the previous branch selection if it still exists
-            if previous_branch:
-                # Check if previous branch still exists in the list
+            # Get current branch (matching Lazygit's approach)
+            # Lazygit uses git branch --show-current (CurrentBranchName())
+            # Current branch is always first in the list (matching Lazygit's GetCheckedOutRef() which returns branches[0])
+            current_branch = self.git.get_current_branch()
+            
+            # Determine which branch to select (matching Lazygit behavior)
+            branch_to_select = None
+            branch_index = None
+            
+            if current_branch:
+                # Priority 1: Use current branch (matching Lazygit - always select current branch on startup)
+                branch_names = [b.name for b in self.branches]
+                if current_branch in branch_names:
+                    branch_to_select = current_branch
+                    branch_index = branch_names.index(current_branch)
+                else:
+                    # Current branch not in list (shouldn't happen, but fallback)
+                    branch_to_select = self.branches[0].name
+                    branch_index = 0
+            elif previous_branch:
+                # Priority 2: Restore previous branch if it still exists
                 branch_names = [b.name for b in self.branches]
                 if previous_branch in branch_names:
-                    # Restore the previous branch
-                    self.active_branch = previous_branch
-                    # Update BranchesPane selection to match
+                    branch_to_select = previous_branch
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    # Ensure BranchesPane ListView selection matches (set after list is populated)
-                    self.branches_pane.index = branch_index
-                    self.branches_pane.highlighted = branch_index
                 else:
                     # Branch was deleted, fall back to first branch
-                    self.active_branch = self.branches[0].name
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    self.branches_pane.index = 0
-                    self.branches_pane.highlighted = 0
+                    branch_to_select = self.branches[0].name
+                    branch_index = 0
             else:
-                # No previous branch, use first branch
-                self.active_branch = self.branches[0].name
-                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                self.branches_pane.index = 0
-                self.branches_pane.highlighted = 0
+                # Priority 3: Fall back to first branch
+                branch_to_select = self.branches[0].name
+                branch_index = 0
+            
+            # Set the active branch and update UI
+            self.active_branch = branch_to_select
+            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
+            # Ensure BranchesPane ListView selection matches (set after list is populated)
+            self.branches_pane.index = branch_index
+            self.branches_pane.highlighted = branch_index
 
             # Initialize commits pane with empty state (show UI immediately)
             self.commits = []
+            # CRITICAL: Don't reset total_commits here - preserve it until load_commits() sets the new value
+            # This prevents the count from showing "1 of 0" or "1 of 2" during refresh
+            # self.total_commits will be set by load_commits() when it completes
             self.commits_pane.clear()
             self.commits_pane.border_title = f"Commits ({self.active_branch})" if self.active_branch else "Commits (HEAD)"
             
@@ -4310,7 +4348,8 @@ class PygitzenApp(App):
             # The log graph will only load when user explicitly selects a branch
             # This prevents any blocking operations during startup
             
-            # Update status pane immediately (fast)
+            # Update status pane immediately with current branch (matching Lazygit)
+            # Lazygit shows current branch in status pane (refreshStatus() uses GetCheckedOutRef())
             if self.active_branch:
                 current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
                 self.status_pane.update_status(self.active_branch, self.repo_path, current_sync)
@@ -4330,7 +4369,8 @@ class PygitzenApp(App):
             # Load heavy operations in background (non-blocking)
             # Store branch for background workers
             self._pending_branch = self.active_branch
-            self.load_commits_count_background(self.active_branch)
+            # DISABLED: Don't load commit count separately - we use len(commits) from load_commits() (matching Lazygit)
+            # self.load_commits_count_background(self.active_branch)
             self.load_file_status_background()
             self.load_stashes_background()
             
@@ -4637,9 +4677,10 @@ class PygitzenApp(App):
                 # commits_to_fetch = self.log_commits[:max_rendered] if len(self.log_commits) > max_rendered else self.log_commits
                 self.load_commit_refs_background(branch, self.log_commits)
         
-        # Load total count in background if not already loaded
-        if self.log_pane._total_commits_count == 0:
-            self.load_commits_count_background(branch)
+        # DISABLED: Don't load commit count separately - we use len(commits) from load_commits() (matching Lazygit)
+        # The count is already set by load_commits() via len(commits)
+        # if self.log_pane._total_commits_count == 0:
+        #     self.load_commits_count_background(branch)
         
         log_elapsed = time.perf_counter() - log_start
         _log_timing_message(f"--- load_commits_for_log TOTAL: {log_elapsed:.4f}s ---")
@@ -4749,7 +4790,15 @@ class PygitzenApp(App):
             
             # Only update if we're still viewing this branch
             if self.active_branch == branch and count > 0:
-                self.total_commits = count
+                # CRITICAL: Only update if the new count is greater than current, or if current is 0
+                # This prevents overwriting a correct count (62) with a wrong count (2) from git.count_commits()
+                # The count from load_commits() (len(commits)) is more accurate than git.count_commits()
+                if count > self.total_commits or self.total_commits == 0:
+                    self.total_commits = count
+                else:
+                    # Ignore lower count - keep the higher value (from load_commits())
+                    return  # Don't update title if we're ignoring the count
+                
                 self.log_pane._total_commits_count = count  # Update log pane count too
                 self._update_commits_title()
                 
@@ -5531,13 +5580,35 @@ class PygitzenApp(App):
             # Build git log command for the current branch (matching lazygit)
             # Format matches lazygit's format: +%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s
             # Fields: + prefix, SHA, timestamp, author name, author email, parents, merge status, refs, subject
-            # Use branch name or HEAD if branch is not available
-            ref_spec = branch if branch else "HEAD"
+            # Determine ref spec (matching lazygit's approach)
+            # For current branch: use "HEAD" (matching lazygit's refForLog())
+            # For other branches: use full ref path "refs/heads/branch-name" (matching lazygit's FullRefName())
+            if not branch:
+                ref_spec = "HEAD"
+            else:
+                # ALWAYS use get_current_branch() as source of truth (not self.active_branch which may be stale)
+                # This ensures we use HEAD for the current branch even if active_branch hasn't been set yet
+                current_branch = self.git.get_current_branch()
+                _log_timing_message(f"[DEBUG] load_commits: branch={branch}, current_branch={current_branch}, active_branch={self.active_branch}")
+                
+                # Check if this is the current branch (prioritize get_current_branch() over self.active_branch)
+                if branch == current_branch:
+                    # Current branch - use HEAD (matching lazygit)
+                    ref_spec = "HEAD"
+                    _log_timing_message(f"[DEBUG] load_commits: Using HEAD for current branch '{branch}'")
+                else:
+                    # Other branch - use full ref path (matching lazygit)
+                    if branch.startswith("refs/"):
+                        ref_spec = branch  # Already a full ref path
+                    else:
+                        ref_spec = f"refs/heads/{branch}"
+                    _log_timing_message(f"[DEBUG] load_commits: Using ref_spec='{ref_spec}' for branch '{branch}'")
+            
             cmd = [
                 "git", "log",
                 ref_spec,  # Current branch (matching lazygit - shows branch-specific commits)
                 "--oneline",  # Match lazygit
-                f"--max-count={self.page_size}",  # Keep our limit of 200
+                "-300",  # Match lazygit's limit (300 commits initially)
                 "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
                 "--abbrev=40",  # Match lazygit (40-char abbreviated SHA)
                 "--no-show-signature",  # Match lazygit
@@ -5576,8 +5647,9 @@ class PygitzenApp(App):
             )
             
             # Debug: log result
-            _log_timing_message(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
-            print(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
+            stdout_line_count = len(result.stdout.strip().split("\n")) if result.stdout else 0
+            _log_timing_message(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={stdout_line_count}, ref_spec={ref_spec}")
+            print(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={stdout_line_count}, ref_spec={ref_spec}")
             if result.returncode != 0:
                 print(f"[DEBUG] load_commits: git log stderr={result.stderr}")
             
@@ -5666,6 +5738,10 @@ class PygitzenApp(App):
                                     merged=False,  # Will be updated in background
                                 )
                             )
+                
+                # Debug: log parsing results
+                _log_timing_message(f"[DEBUG] load_commits: Parsed {len(commits)} commits from {stdout_line_count} stdout lines")
+                print(f"[DEBUG] load_commits: Parsed {len(commits)} commits from {stdout_line_count} stdout lines")
             else:
                 # Log error for debugging
                 error_msg = f"git log failed: {result.stderr}"
@@ -5808,42 +5884,48 @@ class PygitzenApp(App):
                             cache_invalidated_count = True
                             _log_timing_message(f"[CACHE] INVALIDATED commit_count_cache for {actual_ref} (HEAD changed: {self._last_head_sha[actual_ref][:8]} → {current_head_sha[:8]})")
                     
-                    # Update commit count - check cache first
-                    count_start = time.perf_counter()
-                    if actual_ref in self._commit_count_cache and not cache_invalidated_count:
-                        # Cache HIT
-                        count = self._commit_count_cache[actual_ref]
-                        count_elapsed = time.perf_counter() - count_start
-                        self.call_from_thread(self._update_commits_count_ui, count)
-                        _log_timing_message(f"[CACHE] HIT commit_count_cache for {actual_ref}: {count} (saved {count_elapsed:.4f}s)")
-                    else:
-                        # Cache MISS or INVALIDATED - fetch fresh data
-                        try:
-                            count_cmd = ["git", "rev-list", "--count", ref_spec]
-                            count_result = subprocess.run(
-                                count_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                                cwd=repo_path_str
-                            )
-                            count_elapsed = time.perf_counter() - count_start
-                            if count_result.returncode == 0:
-                                count = int(count_result.stdout.strip())
-                                # Cache the result
-                                self._commit_count_cache[actual_ref] = count
-                                # Update tracked HEAD SHA
-                                if current_head_sha:
-                                    self._last_head_sha[actual_ref] = current_head_sha
-                                # Update UI in main thread
-                                self.call_from_thread(self._update_commits_count_ui, count)
-                                cache_reason = "INVALIDATED" if cache_invalidated_count else "MISS"
-                                _log_timing_message(f"[CACHE] {cache_reason} commit_count_cache for {actual_ref}: fetched {count} in {count_elapsed:.4f}s")
-                            else:
-                                _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (ERROR: {count_result.stderr})")
-                        except Exception as count_e:
-                            count_elapsed = time.perf_counter() - count_start
-                            _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (EXCEPTION: {type(count_e).__name__}: {count_e})")
+                    # DISABLED: Don't fetch commit count separately - we use len(commits) from load_commits() (matching Lazygit)
+                    # The commit count is already set correctly by load_commits() via len(commits)
+                    # This eliminates unnecessary work and race conditions
+                    # 
+                    # # Update commit count - check cache first
+                    # count_start = time.perf_counter()
+                    # if actual_ref in self._commit_count_cache and not cache_invalidated_count:
+                    #     # Cache HIT
+                    #     count = self._commit_count_cache[actual_ref]
+                    #     count_elapsed = time.perf_counter() - count_start
+                    #     _log_timing_message(f"[CACHE] HIT commit_count_cache for {actual_ref}: {count} (saved {count_elapsed:.4f}s) - CALLING _update_commits_count_ui({count})")
+                    #     print(f"[CACHE] HIT commit_count_cache for {actual_ref}: {count} - CALLING _update_commits_count_ui({count})")
+                    #     self.call_from_thread(self._update_commits_count_ui, count)
+                    # else:
+                    #     # Cache MISS or INVALIDATED - fetch fresh data
+                    #     try:
+                    #         count_cmd = ["git", "rev-list", "--count", ref_spec]
+                    #         count_result = subprocess.run(
+                    #             count_cmd,
+                    #             capture_output=True,
+                    #             text=True,
+                    #             timeout=10,
+                    #             cwd=repo_path_str
+                    #         )
+                    #         count_elapsed = time.perf_counter() - count_start
+                    #         if count_result.returncode == 0:
+                    #             count = int(count_result.stdout.strip())
+                    #             # Cache the result
+                    #             self._commit_count_cache[actual_ref] = count
+                    #             # Update tracked HEAD SHA
+                    #             if current_head_sha:
+                    #                 self._last_head_sha[actual_ref] = current_head_sha
+                    #             # Update UI in main thread
+                    #             cache_reason = "INVALIDATED" if cache_invalidated_count else "MISS"
+                    #             _log_timing_message(f"[CACHE] {cache_reason} commit_count_cache for {actual_ref}: fetched {count} in {count_elapsed:.4f}s - CALLING _update_commits_count_ui({count})")
+                    #             print(f"[CACHE] {cache_reason} commit_count_cache for {actual_ref}: fetched {count} - CALLING _update_commits_count_ui({count})")
+                    #             self.call_from_thread(self._update_commits_count_ui, count)
+                    #         else:
+                    #             _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (ERROR: {count_result.stderr})")
+                    #     except Exception as count_e:
+                    #         count_elapsed = time.perf_counter() - count_start
+                    #         _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (EXCEPTION: {type(count_e).__name__}: {count_e})")
                     
                     # Lazygit's approach: Use git rev-list to get unpushed commits (works offline)
                     # This uses local tracking refs instead of network calls
@@ -5876,108 +5958,63 @@ class PygitzenApp(App):
                                     if check_main.returncode == 0:
                                         main_branches.append(main_branch)
                                 
-                                # First, try to resolve upstream tracking branch
-                                upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{actual_ref}@{{u}}"]
-                                upstream_result = subprocess.run(
-                                    upstream_cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=2,
-                                    cwd=repo_path_str
-                                )
+                                # Lazygit's EXACT logic from commit_loader.go line 119:
+                                # unpushedCommitHashes = self.getReachableHashes(
+                                #     opts.RefForPushedStatus.FullRefName(),
+                                #     append([]string{opts.RefForPushedStatus.RefName() + "@{u}"}, mainBranches...)
+                                # )
+                                # 
+                                # This means it ALWAYS tries to use branch_name@{u}, even if it doesn't exist
+                                # If @{u} doesn't exist, git rev-list will fail and getReachableHashes returns empty set
                                 
-                                if upstream_result.returncode == 0:
-                                    upstream_branch = upstream_result.stdout.strip()
-                                    # Use lazygit's approach: get commits in local branch that are NOT in upstream or main
-                                    # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
-                                    unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
-                                    for main_branch in main_branches:
-                                        unpushed_cmd.extend(["--not", main_branch])
-                                    unpushed_result = subprocess.run(
-                                        unpushed_cmd,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                        cwd=repo_path_str
-                                    )
-                                    rev_list_elapsed = time.perf_counter() - rev_list_start
-                                    
-                                    if unpushed_result.returncode == 0:
-                                        # Parse unpushed commit SHAs
-                                        for sha in unpushed_result.stdout.strip().split("\n"):
-                                            if sha.strip():
-                                                unpushed_commits.add(sha.strip())
-                                        # Cache the result
-                                        self._remote_commits_cache[cache_key] = unpushed_commits
-                                        cache_reason = "INVALIDATED" if cache_invalidated_remote_branch else "MISS"
-                                        _log_timing_message(f"[CACHE] {cache_reason} unpushed_commits_cache for {actual_ref}: fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (upstream: {upstream_branch})")
-                                    else:
-                                        _log_timing_message(f"[TIMING] git rev-list {actual_ref} --not {upstream_branch}: {rev_list_elapsed:.4f}s (ERROR: {unpushed_result.stderr})")
-                                else:
-                                    # No upstream tracking branch configured
-                                    # Check if remote tracking ref exists (refs/remotes/origin/<branch>)
-                                    upstream_branch = f"origin/{actual_ref}"
-                                    check_remote_cmd = ["git", "rev-parse", "--verify", f"refs/remotes/{upstream_branch}"]
-                                    check_remote_result = subprocess.run(
-                                        check_remote_cmd,
+                                # Get branch short name for @{u} (Lazygit uses RefName(), not FullRefName())
+                                branch_name_short = actual_ref.replace("refs/heads/", "")
+                                if branch_name_short == "HEAD":
+                                    # For HEAD, get the actual branch name
+                                    head_result = subprocess.run(
+                                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                         capture_output=True,
                                         text=True,
                                         timeout=2,
                                         cwd=repo_path_str
                                     )
-                                    
-                                    if check_remote_result.returncode == 0:
-                                        # Remote tracking ref exists - use it
-                                        # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
-                                        unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
-                                        for main_branch in main_branches:
-                                            unpushed_cmd.extend(["--not", main_branch])
-                                        unpushed_result = subprocess.run(
-                                            unpushed_cmd,
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=10,
-                                            cwd=repo_path_str
-                                        )
-                                        rev_list_elapsed = time.perf_counter() - rev_list_start
-                                        
-                                        if unpushed_result.returncode == 0:
-                                            for sha in unpushed_result.stdout.strip().split("\n"):
-                                                if sha.strip():
-                                                    unpushed_commits.add(sha.strip())
-                                            self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref}: fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (no @{{u}}, using {upstream_branch})")
-                                        else:
-                                            _log_timing_message(f"[TIMING] git rev-list {actual_ref} --not {upstream_branch}: {rev_list_elapsed:.4f}s (ERROR: {unpushed_result.stderr})")
-                                    else:
-                                        # Remote tracking ref doesn't exist
-                                        # If main branches exist, commits NOT on main are likely PUSHED (yellow), not UNPUSHED (red)
-                                        # Only mark as unpushed if we can't determine push status
-                                        # For now, assume commits NOT on main are PUSHED (will show yellow)
-                                        # This matches lazygit behavior: if branch might be pushed, show yellow
-                                        if main_branches:
-                                            # Don't mark commits as unpushed - they're likely pushed but not merged
-                                            # Empty unpushed_commits means all commits will show as pushed (yellow if not merged)
-                                            unpushed_commits = set()
-                                            self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[TIMING] No remote tracking ref for {actual_ref}, assuming commits NOT on main are PUSHED (yellow) - matching lazygit behavior")
-                                        else:
-                                            # No main branches exist - can't determine status, assume all are unpushed
-                                            rev_list_elapsed = time.perf_counter() - rev_list_start
-                                            all_local_cmd = ["git", "rev-list", actual_ref]
-                                            all_local_result = subprocess.run(
-                                                all_local_cmd,
-                                                capture_output=True,
-                                                text=True,
-                                                timeout=10,
-                                                cwd=repo_path_str
-                                            )
-                                            if all_local_result.returncode == 0:
-                                                for sha in all_local_result.stdout.strip().split("\n"):
-                                                    if sha.strip():
-                                                        unpushed_commits.add(sha.strip())
-                                                self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[TIMING] No remote tracking ref for {actual_ref} (refs/remotes/{upstream_branch}) and no main branches, treating all {len(unpushed_commits)} commits as unpushed")
+                                    if head_result.returncode == 0:
+                                        branch_name_short = head_result.stdout.strip()
+                                
+                                # Lazygit uses: branch_name@{u} as the first not_ref
+                                upstream_ref = f"{branch_name_short}@{{u}}"
+                                not_refs = [upstream_ref] + main_branches
+                                
+                                # This is Lazygit's exact command - it will fail if @{u} doesn't exist
+                                # When it fails, getReachableHashes returns empty set, which means status = StatusPushed (YELLOW)
+                                unpushed_cmd = ["git", "rev-list", actual_ref]
+                                for not_ref in not_refs:
+                                    unpushed_cmd.extend(["--not", not_ref])
+                                
+                                unpushed_result = subprocess.run(
+                                    unpushed_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                    cwd=repo_path_str
+                                )
+                                rev_list_elapsed = time.perf_counter() - rev_list_start
+                                
+                                if unpushed_result.returncode == 0:
+                                    # Command succeeded - we have unpushed commits
+                                    for sha in unpushed_result.stdout.strip().split("\n"):
+                                        if sha.strip():
+                                            unpushed_commits.add(sha.strip())
+                                    self._remote_commits_cache[cache_key] = unpushed_commits
+                                    cache_reason = "INVALIDATED" if cache_invalidated_remote_branch else "MISS"
+                                    _log_timing_message(f"[CACHE] {cache_reason} unpushed_commits_cache for {actual_ref}: fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (using {upstream_ref})")
+                                else:
+                                    # Command failed (e.g., @{u} doesn't exist) - return empty set
+                                    # Empty set means: unpushedCommitHashes.Includes(commit) = false
+                                    # Therefore status = StatusPushed (YELLOW)
+                                    unpushed_commits = set()  # Empty set = all commits are assumed pushed (yellow)
+                                    self._remote_commits_cache[cache_key] = unpushed_commits
+                                    _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref}: {upstream_ref} doesn't exist, assuming all commits are pushed (yellow) - matching Lazygit behavior")
                             except Exception as e:
                                 rev_list_elapsed = time.perf_counter() - rev_list_start
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref}: {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
@@ -6092,10 +6129,6 @@ class PygitzenApp(App):
         loaded_commits = commits
         self.all_commits = loaded_commits.copy()  # Store all commits for search
         
-        # Debug: log how many commits were loaded
-        _log_timing_message(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches")
-        print(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches, total_commits={self.total_commits}")
-        
         # Apply search filter if there's a search query
         if self._search_query:
             self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
@@ -6104,9 +6137,7 @@ class PygitzenApp(App):
         
         self.loaded_commits = len(self.commits)
         
-        # Debug: log before setting commits
-        _log_timing_message(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
-        print(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
+        # Debug logging removed - issue is fixed
         
         # OPTIMIZATION: Show commits to UI immediately (critical path)
         # CRITICAL: Queue the UI update to prevent blocking - set_commits can be slow for many commits
@@ -6151,35 +6182,72 @@ class PygitzenApp(App):
                 patch_thread.start()
 
     def _update_commits_title(self) -> None:
+        # Debug logging removed - issue is fixed, no longer needed
+        
         # Show current branch (matching lazygit behavior)
         branch_name = self.active_branch if self.active_branch else "HEAD"
-        total_count = self.total_commits if self.total_commits > 0 else len(self.commits)
+        # CRITICAL: Always use self.total_commits if it's set (even if 0, to show correct count)
+        # Only fall back to len(self.commits) if total_commits hasn't been set yet (still None/0 from initialization)
+        # This ensures we show the correct count even if self.commits is limited for virtual scrolling
+        if self.total_commits > 0:
+            total_count = self.total_commits
+            reason = "using total_commits (> 0)"
+        elif hasattr(self, 'commits') and len(self.commits) > 0:
+            # Fallback: use len(self.commits) only if total_commits not set yet
+            total_count = len(self.commits)
+            reason = f"fallback to len(commits)={len(self.commits)} (total_commits is 0)"
+        else:
+            # No commits loaded yet
+            total_count = 0
+            reason = "no commits loaded"
+        
         # Show selected commit number (1-indexed) of total commits
         # Use selected_commit_index + 1 for 1-indexed display, or 1 if no selection
         selected_number = (self.selected_commit_index + 1) if self.selected_commit_index >= 0 and self.commits else 1
+        
+        # Debug logging removed - issue is fixed
+        
         self.commits_pane.border_title = f"Commits ({branch_name}) {selected_number} of {total_count}"
     
     def _update_commits_count_ui(self, count: int) -> None:
         """Update UI to reflect commit count changes (called from background thread)."""
-        self.total_commits = count
+        # Debug logging removed - issue is fixed
+        old_total = self.total_commits
+        
+        # CRITICAL: Only update if the new count is greater than current, or if current is 0
+        # This prevents overwriting a correct count (62) with a stale cached value (2)
+        # The count from load_commits() (len(commits)) is more accurate than the cached value
+        if count > self.total_commits or self.total_commits == 0:
+            self.total_commits = count
+        else:
+            # Ignore lower count - keep the higher value (from load_commits())
+            return  # Don't update title if we're ignoring the count
         self._update_commits_title()
     
     def _update_commits_push_status_ui(self, commits: list[CommitInfo]) -> None:
         """Update UI to reflect push status changes (called from background thread)."""
         # Update push status in place without clearing (prevents flicker during virtual scrolling)
         if commits and len(commits) > 0:
-            # Find matching commits in self.commits and update their push status
+            # Find matching commits in self.commits and update their push AND merged status
             commit_shas = {c.sha: c for c in commits}
             updated_count = 0
             pushed_count_in_self = 0
+            merged_count_in_self = 0
+            unpushed_count_in_self = 0
             for commit in self.commits:
                 if commit.sha in commit_shas:
+                    # Update both pushed and merged status (required for three-tier display)
                     commit.pushed = commit_shas[commit.sha].pushed
+                    commit.merged = commit_shas[commit.sha].merged
                     updated_count += 1
-                    if commit.pushed:
+                    if commit.merged:
+                        merged_count_in_self += 1
+                    elif commit.pushed:
                         pushed_count_in_self += 1
+                    else:
+                        unpushed_count_in_self += 1
             
-            _log_timing_message(f"[DEBUG] _update_commits_push_status_ui: Updated {updated_count}/{len(self.commits)} commits in self.commits, {pushed_count_in_self} marked as pushed")
+            _log_timing_message(f"[DEBUG] _update_commits_push_status_ui: Updated {updated_count}/{len(self.commits)} commits in self.commits: {merged_count_in_self} merged (✓ green), {pushed_count_in_self} pushed (↑ yellow), {unpushed_count_in_self} unpushed (- red)")
             
             # Update the commits pane display in place (no clearing)
             self.commits_pane.update_push_status_in_place(commits)
@@ -6379,104 +6447,59 @@ class PygitzenApp(App):
                                         main_branches.append(main_branch)
                                 
                                 # Try to resolve upstream tracking branch
-                                upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{actual_ref}@{{u}}"]
-                                upstream_result = subprocess.run(
-                                    upstream_cmd,
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=2,
-                                    cwd=repo_path_str
-                                )
+                                # Lazygit's EXACT logic from commit_loader.go line 119 (same as in load_commits):
+                                # unpushedCommitHashes = self.getReachableHashes(
+                                #     opts.RefForPushedStatus.FullRefName(),
+                                #     append([]string{opts.RefForPushedStatus.RefName() + "@{u}"}, mainBranches...)
+                                # )
                                 
-                                if upstream_result.returncode == 0:
-                                    upstream_branch = upstream_result.stdout.strip()
-                                    # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
-                                    unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
-                                    for main_branch in main_branches:
-                                        unpushed_cmd.extend(["--not", main_branch])
-                                    unpushed_result = subprocess.run(
-                                        unpushed_cmd,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=10,
-                                        cwd=repo_path_str
-                                    )
-                                    rev_list_elapsed = time.perf_counter() - rev_list_start
-                                    
-                                    if unpushed_result.returncode == 0:
-                                        for sha in unpushed_result.stdout.strip().split("\n"):
-                                            if sha.strip():
-                                                unpushed_commits.add(sha.strip())
-                                        self._remote_commits_cache[cache_key] = unpushed_commits
-                                        cache_reason = "INVALIDATED" if cache_invalidated_remote_branch else "MISS"
-                                        _log_timing_message(f"[CACHE] {cache_reason} unpushed_commits_cache for {actual_ref} (load_more): fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s")
-                                    else:
-                                        _log_timing_message(f"[TIMING] git rev-list {actual_ref} --not {upstream_branch} (load_more): {rev_list_elapsed:.4f}s (ERROR: {unpushed_result.stderr})")
-                                else:
-                                    # No upstream tracking branch configured
-                                    # Check if remote tracking ref exists (refs/remotes/origin/<branch>)
-                                    upstream_branch = f"origin/{actual_ref}"
-                                    check_remote_cmd = ["git", "rev-parse", "--verify", f"refs/remotes/{upstream_branch}"]
-                                    check_remote_result = subprocess.run(
-                                        check_remote_cmd,
+                                # Get branch short name for @{u} (Lazygit uses RefName(), not FullRefName())
+                                branch_name_short = actual_ref.replace("refs/heads/", "")
+                                if branch_name_short == "HEAD":
+                                    # For HEAD, get the actual branch name
+                                    head_result = subprocess.run(
+                                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                                         capture_output=True,
                                         text=True,
                                         timeout=2,
                                         cwd=repo_path_str
                                     )
-                                    
-                                    if check_remote_result.returncode == 0:
-                                        # Remote tracking ref exists - use it
-                                        # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
-                                        unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
-                                        for main_branch in main_branches:
-                                            unpushed_cmd.extend(["--not", main_branch])
-                                        unpushed_result = subprocess.run(
-                                            unpushed_cmd,
-                                            capture_output=True,
-                                            text=True,
-                                            timeout=10,
-                                            cwd=repo_path_str
-                                        )
-                                        rev_list_elapsed = time.perf_counter() - rev_list_start
-                                        
-                                        if unpushed_result.returncode == 0:
-                                            for sha in unpushed_result.stdout.strip().split("\n"):
-                                                if sha.strip():
-                                                    unpushed_commits.add(sha.strip())
-                                            self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref} (load_more): fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s")
-                                        else:
-                                            _log_timing_message(f"[TIMING] git rev-list {actual_ref} --not {upstream_branch} (load_more): {rev_list_elapsed:.4f}s (ERROR: {unpushed_result.stderr})")
-                                    else:
-                                        # Remote tracking ref doesn't exist
-                                        # If main branches exist, commits NOT on main are likely PUSHED (yellow), not UNPUSHED (red)
-                                        # Only mark as unpushed if we can't determine push status
-                                        # For now, assume commits NOT on main are PUSHED (will show yellow)
-                                        # This matches lazygit behavior: if branch might be pushed, show yellow
-                                        if main_branches:
-                                            # Don't mark commits as unpushed - they're likely pushed but not merged
-                                            # Empty unpushed_commits means all commits will show as pushed (yellow if not merged)
-                                            unpushed_commits = set()
-                                            self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[TIMING] No remote tracking ref for {actual_ref} (load_more), assuming commits NOT on main are PUSHED (yellow) - matching lazygit behavior")
-                                        else:
-                                            # No main branches exist - can't determine status, assume all are unpushed
-                                            rev_list_elapsed = time.perf_counter() - rev_list_start
-                                            all_local_cmd = ["git", "rev-list", actual_ref]
-                                            all_local_result = subprocess.run(
-                                                all_local_cmd,
-                                                capture_output=True,
-                                                text=True,
-                                                timeout=10,
-                                                cwd=repo_path_str
-                                            )
-                                            if all_local_result.returncode == 0:
-                                                for sha in all_local_result.stdout.strip().split("\n"):
-                                                    if sha.strip():
-                                                        unpushed_commits.add(sha.strip())
-                                                self._remote_commits_cache[cache_key] = unpushed_commits
-                                            _log_timing_message(f"[TIMING] No remote tracking ref for {actual_ref} (refs/remotes/{upstream_branch}) (load_more) and no main branches, treating all {len(unpushed_commits)} commits as unpushed")
+                                    if head_result.returncode == 0:
+                                        branch_name_short = head_result.stdout.strip()
+                                
+                                # Lazygit uses: branch_name@{u} as the first not_ref
+                                upstream_ref = f"{branch_name_short}@{{u}}"
+                                not_refs = [upstream_ref] + main_branches
+                                
+                                # This is Lazygit's exact command - it will fail if @{u} doesn't exist
+                                unpushed_cmd = ["git", "rev-list", actual_ref]
+                                for not_ref in not_refs:
+                                    unpushed_cmd.extend(["--not", not_ref])
+                                
+                                unpushed_result = subprocess.run(
+                                    unpushed_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                    cwd=repo_path_str
+                                )
+                                rev_list_elapsed = time.perf_counter() - rev_list_start
+                                
+                                if unpushed_result.returncode == 0:
+                                    # Command succeeded - we have unpushed commits
+                                    for sha in unpushed_result.stdout.strip().split("\n"):
+                                        if sha.strip():
+                                            unpushed_commits.add(sha.strip())
+                                    self._remote_commits_cache[cache_key] = unpushed_commits
+                                    cache_reason = "INVALIDATED" if cache_invalidated_remote_branch else "MISS"
+                                    _log_timing_message(f"[CACHE] {cache_reason} unpushed_commits_cache for {actual_ref} (load_more): fetched {len(unpushed_commits)} unpushed commits in {rev_list_elapsed:.4f}s (using {upstream_ref})")
+                                else:
+                                    # Command failed (e.g., @{u} doesn't exist) - return empty set
+                                    # Empty set means: unpushedCommitHashes.Includes(commit) = false
+                                    # Therefore status = StatusPushed (YELLOW)
+                                    unpushed_commits = set()  # Empty set = all commits are assumed pushed (yellow)
+                                    self._remote_commits_cache[cache_key] = unpushed_commits
+                                    _log_timing_message(f"[CACHE] MISS unpushed_commits_cache for {actual_ref} (load_more): {upstream_ref} doesn't exist, assuming all commits are pushed (yellow) - matching Lazygit behavior")
                             except Exception as e:
                                 rev_list_elapsed = time.perf_counter() - rev_list_start
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref} (load_more): {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
