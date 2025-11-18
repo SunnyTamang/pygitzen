@@ -17,6 +17,7 @@ from dulwich.errors import NotGitRepository
 class BranchInfo:
     name: str
     head_sha: str
+    timestamp: int = 0  # Unix timestamp of last commit (0 if not available)
 
 
 @dataclass
@@ -42,6 +43,7 @@ class StashInfo:
     branch: str  # Branch where stash was created
     message: str  # Stash message
     sha: str  # Stash commit SHA
+    timestamp: int = 0  # Unix timestamp of stash creation (0 if not available)
 
 
 cdef class GitServiceCython:
@@ -330,24 +332,46 @@ cdef class GitServiceCython:
         return count
     
     def list_branches(self):
-        """List all branches - optimized."""
-        # Use direct refs access instead of as_dict for better performance
+        """List all local branches using git for-each-ref with timestamps."""
+        import subprocess
+        
         result = []
+        try:
+            # Use git for-each-ref to get branches, SHAs, and commit timestamps
+            # Format: name|sha|timestamp
+            cmd = ['git', 'for-each-ref', 'refs/heads/', '--format=%(refname:short)|%(objectname)|%(committerdate:unix)']
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                for line in process.stdout.strip().split('\n'):
+                    if not line or '|' not in line:
+                        continue
+                    parts = line.split('|')
+                    name = parts[0].strip()
+                    sha = parts[1].strip() if len(parts) > 1 else ""
+                    timestamp = int(parts[2].strip()) if len(parts) > 2 and parts[2].strip().isdigit() else 0
+                    result.append(BranchInfo(name=name, head_sha=sha, timestamp=timestamp))
+        except Exception:
+            # If git command fails, fallback to dulwich method
+            refs_prefix = b"refs/heads/"
+            for ref_name in self.repo.refs.keys():
+                if ref_name.startswith(refs_prefix):
+                    sha = self.repo.refs[ref_name]
+                    branch_name = ref_name[len(refs_prefix):].decode(errors="replace")
+                    result.append(BranchInfo(name=branch_name, head_sha=sha.hex(), timestamp=0))
         
-        # Get all head refs directly
-        refs_prefix = b"refs/heads/"
-        for ref_name in self.repo.refs.keys():
-            if ref_name.startswith(refs_prefix):
-                sha = self.repo.refs[ref_name]
-                # Extract branch name (more efficient)
-                branch_name = ref_name[len(refs_prefix):].decode(errors="replace")
-                result.append(BranchInfo(name=branch_name, head_sha=sha.hex()))
+        # Sort by recency (most recent first), then alphabetically
+        # Branches with no timestamp (0) go to the end
+        def get_sort_key(branch):
+            return (branch.timestamp == 0, -branch.timestamp, branch.name.lower())
         
-        # Use a helper function instead of lambda for Cython compatibility
-        def get_branch_name(branch):
-            return branch.name.lower()
-        
-        result.sort(key=get_branch_name)
+        result.sort(key=get_sort_key)
         return result
     
     def get_merge_base(self, str branch, str base_branch="main"):
@@ -1407,13 +1431,32 @@ cdef class GitServiceCython:
                         branch = match.group(2).strip()
                         message = match.group(3).strip()
                         
+                        # Get timestamp for this stash using git show
+                        timestamp = 0
+                        try:
+                            timestamp_result = subprocess.run(
+                                ['git', 'show', '-s', '--format=%at', f'stash@{{{index}}}'],
+                                capture_output=True,
+                                text=True,
+                                timeout=2,
+                                cwd=str(repo_path)
+                            )
+                            if timestamp_result.returncode == 0 and timestamp_result.stdout.strip():
+                                timestamp_str = timestamp_result.stdout.strip()
+                                if timestamp_str.isdigit():
+                                    timestamp = int(timestamp_str)
+                        except Exception:
+                            # If timestamp fetch fails, continue with 0
+                            pass
+                        
                         # Don't fetch SHA here - it's expensive and only needed when showing details
                         # SHA will be fetched lazily if needed
                         stashes.append(StashInfo(
                             index=index,
                             branch=branch,
                             message=message,
-                            sha=""  # Empty SHA - can be fetched later if needed
+                            sha="",  # Empty SHA - can be fetched later if needed
+                            timestamp=timestamp
                         ))
         except Exception:
             # If git command fails, return empty list
