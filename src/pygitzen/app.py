@@ -3300,6 +3300,41 @@ class PygitzenApp(App):
         
         return sync_status
     
+    def _refresh_branch_sync_status(self, branch: str) -> None:
+        """Refresh sync status for a specific branch (called when branch is selected)."""
+        import threading
+        
+        def calculate_sync_in_thread():
+            """Calculate sync status for the branch in background thread."""
+            try:
+                sync_status = self._calculate_branch_sync_status(branch)
+                self._branch_sync_status_cache[branch] = sync_status
+                
+                # Update UI in main thread
+                if self.branches:
+                    self.call_from_thread(
+                        lambda: self.branches_pane.set_branches(
+                            self.branches, 
+                            self.active_branch, 
+                            self._branch_sync_status_cache
+                        )
+                    )
+                    # Also update status pane
+                    if self.active_branch == branch:
+                        self.call_from_thread(
+                            lambda: self.status_pane.update_status(
+                                self.active_branch, 
+                                self.repo_path, 
+                                sync_status
+                            )
+                        )
+            except Exception:
+                pass  # Silently fail if calculation errors
+        
+        # Start background thread
+        thread = threading.Thread(target=calculate_sync_in_thread, daemon=True)
+        thread.start()
+    
     def _calculate_all_branches_sync_status(self) -> None:
         """Calculate sync status for all branches in background."""
         import threading
@@ -4591,6 +4626,24 @@ class PygitzenApp(App):
                                 
                                 if upstream_result.returncode == 0:
                                     upstream_branch = upstream_result.stdout.strip()
+                                    
+                                    # Track remote HEAD SHA for change detection
+                                    try:
+                                        remote_head_cmd = ["git", "rev-parse", upstream_branch]
+                                        remote_head_result = subprocess.run(
+                                            remote_head_cmd,
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=2,
+                                            cwd=repo_path_str
+                                        )
+                                        if remote_head_result.returncode == 0:
+                                            current_remote_head_sha = remote_head_result.stdout.strip()
+                                            cache_key_remote = f"{actual_ref}_remote_head"
+                                            self._last_remote_head_sha[cache_key_remote] = current_remote_head_sha
+                                    except Exception:
+                                        pass  # Silently fail if we can't track remote HEAD
+                                    
                                     # Use lazygit's approach: get commits in local branch that are NOT in upstream or main
                                     # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
                                     unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
@@ -5285,17 +5338,22 @@ class PygitzenApp(App):
                 selected_branch = self.branches[index].name
                 should_reload = False
                 
+                import subprocess
+                repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+                
                 if selected_branch != self.active_branch:
                     # Different branch - always reload
                     should_reload = True
                     cache_key = f"{selected_branch}_unpushed"
                     self._remote_commits_cache.pop(cache_key, None)
+                    # Clear sync status cache for the new branch (will be recalculated)
+                    self._branch_sync_status_cache.pop(selected_branch, None)
                     self.active_branch = selected_branch
                 else:
-                    # Same branch - check if HEAD has changed (new commits were made)
-                    import subprocess
+                    # Same branch - check if HEAD has changed (new commits were made) or remote HEAD changed (pushed)
+                    should_reload = False
                     try:
-                        repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+                        # Check local HEAD SHA
                         head_sha_cmd = ["git", "rev-parse", selected_branch]
                         head_sha_result = subprocess.run(
                             head_sha_cmd,
@@ -5304,17 +5362,63 @@ class PygitzenApp(App):
                             timeout=2,
                             cwd=repo_path_str
                         )
+                        current_head_sha = None
                         if head_sha_result.returncode == 0:
                             current_head_sha = head_sha_result.stdout.strip()
-                            # Check if HEAD changed (new commits)
+                            # Check if local HEAD changed (new commits)
                             if selected_branch in self._last_head_sha:
                                 if self._last_head_sha[selected_branch] != current_head_sha:
-                                    # HEAD changed - new commits were made, reload
+                                    # Local HEAD changed - new commits were made, reload
                                     should_reload = True
-                                    _log_timing_message(f"[BRANCH] HEAD changed for {selected_branch}: {self._last_head_sha[selected_branch][:8]} → {current_head_sha[:8]}, reloading commits")
+                                    _log_timing_message(f"[BRANCH] Local HEAD changed for {selected_branch}: {self._last_head_sha[selected_branch][:8]} → {current_head_sha[:8]}, reloading commits")
+                                    # Clear cache for this branch
+                                    cache_key = f"{selected_branch}_unpushed"
+                                    self._remote_commits_cache.pop(cache_key, None)
+                                    # Clear sync status cache (will be recalculated)
+                                    self._branch_sync_status_cache.pop(selected_branch, None)
                             else:
                                 # First time loading this branch, reload
                                 should_reload = True
+                        
+                        # Also check if remote HEAD changed (commits were pushed)
+                        if not should_reload and current_head_sha:
+                            # Get upstream tracking branch
+                            upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{selected_branch}@{{u}}"]
+                            upstream_result = subprocess.run(
+                                upstream_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=2,
+                                cwd=repo_path_str
+                            )
+                            if upstream_result.returncode == 0:
+                                upstream = upstream_result.stdout.strip()
+                                # Get remote HEAD SHA
+                                remote_head_cmd = ["git", "rev-parse", upstream]
+                                remote_head_result = subprocess.run(
+                                    remote_head_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=2,
+                                    cwd=repo_path_str
+                                )
+                                if remote_head_result.returncode == 0:
+                                    current_remote_head_sha = remote_head_result.stdout.strip()
+                                    # Check if remote HEAD changed (commits were pushed)
+                                    cache_key_remote = f"{selected_branch}_remote_head"
+                                    if cache_key_remote in self._last_remote_head_sha:
+                                        if self._last_remote_head_sha[cache_key_remote] != current_remote_head_sha:
+                                            # Remote HEAD changed - commits were pushed, reload
+                                            should_reload = True
+                                            _log_timing_message(f"[BRANCH] Remote HEAD changed for {selected_branch}: {self._last_remote_head_sha[cache_key_remote][:8]} → {current_remote_head_sha[:8]}, reloading commits")
+                                            # Clear cache for this branch
+                                            cache_key = f"{selected_branch}_unpushed"
+                                            self._remote_commits_cache.pop(cache_key, None)
+                                            # Clear sync status cache (will be recalculated)
+                                            self._branch_sync_status_cache.pop(selected_branch, None)
+                                    else:
+                                        # First time checking remote HEAD, reload to be safe
+                                        should_reload = True
                     except Exception:
                         # If we can't check HEAD, reload to be safe
                         should_reload = True
@@ -5328,10 +5432,13 @@ class PygitzenApp(App):
                     self.load_commits(self.active_branch)
                     # Load commits with full history for feature branches (for log pane)
                     self.load_commits_for_log(self.active_branch)
+                    # Refresh sync status for the selected branch
+                    self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
                 else:
-                    # Same branch, no new commits - just update status info, don't reload commits
+                    # Same branch, no new commits - refresh sync status and update status info
                     # This preserves the correct commit status that was already determined
+                    self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
         elif event.list_view is self.commits_pane:
             # Switch to patch view when commit is selected
