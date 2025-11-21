@@ -313,9 +313,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Status
 
-**Current Version**: 0.1.0 (Alpha)
+**Current Version**: 0.2.0 (Beta)
 
-This is an early version of pygitzen. Core features are working, but more functionality is planned. See the roadmap for upcoming features.
+This is a beta version of pygitzen. Core features are working and stable. Additional functionality is being added based on user feedback. See the roadmap for upcoming features.
 
 ---
 
