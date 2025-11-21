@@ -46,6 +46,15 @@ class StashInfo:
     timestamp: int = 0  # Unix timestamp of stash creation (0 if not available)
 
 
+@dataclass
+class TagInfo:
+    name: str  # Tag version (e.g., "v0.1.4")
+    message: str  # Tag message/subject
+    timestamp: int  # Unix timestamp (0 if not available)
+    sha: str  # Tag object SHA
+    is_annotated: bool = False  # Whether tag is annotated or lightweight
+
+
 cdef class GitServiceCython:
     cdef object repo_path
     cdef object repo
@@ -421,6 +430,153 @@ cdef class GitServiceCython:
             return (branch.timestamp == 0, -branch.timestamp, branch.name.lower())
         
         result.sort(key=get_sort_key)
+        return result
+    
+    def list_tags(self):
+        """List all tags using git for-each-ref with timestamps and messages.
+        
+        Optimized for large repositories (50k+ tags) using git for-each-ref.
+        CRITICAL: Avoid per-tag subprocess calls to prevent segfaults with large repos.
+        """
+        import subprocess
+        
+        result = []
+        try:
+            # Use git for-each-ref to get tags, SHAs, timestamps, and messages
+            # Format: name|sha|timestamp|message|type
+            # Use creatordate:unix instead of taggerdate:unix for better sorting:
+            # - For annotated tags: creatordate is when the tag was created (same as taggerdate)
+            # - For lightweight tags: creatordate is when the commit was created (what we want for sorting)
+            # This matches GitHub's sorting behavior (latest at top, oldest at bottom)
+            cmd = ['git', 'for-each-ref', 'refs/tags/', '--format=%(refname:short)|%(objectname)|%(creatordate:unix)|%(contents:subject)|%(objecttype)']
+            # Use bytes first, then decode with error handling for non-UTF-8 characters (like haiku repo)
+            # For very large repos (50k+ tags), this can take 10-30 seconds, so use a longer timeout
+            process = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=False,  # Get bytes first
+                timeout=120,  # Longer timeout for very large repos (50k+ tags) - haiku can take 30-60s
+                cwd=str(self.repo_path)
+            )
+            
+            if process.returncode == 0:
+                # Decode with error handling for non-UTF-8 characters
+                try:
+                    stdout_text = process.stdout.decode('utf-8', errors='replace')
+                except Exception:
+                    stdout_text = process.stdout.decode('utf-8', errors='ignore')
+                stdout_lines = stdout_text.strip().split('\n') if stdout_text.strip() else []
+                for line in stdout_lines:
+                    if not line or '|' not in line:
+                        continue
+                    try:
+                        parts = line.split('|')
+                        name = parts[0].strip() if len(parts) > 0 else ""
+                        if not name:
+                            continue
+                        sha = parts[1].strip() if len(parts) > 1 else ""
+                        timestamp_str = parts[2].strip() if len(parts) > 2 else ""
+                        message = parts[3].strip() if len(parts) > 3 else ""
+                        object_type = parts[4].strip() if len(parts) > 4 else ""
+                        
+                        # Determine if annotated from object type (avoid subprocess call)
+                        is_annotated = (object_type == 'tag')
+                        
+                        # Parse timestamp
+                        timestamp = 0
+                        if timestamp_str and timestamp_str.isdigit():
+                            timestamp = int(timestamp_str)
+                        # Note: creatordate:unix works for both annotated and lightweight tags:
+                        # - Annotated tags: returns tagger date (when tag was created)
+                        # - Lightweight tags: returns commit date (when commit was created)
+                        # This ensures proper sorting for all tags
+                        
+                        # CRITICAL: %(contents:subject) works for BOTH annotated and lightweight tags!
+                        # For lightweight tags, it returns the commit message subject
+                        # For annotated tags, it returns the tag message subject (first line only)
+                        # So we should NOT need subprocess calls for lightweight tags
+                        # Only fetch full message for annotated tags if we want more than the subject
+                        
+                        # For annotated tags, if message is empty, try to get full message from tag object
+                        # But skip this for large repos to avoid timeouts (50k+ tags)
+                        # We'll use the subject from %(contents:subject) which should already be populated
+                        if is_annotated and (not message or message.strip() == ""):
+                            # Annotated tag with empty message - try to get from tag object
+                            # But limit this to avoid too many subprocess calls for large repos
+                            try:
+                                tag_msg_cmd = ['git', 'cat-file', 'tag', name]
+                                tag_msg_result = subprocess.run(
+                                    tag_msg_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=1,
+                                    cwd=str(self.repo_path)
+                                )
+                                if tag_msg_result.returncode == 0:
+                                    # Parse tag message (skip header lines)
+                                    lines = tag_msg_result.stdout.split('\n')
+                                    in_message = False
+                                    msg_lines = []
+                                    for line in lines:
+                                        if line.startswith('-----BEGIN PGP'):
+                                            break  # Stop at PGP signature
+                                        if in_message:
+                                            msg_lines.append(line)
+                                        elif line == '':  # Empty line after headers starts message
+                                            in_message = True
+                                    if msg_lines:
+                                        message = '\n'.join(msg_lines).strip()
+                            except Exception:
+                                pass  # If it fails, leave message empty (use subject from %(contents:subject))
+                        
+                        # For lightweight tags, %(contents:subject) should already have the commit message
+                        # If it's empty, the commit has no message - don't make subprocess calls
+                        # This avoids thousands of subprocess calls for large repos like haiku
+                        
+                        result.append(TagInfo(
+                            name=name,
+                            message=message,
+                            timestamp=timestamp,
+                            sha=sha,
+                            is_annotated=is_annotated
+                        ))
+                    except Exception as e:
+                        # Skip problematic tags to avoid crashing
+                        continue
+        except Exception as e:
+            # If git command fails, use minimal fallback (avoid dulwich iteration for large repos)
+            # This prevents segfaults when iterating through refs.keys() for 50k+ tags
+            try:
+                # Use git tag -l as safer fallback (faster than dulwich iteration)
+                fallback_cmd = ['git', 'tag', '-l']
+                fallback_result = subprocess.run(
+                    fallback_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    cwd=str(self.repo_path)
+                )
+                if fallback_result.returncode == 0:
+                    for tag_name in fallback_result.stdout.strip().split('\n'):
+                        if tag_name.strip():
+                            result.append(TagInfo(
+                                name=tag_name.strip(),
+                                message="",
+                                timestamp=0,
+                                sha="",
+                                is_annotated=False
+                            ))
+            except Exception:
+                # If all else fails, return empty list (prevents segfault)
+                pass
+        
+        # Sort by recency (most recent first), then alphabetically
+        # Tags with no timestamp (0) go to the end
+        def get_sort_key(tag):
+            return (tag.timestamp == 0, -tag.timestamp, tag.name.lower())
+        
+        result.sort(key=get_sort_key)
+        
         return result
     
     def get_merge_base(self, str branch, str base_branch="main"):

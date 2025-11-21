@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.panel import Panel
 
-from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo
+from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
 
 # Helper function to format time recency (e.g., "18h", "1d", "1w")
 def format_recency(timestamp: int) -> str:
@@ -485,13 +485,14 @@ class TagsPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Tags"
         self._parent_app = None  # Will be set by parent
-        self._tags: list[BranchInfo] = []  # Store all loaded tags
+        self._tags: list[TagInfo] = []  # Store all loaded tags
         self._loaded_tags_count = 0  # How many tags we've loaded
         self._total_tags_count = 0  # Total number of tags available
         self._page_size = 200  # Load 200 tags at a time
         self._on_render_to_main: callable | None = None  # Callback for automatic patch updates (lazygit pattern)
         self._last_highlighted = None
         self._rendered_count = 0  # Track how many tags are actually rendered in UI
+        self._scroll_check_timer = None  # Timer for checking scroll position
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) to update visual highlighting."""
@@ -519,7 +520,7 @@ class TagsPane(ListView):
         """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
         self._on_render_to_main = callback
     
-    def set_tags(self, tags: list[BranchInfo], total_count: int = 0, append: bool = False) -> None:
+    def set_tags(self, tags: list[TagInfo], total_count: int = 0, append: bool = False) -> None:
         """Set tags in the pane, with support for virtual scrolling.
         
         Args:
@@ -557,20 +558,11 @@ class TagsPane(ListView):
         # Calculate max widths for proper alignment (like Lazygit's column layout)
         # Use all tags for width calculation, but only render subset
         if tags_to_render:
-            # Calculate max recency width (e.g., "1mo" = 3 chars)
-            max_recency_width = 0
-            for tag in tags_to_render:
-                if tag.timestamp > 0:
-                    recency = format_recency(tag.timestamp)
-                    if recency:
-                        max_recency_width = max(max_recency_width, len(recency))
-            
             # Calculate max tag name width for alignment
             max_name_width = max(len(tag.name) for tag in tags_to_render) if tags_to_render else 0
             # Add some padding for better readability
             max_name_width = max(max_name_width, 15)  # Minimum width for alignment
         else:
-            max_recency_width = 0
             max_name_width = 15
         
         # Only render the limited subset (not all 59k tags)
@@ -578,34 +570,66 @@ class TagsPane(ListView):
             from rich.text import Text
             text = Text()
             
-            # Add recency with fixed width (right-aligned, like Lazygit)
-            if tag.timestamp > 0:
-                recency = format_recency(tag.timestamp)
-                if recency:
-                    # Right-align recency in fixed-width column
-                    text.append(f"{recency:>{max_recency_width}} ", style="dim white")
-                else:
-                    # Empty recency, add padding
-                    text.append(" " * (max_recency_width + 1), style="dim white")
-            else:
-                # No timestamp, add padding
-                text.append(" " * (max_recency_width + 1), style="dim white")
-            
-            # Add tag name with fixed width (left-aligned, like Lazygit column 1)
+            # Add tag version (name) with fixed width (left-aligned, like Lazygit column 1)
             text.append(f"{tag.name:<{max_name_width}} ", style="white")
             
             # Add tag message (like Lazygit column 2) - shown in yellow
-            message = getattr(tag, 'message', '')
-            if message:
-                text.append(message, style="yellow")
+            if tag.message:
+                text.append(tag.message, style="yellow")
             
             item = ListItem(Static(text))
             self.append(item)
         
         # Update rendered count
         self._rendered_count = len(self.children)
+        
+        # Start scroll monitoring for virtual scrolling (only on initial load, not append)
+        if self._parent_app and not append:
+            self._start_scroll_monitoring()
     
-    def append_tags(self, tags: list[BranchInfo]) -> None:
+    def _start_scroll_monitoring(self) -> None:
+        """Start monitoring scroll position for virtual scrolling."""
+        if self._parent_app:
+            # Cancel existing timer if any
+            if hasattr(self, '_scroll_check_timer') and self._scroll_check_timer:
+                try:
+                    self._scroll_check_timer.stop()
+                except:
+                    pass
+            
+            # Check scroll position periodically
+            def check_scroll():
+                try:
+                    if hasattr(self, '_rendered_count') and hasattr(self, '_total_tags_count'):
+                        rendered = self._rendered_count
+                        total = self._total_tags_count
+                        
+                        if rendered >= total:
+                            return  # All tags rendered, stop monitoring
+                        
+                        # Check if we're near the bottom
+                        if hasattr(self, 'scroll_y') and hasattr(self, 'max_scroll_y'):
+                            scroll_y = self.scroll_y
+                            max_scroll_y = self.max_scroll_y
+                            
+                            if max_scroll_y > 0:
+                                scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                                
+                                # If scrolled near bottom (85%), load more tags
+                                if scroll_percent >= 0.85 and rendered < total:
+                                    if self._parent_app:
+                                        self._parent_app._load_more_tags()
+                except Exception:
+                    pass
+            
+            # Check every 0.5 seconds using set_interval
+            try:
+                self._scroll_check_timer = self.set_interval(0.5, check_scroll)
+            except Exception:
+                # If set_interval doesn't work, fall back to on_scroll handler
+                pass
+    
+    def append_tags(self, tags: list[TagInfo]) -> None:
         """Append more tags (for virtual scrolling)."""
         self.set_tags(tags, append=True)
     
@@ -745,6 +769,8 @@ class CommitsPane(ListView):
         if not hasattr(self, '_commit_info_map'):
             self._commit_info_map = {}
         
+        _log_timing_message(f"[DEBUG] append_commits: Adding {len(commits)} commits, current _commit_shas count: {len(self._commit_shas)}")
+        
         for commit in commits:
             from rich.text import Text
             
@@ -761,8 +787,16 @@ class CommitsPane(ListView):
             text.append(short_sha, style="cyan")
             text.append(" ", style="white")
             
-            # Don't show push status initially to avoid flicker
-            # The background thread will update it after checking remote
+            # Show push status if available (will be updated by background thread if needed)
+            # Three-tier status display (lazygit-style) - same as set_commits
+            # CRITICAL: Show initial status so commits don't appear blank, then update when background thread completes
+            if commit.merged:
+                text.append("✓ ", style="green")  # StatusMerged
+            elif hasattr(commit, 'pushed') and commit.pushed:
+                text.append("↑ ", style="yellow")  # StatusPushed
+            elif hasattr(commit, 'pushed') and not commit.pushed:
+                text.append("- ", style="red")  # StatusUnpushed
+            # else: don't show anything initially (will be updated by background thread)
             
             summary = commit.summary
             if len(summary) > 50:
@@ -790,26 +824,44 @@ class CommitsPane(ListView):
     def update_push_status_in_place(self, commits: list[CommitInfo]) -> None:
         """Update push status for existing commits without clearing the list."""
         if not commits or len(commits) == 0:
+            _log_timing_message(f"[DEBUG] update_push_status_in_place: No commits to update")
             return
         
-        # Create a map of normalized SHA to push status for quick lookup
+        # Create maps of normalized SHA to push status and merged status for quick lookup
         push_status_map = {}
+        merged_status_map = {}
         for commit in commits:
             commit_sha = _normalize_commit_sha(commit.sha)
             push_status_map[commit_sha] = commit.pushed
+            merged_status_map[commit_sha] = commit.merged
+        
+        _log_timing_message(f"[DEBUG] update_push_status_in_place: Processing {len(commits)} commits, {len(push_status_map)} in push_map, {len(merged_status_map)} in merged_map")
         
         # Check if we have stored commit SHAs
         if not hasattr(self, '_commit_shas') or len(self._commit_shas) == 0:
+            _log_timing_message(f"[DEBUG] update_push_status_in_place: No _commit_shas found")
             return
         
         # Check if we have stored commit info map
         if not hasattr(self, '_commit_info_map'):
             self._commit_info_map = {}
         
+        _log_timing_message(f"[DEBUG] update_push_status_in_place: Have {len(self._commit_shas)} stored SHAs, {len(self.children)} UI items")
+        
         # Update items in place using stored SHAs
         from rich.text import Text
         
         updated_ui_count = 0
+        skipped_not_in_map = 0
+        skipped_no_commit_info = 0
+        
+        # CRITICAL FIX: Only update commits that are in the provided batch
+        # The maps only contain the commits passed to this function, so we should only
+        # update UI items whose SHAs are in the maps. This prevents skipping old commits.
+        # Build a set of normalized SHAs that we should update
+        commits_to_update = set(push_status_map.keys())
+        _log_timing_message(f"[DEBUG] update_push_status_in_place: Will update {len(commits_to_update)} commits from batch")
+        
         for i, item in enumerate(self.children):
             try:
                 # Check if we have a stored SHA for this index
@@ -819,16 +871,27 @@ class CommitsPane(ListView):
                 stored_sha = self._commit_shas[i]
                 normalized_stored_sha = _normalize_commit_sha(stored_sha)
                 
-                # Get push status from map
-                if normalized_stored_sha not in push_status_map:
+                # CRITICAL: Only update if this commit is in the batch we're processing
+                # Skip commits that aren't in the current batch (they already have correct status)
+                if normalized_stored_sha not in commits_to_update:
+                    skipped_not_in_map += 1
                     continue
                 
                 pushed_status = push_status_map[normalized_stored_sha]
+                merged_status = merged_status_map.get(normalized_stored_sha, False)  # Default to False if not in map
+                
+                # DEBUG: Log first few updates to see what's happening
+                if updated_ui_count < 5:
+                    _log_timing_message(f"[DEBUG] update_push_status_in_place: Updating commit {stored_sha[:8]} at index {i}: merged={merged_status}, pushed={pushed_status}")
                 
                 # Get commit info from stored map (we have the commit message here)
                 commit_info = self._commit_info_map.get(stored_sha)
                 if not commit_info:
                     continue
+                
+                # CRITICAL: Update commit_info with latest merged status (in case _commit_info_map wasn't updated)
+                commit_info.merged = merged_status
+                commit_info.pushed = pushed_status
                 
                 # Rebuild the text exactly as we created it originally
                 if hasattr(item, 'children') and len(item.children) > 0:
@@ -844,7 +907,7 @@ class CommitsPane(ListView):
                     # 1. Merged (green ✓): Commit exists on main/master
                     # 2. Pushed (yellow ↑): Commit is pushed but NOT merged
                     # 3. Unpushed (red -): Commit is not pushed
-                    if commit_info.merged:
+                    if merged_status:  # Use merged_status from map, not commit_info (which might be stale)
                         new_text.append("✓ ", style="green")  # StatusMerged
                     elif pushed_status:
                         new_text.append("↑ ", style="yellow")  # StatusPushed
@@ -877,8 +940,13 @@ class CommitsPane(ListView):
                     # Update the static widget
                     static_widget.update(new_text)
                     updated_ui_count += 1
-            except Exception:
+                else:
+                    skipped_no_commit_info += 1
+            except Exception as e:
+                _log_timing_message(f"[DEBUG] update_push_status_in_place: Exception at index {i}: {type(e).__name__}: {e}")
                 continue
+        
+        _log_timing_message(f"[DEBUG] update_push_status_in_place: Updated {updated_ui_count} commits, skipped {skipped_not_in_map} (not in map), {skipped_no_commit_info} (no commit_info)")
 
 
 class StashPane(ListView):
@@ -2660,6 +2728,7 @@ class PygitzenApp(App):
                 self._using_cython = False
             self.branches: list[BranchInfo] = []
             self.remotes: list[BranchInfo] = []
+            self.tags: list[TagInfo] = []  # Tags for tags pane
             self.commits: list[CommitInfo] = []  # Commits for commits pane (left side)
             self.stashes: list[StashInfo] = []  # Stashes for stash pane
             self.all_commits: list[CommitInfo] = []  # Store all commits for search (commits pane)
@@ -2673,6 +2742,7 @@ class PygitzenApp(App):
             self._loading_commits = False
             self._loading_file_status = False
             self._loading_stashes = False
+            self._loading_tags = False
             self._search_query: str = ""
             self._view_mode: str = "patch"  # "patch" or "log"
             
@@ -2714,6 +2784,7 @@ class PygitzenApp(App):
                 self.branches_pane = BranchesPane(id="branches-pane")
                 self.remotes_pane = RemotesPane(id="remotes-pane")
                 self.tags_pane = TagsPane(id="tags-pane")
+                self.tags_pane._parent_app = self  # Set parent reference for scroll monitoring
                 self.commits_pane = CommitsPane(id="commits-pane")
                 self.search_input = CommitSearchInput(id="commit-search-input")
                 self.stash_pane = StashPane(id="stash-pane")
@@ -2789,8 +2860,27 @@ class PygitzenApp(App):
                     update_func()
                 except queue.Empty:
                     break
-        except Exception:
-            pass  # Silently fail if processing errors occur
+                except Exception as e:
+                    # Log errors from update functions (e.g., _update_tags_ui)
+                    import traceback
+                    error_msg = f"Error in UI update function: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                    _log_timing_message(f"[ERROR] {error_msg}")
+                    try:
+                        with open("debug_ui_queue.log", "a", encoding="utf-8") as f:
+                            f.write(f"{error_msg}\n")
+                    except:
+                        pass
+                    # Continue processing other updates
+        except Exception as e:
+            # Log errors in the queue processing itself
+            import traceback
+            error_msg = f"Error in _process_ui_update_queue: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+            _log_timing_message(f"[ERROR] {error_msg}")
+            try:
+                with open("debug_ui_queue.log", "a", encoding="utf-8") as f:
+                    f.write(f"{error_msg}\n")
+            except:
+                pass
     
     def _check_commits_pane_scroll(self) -> None:
         """Periodically check if we need to load more commits in commits pane (fallback if scroll events don't fire)."""
@@ -3186,6 +3276,9 @@ class PygitzenApp(App):
             # Initialize stashes as empty (will be loaded in background)
             self.stashes = []
             self.stash_pane.set_stashes([])
+            
+            # Load tags in background (non-blocking, can be 50k+ tags)
+            self.load_tags_background()
             
             # Load heavy operations in background (non-blocking)
             # Store branch for background workers
@@ -3855,6 +3948,118 @@ class PygitzenApp(App):
         thread = threading.Thread(target=load_stashes_in_thread, daemon=True)
         thread.start()
     
+    def load_tags_background(self) -> None:
+        """Load tags in background (non-blocking, can be 50k+ tags)."""
+        import threading
+        
+        def load_tags_in_thread():
+            """Load tags in background thread (non-blocking)."""
+            tags_start = time.perf_counter()
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_tags_background START")
+            try:
+                # Get repo_path
+                repo_path = getattr(self, '_cached_repo_path', None)
+                if repo_path is None:
+                    if hasattr(self.git, 'repo_path'):
+                        repo_path = self.git.repo_path
+                    elif hasattr(self, 'repo_path'):
+                        repo_path = self.repo_path
+                    else:
+                        repo_path = "."
+                    self._cached_repo_path = repo_path
+                
+                repo_path_str = str(repo_path) if repo_path else "."
+                
+                get_tags_start = time.perf_counter()
+                tags = []
+                # Check if method exists (Cython version might not have it)
+                try:
+                    if hasattr(self.git, 'list_tags'):
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Using Cython list_tags for {repo_path_str}")
+                        tags = self.git.list_tags()
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Cython list_tags returned {len(tags)} tags")
+                    else:
+                        # Fallback to Python version if Cython doesn't have the method
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Cython method not found, using Python list_tags")
+                        from .git_service import GitService
+                        python_git = GitService(repo_path_str)
+                        tags = python_git.list_tags()
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Python list_tags returned {len(tags)} tags")
+                except Exception as e:
+                    # If Cython fails, try Python fallback
+                    import traceback
+                    error_details = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                    _log_timing_message(f"[ERROR] [BACKGROUND]   Cython list_tags failed: {error_details}")
+                    try:
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Trying Python fallback...")
+                        from .git_service import GitService
+                        python_git = GitService(repo_path_str)
+                        tags = python_git.list_tags()
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   Python fallback succeeded: {len(tags)} tags")
+                    except Exception as e2:
+                        import traceback
+                        error_details2 = f"{type(e2).__name__}: {e2}\n{traceback.format_exc()}"
+                        _log_timing_message(f"[ERROR] [BACKGROUND]   Python fallback also failed: {error_details2}")
+                        raise e2  # Re-raise to be caught by outer exception handler
+                
+                get_tags_elapsed = time.perf_counter() - get_tags_start
+                _log_timing_message(f"[TIMING] [BACKGROUND]   list_tags: {get_tags_elapsed:.4f}s ({len(tags)} tags)")
+                
+                if not tags:
+                    _log_timing_message(f"[WARNING] [BACKGROUND]   list_tags returned empty list! This might indicate an issue.")
+                
+                # Update UI from main thread (use queue which is thread-safe)
+                # Create a copy of the tags list (shallow copy is fine since TagInfo objects are immutable)
+                tags_copy = list(tags)  # Use list() instead of .copy() for clarity
+                _log_timing_message(f"[TIMING] [BACKGROUND]   Queuing UI update with {len(tags_copy)} tags")
+                self._ui_update_queue.put(lambda: self._update_tags_ui(tags_copy))
+                
+                tags_total = time.perf_counter() - tags_start
+                _log_timing_message(f"[TIMING] [BACKGROUND] load_tags_background TOTAL: {tags_total:.4f}s")
+            except Exception as e:
+                # If tag fetching fails, log the error and show empty
+                import traceback
+                error_msg = f"Error loading tags (background): {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                _log_timing_message(f"[ERROR] {error_msg}")
+                try:
+                    with open("debug_tags.log", "a", encoding="utf-8") as f:
+                        f.write(f"{error_msg}\n")
+                except:
+                    pass
+                
+                # Update UI from main thread on error (use queue which is thread-safe)
+                self._ui_update_queue.put(lambda: self._update_tags_ui([]))
+        
+        thread = threading.Thread(target=load_tags_in_thread, daemon=True)
+        thread.start()
+    
+    def _update_tags_ui(self, tags: list[TagInfo]) -> None:
+        """Update tags pane UI (called from main thread)."""
+        try:
+            _log_timing_message(f"[TIMING] _update_tags_ui called with {len(tags)} tags")
+            # Ensure tags are sorted (in case they weren't sorted in git_service)
+            # Sort by recency (most recent first, matching GitHub's behavior), then alphabetically
+            # Tags with no timestamp (0) go to the end
+            # Note: git_service now uses creatordate:unix which works for both annotated and lightweight tags
+            tags.sort(key=lambda t: (t.timestamp == 0, -t.timestamp, t.name.lower()))
+            _log_timing_message(f"[TIMING] Tags sorted: first={tags[0].name if tags else 'N/A'}, last={tags[-1].name if tags else 'N/A'}")
+            self.tags = tags
+            total_count = len(tags)
+            # Only render first 200 tags initially (virtual scrolling)
+            self.tags_pane.set_tags(tags, total_count=total_count, append=False)
+            _log_timing_message(f"[TIMING] _update_tags_ui completed, rendered {self.tags_pane._rendered_count} tags")
+            self._loading_tags = False
+        except Exception as e:
+            import traceback
+            error_msg = f"Error in _update_tags_ui: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+            _log_timing_message(f"[ERROR] {error_msg}")
+            try:
+                with open("debug_tags.log", "a", encoding="utf-8") as f:
+                    f.write(f"{error_msg}\n")
+            except:
+                pass
+            self._loading_tags = False
+    
     def load_file_status_background(self) -> None:
         """Load file status in background (non-blocking)."""
         if self._loading_file_status:
@@ -4448,31 +4653,18 @@ class PygitzenApp(App):
                 cache_key = f"{actual_ref}_unpushed"
                 
                 # Get merged commits from main branches (quick check)
+                # OPTIMIZATION: Only use cache for initial load to avoid blocking
+                # If not cached, skip merged check here - background thread will fetch it
                 merged_commits = set()
-                for main_branch in ["origin/main", "origin/master"]:
-                    try:
-                        check_main = subprocess.run(
-                            ["git", "rev-parse", "--verify", main_branch],
-                            capture_output=True,
-                            text=True,
-                            timeout=1,
-                            cwd=repo_path_str
-                        )
-                        if check_main.returncode == 0:
-                            merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
-                            merged_result = subprocess.run(
-                                merged_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=3,
-                                cwd=repo_path_str
-                            )
-                            if merged_result.returncode == 0:
-                                for sha in merged_result.stdout.strip().split("\n"):
-                                    if sha.strip():
-                                        merged_commits.add(sha.strip())
-                    except Exception:
-                        pass
+                merged_cache_key = f"{actual_ref}_merged"
+                if merged_cache_key in self._remote_commits_cache:
+                    merged_commits = self._remote_commits_cache[merged_cache_key]
+                    _log_timing_message(f"[CACHE] HIT merged_commits_cache for {actual_ref}: {len(merged_commits)} merged commits")
+                else:
+                    # OPTIMIZATION: Skip synchronous fetch - let background thread handle it
+                    # This prevents blocking initial load for 1+ seconds
+                    _log_timing_message(f"[CACHE] MISS merged_commits_cache for {actual_ref}: skipping sync fetch, will fetch in background")
+                    # merged_commits will be empty, background thread will update status later
                 
                 normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
                 
@@ -4739,21 +4931,34 @@ class PygitzenApp(App):
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref}: {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
                     
                     # Get merged commits (those on main/master branches)
+                    # OPTIMIZATION: Check cache first, use larger limit, fetch in background if needed
                     merged_commits = set()
-                    if main_branches:
+                    merged_cache_key = f"{actual_ref}_merged"
+                    if merged_cache_key in self._remote_commits_cache:
+                        merged_commits = self._remote_commits_cache[merged_cache_key]
+                        _log_timing_message(f"[CACHE] HIT merged_commits_cache for {actual_ref}: {len(merged_commits)} merged commits")
+                    elif main_branches:
+                        # Cache MISS - fetch merged commits (this runs in background thread, so it's non-blocking)
+                        merged_fetch_start = time.perf_counter()
                         for main_branch in main_branches:
-                            merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
+                            # Use larger limit for large repos (68k+ commits)
+                            merged_cmd = ["git", "rev-list", main_branch, "--max-count=100000"]
                             merged_result = subprocess.run(
                                 merged_cmd,
                                 capture_output=True,
                                 text=True,
-                                timeout=5,
+                                timeout=30,  # Increased timeout for large repos
                                 cwd=repo_path_str
                             )
                             if merged_result.returncode == 0:
                                 for sha in merged_result.stdout.strip().split("\n"):
                                     if sha.strip():
                                         merged_commits.add(sha.strip())
+                        merged_fetch_elapsed = time.perf_counter() - merged_fetch_start
+                        # Cache the result for future use
+                        if merged_commits:
+                            self._remote_commits_cache[merged_cache_key] = merged_commits
+                            _log_timing_message(f"[CACHE] MISS merged_commits_cache for {actual_ref}: fetched {len(merged_commits)} merged commits in {merged_fetch_elapsed:.4f}s")
                     
                     # Update status for all commits using three-tier lazygit logic:
                     # 1. StatusMerged (green ✓): Commit exists on main/master
@@ -4875,32 +5080,74 @@ class PygitzenApp(App):
         """Update UI to reflect push status changes (called from background thread)."""
         # Update push status in place without clearing (prevents flicker during virtual scrolling)
         if commits and len(commits) > 0:
-            # Find matching commits in self.commits and update their push status
+            # Find matching commits in self.commits and update their push status AND merged status
             commit_shas = {c.sha: c for c in commits}
             updated_count = 0
             pushed_count_in_self = 0
+            merged_count_in_self = 0
             for commit in self.commits:
                 if commit.sha in commit_shas:
-                    commit.pushed = commit_shas[commit.sha].pushed
+                    updated_commit = commit_shas[commit.sha]
+                    commit.pushed = updated_commit.pushed
+                    commit.merged = updated_commit.merged  # CRITICAL: Also update merged status
                     updated_count += 1
                     if commit.pushed:
                         pushed_count_in_self += 1
+                    if commit.merged:
+                        merged_count_in_self += 1
             
-            _log_timing_message(f"[DEBUG] _update_commits_push_status_ui: Updated {updated_count}/{len(self.commits)} commits in self.commits, {pushed_count_in_self} marked as pushed")
+            _log_timing_message(f"[DEBUG] _update_commits_push_status_ui: Updated {updated_count}/{len(self.commits)} commits in self.commits, {pushed_count_in_self} marked as pushed, {merged_count_in_self} marked as merged")
             
             # Update the commits pane display in place (no clearing)
+            # CRITICAL: Also update _commit_info_map so update_push_status_in_place can access merged status
+            if hasattr(self.commits_pane, '_commit_info_map'):
+                for commit in commits:
+                    normalized_sha = _normalize_commit_sha(commit.sha)
+                    # Update the commit info in the map with both pushed and merged status
+                    if normalized_sha in self.commits_pane._commit_info_map:
+                        self.commits_pane._commit_info_map[normalized_sha].pushed = commit.pushed
+                        self.commits_pane._commit_info_map[normalized_sha].merged = commit.merged
+            
             self.commits_pane.update_push_status_in_place(commits)
 
+    def _load_more_tags(self) -> None:
+        """Load more tags for virtual scrolling."""
+        if not hasattr(self, 'tags') or not self.tags:
+            return
+        
+        if hasattr(self.tags_pane, '_rendered_count') and hasattr(self.tags_pane, '_total_tags_count'):
+            rendered = self.tags_pane._rendered_count
+            total = self.tags_pane._total_tags_count
+            
+            if rendered >= total:
+                return  # All tags already rendered
+            
+            # Load next batch (200 tags at a time)
+            batch_size = 200
+            start_idx = rendered
+            end_idx = min(start_idx + batch_size, total)
+            
+            if start_idx < len(self.tags):
+                next_batch = self.tags[start_idx:end_idx]
+                if next_batch:
+                    self.tags_pane.append_tags(next_batch)
+                    _log_timing_message(f"[TIMING] [SCROLL] Tags pane: Loaded batch {start_idx}-{end_idx} of {total}")
+    
     def load_more_commits(self) -> None:
         """Load more commits for the current branch (matching lazygit behavior)."""
         import subprocess
         
+        _log_timing_message(f"[DEBUG] load_more_commits CALLED: loaded={self.loaded_commits}, total={self.total_commits}, branch={self.active_branch}")
+        
         # If searching, don't load more - we're filtering existing commits
         if self._search_query:
+            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (search active)")
             return
         if not self.active_branch:
+            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (no active branch)")
             return
         if self.loaded_commits >= self.total_commits:
+            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (all commits loaded: {self.loaded_commits} >= {self.total_commits})")
             return
         
         # Get more commits for the current branch (matching lazygit format)
@@ -5038,6 +5285,7 @@ class PygitzenApp(App):
                 # Start background thread to update push status for this batch
                 def update_push_status_background_batch():
                     """Update push status for commits in background with cache."""
+                    _log_timing_message(f"[DEBUG] update_push_status_background_batch START: Processing {len(next_batch)} commits for branch {ref_spec}")
                     try:
                         # Resolve HEAD to branch name if needed
                         actual_ref = ref_spec
@@ -5189,21 +5437,37 @@ class PygitzenApp(App):
                                 _log_timing_message(f"[TIMING] Error getting unpushed commits for {actual_ref} (load_more): {type(e).__name__}: {e} in {rev_list_elapsed:.4f}s")
                         
                         # Get merged commits (those on main/master branches)
+                        # CRITICAL: Check cache first to avoid re-fetching for every batch
                         merged_commits = set()
-                        if main_branches:
+                        merged_cache_key = f"{actual_ref}_merged"
+                        if merged_cache_key in self._remote_commits_cache:
+                            merged_commits = self._remote_commits_cache[merged_cache_key]
+                            _log_timing_message(f"[CACHE] HIT merged_commits_cache for {actual_ref}: {len(merged_commits)} merged commits")
+                        elif main_branches:
+                            # Cache MISS - fetch merged commits from main/master
+                            # CRITICAL FIX: Remove --max-count limit or use very large number
+                            # For large repos (68k+ commits), we need to check ALL commits on main/master
+                            # to properly detect merged status for commits loaded via virtual scrolling
+                            merged_fetch_start = time.perf_counter()
                             for main_branch in main_branches:
-                                merged_cmd = ["git", "rev-list", main_branch, "--max-count=1000"]
+                                # Use --max-count with a very large number (or remove it entirely)
+                                # For haiku repo with 68k commits, we need at least that many
+                                merged_cmd = ["git", "rev-list", main_branch, "--max-count=100000"]
                                 merged_result = subprocess.run(
                                     merged_cmd,
                                     capture_output=True,
                                     text=True,
-                                    timeout=5,
+                                    timeout=30,  # Increased timeout for large repos
                                     cwd=repo_path_str
                                 )
                                 if merged_result.returncode == 0:
                                     for sha in merged_result.stdout.strip().split("\n"):
                                         if sha.strip():
                                             merged_commits.add(sha.strip())
+                            merged_fetch_elapsed = time.perf_counter() - merged_fetch_start
+                            # Cache the result for future batches
+                            self._remote_commits_cache[merged_cache_key] = merged_commits
+                            _log_timing_message(f"[CACHE] MISS merged_commits_cache for {actual_ref}: fetched {len(merged_commits)} merged commits in {merged_fetch_elapsed:.4f}s")
                         
                         # Update status using three-tier lazygit logic:
                         # 1. StatusMerged (green ✓): Commit exists on main/master
@@ -5237,6 +5501,10 @@ class PygitzenApp(App):
                         
                         _log_timing_message(f"[DEBUG] Three-tier status (load_more, lazygit approach): {merged_count} merged (✓ green), {pushed_count} pushed (↑ yellow), {unpushed_count} unpushed (- red)")
                         
+                        # DEBUG: Log first few commits to verify status
+                        for i, commit in enumerate(next_batch[:5]):
+                            _log_timing_message(f"[DEBUG] load_more commit {i}: {commit.sha[:8]} merged={commit.merged}, pushed={commit.pushed}")
+                        
                         # Update UI in main thread
                         self.call_from_thread(self._update_commits_push_status_ui, next_batch)
                         _log_timing_message(f"[TIMING] update_push_status_background_batch TOTAL: Updated push status for {len(next_batch)} commits")
@@ -5259,12 +5527,16 @@ class PygitzenApp(App):
                     pass
         
         if not next_batch:
+            _log_timing_message(f"[DEBUG] load_more_commits: No commits returned from git log")
             return
+        
+        _log_timing_message(f"[DEBUG] load_more_commits: Got {len(next_batch)} commits, appending to UI")
         self.all_commits.extend(next_batch)
         self.commits.extend(next_batch)
         self.loaded_commits = len(self.commits)
         self.commits_pane.append_commits(next_batch)
         self._update_commits_title()
+        _log_timing_message(f"[DEBUG] load_more_commits: Completed, total loaded={self.loaded_commits}")
 
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
@@ -5330,6 +5602,155 @@ class PygitzenApp(App):
                 from rich.text import Text
                 error_text = Text(f"Error loading stash diff: {type(e).__name__}: {e}", style="red")
                 self.patch_pane.update(error_text)
+    
+    def show_tag_info(self, tag: TagInfo) -> None:
+        """Show tag info and git log graph (matching Lazygit behavior)."""
+        import threading
+        import subprocess
+        from pathlib import Path
+        
+        tag_start = time.perf_counter()
+        _log_timing_message(f"[TIMING] show_tag_info START (tag: {tag.name})")
+        
+        def load_tag_info_in_thread():
+            """Load tag info in background thread (non-blocking)."""
+            try:
+                repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+                
+                # Build tag info header (matching Lazygit)
+                tag_info_lines = []
+                
+                if tag.is_annotated:
+                    # Annotated tag - get full annotation info
+                    tag_info_lines.append(f"Annotated tag: {tag.name}")
+                    
+                    # Get tagger info and message
+                    try:
+                        tagger_cmd = ['git', 'for-each-ref', f'refs/tags/{tag.name}', 
+                                      '--format=Tagger:     %(taggername) <%(taggeremail)>\nTaggerDate: %(taggerdate:iso)\n\n%(contents:subject)']
+                        tagger_result = subprocess.run(
+                            tagger_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=3,
+                            cwd=repo_path_str
+                        )
+                        if tagger_result.returncode == 0:
+                            tagger_info = tagger_result.stdout.strip()
+                            # Filter out PGP signature (like Lazygit)
+                            lines = tagger_info.split('\n')
+                            filtered_lines = []
+                            in_pgp_signature = False
+                            for line in lines:
+                                if line == "-----END PGP SIGNATURE-----":
+                                    in_pgp_signature = False
+                                    continue
+                                if line == "-----BEGIN PGP SIGNATURE-----":
+                                    in_pgp_signature = True
+                                    continue
+                                if not in_pgp_signature:
+                                    filtered_lines.append(line)
+                            tagger_info = '\n'.join(filtered_lines)
+                            tag_info_lines.append(tagger_info)
+                    except Exception:
+                        # If we can't get tagger info, just show the message
+                        if tag.message:
+                            tag_info_lines.append(tag.message)
+                else:
+                    # Lightweight tag
+                    tag_info_lines.append(f"Lightweight tag: {tag.name}")
+                
+                # Add separator
+                tag_info_lines.append("\n---\n")
+                
+                # Build git log command (matching Lazygit)
+                # CRITICAL: Limit commits to prevent hangs on large repos like haiku
+                # Use --max-count to limit output and prevent UI blocking
+                tag_ref = f"refs/tags/{tag.name}"
+                log_cmd = [
+                    'git', 'log',
+                    '--graph',
+                    '--color=always',
+                    '--abbrev-commit',
+                    '--decorate',
+                    '--date=relative',
+                    '--pretty=medium',
+                    '--max-count=100',  # Limit to 100 commits to prevent hangs on large repos
+                    tag_ref,
+                    '--'
+                ]
+                
+                # Get git log output (use bytes first, then decode with error handling for non-UTF-8 characters)
+                # Increased timeout for large repos (haiku can take longer)
+                log_result = subprocess.run(
+                    log_cmd,
+                    capture_output=True,
+                    text=False,  # Get bytes first to handle non-UTF-8 characters
+                    timeout=30,  # Increased timeout for large repos (was 10s)
+                    cwd=repo_path_str
+                )
+                
+                # Decode with error handling for non-UTF-8 characters (like haiku repo)
+                if log_result.returncode == 0:
+                    try:
+                        git_log_output = log_result.stdout.decode('utf-8', errors='replace')
+                    except Exception:
+                        # Fallback if decode fails
+                        try:
+                            git_log_output = log_result.stdout.decode('utf-8', errors='ignore')
+                        except Exception:
+                            git_log_output = "Error: Could not decode git log output"
+                else:
+                    try:
+                        error_msg = log_result.stderr.decode('utf-8', errors='replace')
+                    except Exception:
+                        try:
+                            error_msg = log_result.stderr.decode('utf-8', errors='ignore')
+                        except Exception:
+                            error_msg = "Unknown error"
+                    git_log_output = f"Error loading git log: {error_msg}"
+                
+                # Parse ANSI colors from git log output
+                from pygitzen.git_graph import parse_ansi_to_rich_text
+                from rich.text import Text
+                
+                # Create Text object with tag info and git log
+                display_text = Text()
+                display_text.append('\n'.join(tag_info_lines), style="white")
+                display_text.append('\n\n', style="white")
+                
+                # Add git log with ANSI colors preserved
+                if git_log_output:
+                    for line in git_log_output.split('\n'):
+                        if line:
+                            try:
+                                rich_line = parse_ansi_to_rich_text(line)
+                                display_text.append(rich_line)
+                                display_text.append('\n')
+                            except Exception:
+                                # If parsing fails, strip ANSI and add as plain text
+                                from pygitzen.git_graph import strip_ansi_codes
+                                plain_line = strip_ansi_codes(line)
+                                display_text.append(plain_line + '\n', style="white")
+                
+                tag_elapsed = time.perf_counter() - tag_start
+                _log_timing_message(f"[TIMING] show_tag_info TOTAL: {tag_elapsed:.4f}s")
+                
+                # Update UI from main thread (use queue which is thread-safe)
+                self._ui_update_queue.put(lambda: self.log_pane.update(display_text))
+            except Exception as e:
+                # If tag info fetching fails, show error
+                import traceback
+                error_msg = f"Error loading tag info: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+                _log_timing_message(f"[ERROR] show_tag_info: {error_msg}")
+                from rich.text import Text
+                error_text = Text(f"Error loading tag info: {type(e).__name__}: {e}", style="red")
+                # Update UI from main thread (use queue which is thread-safe)
+                self._ui_update_queue.put(lambda: self.log_pane.update(error_text))
+        
+        # Run in background thread to avoid blocking UI
+        thread = threading.Thread(target=load_tag_info_in_thread, daemon=True)
+        thread.start()
 
     async def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view is self.branches_pane:
@@ -5456,6 +5877,15 @@ class PygitzenApp(App):
                 self.patch_pane.styles.display = "block"
                 self.show_stash_diff(event.index)
             # If "No stashes" is clicked, do nothing (don't show commit diff)
+        elif event.list_view is self.tags_pane:
+            # Show tag info and git log when tag is selected
+            if self.tags and 0 <= event.index < len(self.tags):
+                selected_tag = self.tags[event.index]
+                # Switch to log view when tag is selected (like Lazygit)
+                self._view_mode = "log"
+                self.patch_pane.styles.display = "none"
+                self.log_pane.styles.display = "block"
+                self.show_tag_info(selected_tag)
 
     def action_load_more(self) -> None:
         """Load more commits - works for both commits pane and log view."""
@@ -5489,10 +5919,78 @@ class PygitzenApp(App):
                 if max_scroll_y > 0 and self.total_commits > 0:
                     scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
                     
+                    # DEBUG: Log scroll events (but limit frequency to avoid spam)
+                    if not hasattr(self, '_last_scroll_log_time'):
+                        self._last_scroll_log_time = 0
+                    import time
+                    current_time = time.time()
+                    if current_time - self._last_scroll_log_time > 0.5:  # Log at most every 0.5 seconds
+                        _log_timing_message(f"[DEBUG] [SCROLL] Commits pane: scroll_y={scroll_y}, max_scroll_y={max_scroll_y}, scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits}")
+                        self._last_scroll_log_time = current_time
+                    
                     # If scrolled near bottom (85%), auto-load more commits
                     if scroll_percent >= 0.85 and self.loaded_commits < self.total_commits:
                         _log_timing_message(f"[TIMING] [SCROLL] Commits pane: Loading more commits (scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits})")
                         self.load_more_commits()
+            except Exception as e:
+                _log_timing_message(f"[DEBUG] [SCROLL] Exception in scroll handler: {type(e).__name__}: {e}")
+                pass  # Silently fail if scroll detection fails
+        
+        # Handle scroll for tags pane - virtual scrolling
+        if widget_id == "tags-pane" or (hasattr(widget, 'id') and widget.id == "tags-pane"):
+            try:
+                # Get scroll position
+                scroll_y = 0
+                max_scroll_y = 0
+                
+                if hasattr(widget, 'scroll_y'):
+                    scroll_y = widget.scroll_y
+                if hasattr(widget, 'max_scroll_y'):
+                    max_scroll_y = widget.max_scroll_y
+                elif hasattr(widget, 'virtual_size'):
+                    max_scroll_y = widget.virtual_size.height if hasattr(widget.virtual_size, 'height') else 0
+                
+                # Check if we need to load more tags
+                if hasattr(self.tags_pane, '_rendered_count') and hasattr(self.tags_pane, '_total_tags_count'):
+                    rendered = self.tags_pane._rendered_count
+                    total = self.tags_pane._total_tags_count
+                    
+                    if max_scroll_y > 0 and total > 0:
+                        scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                        
+                        # If scrolled near bottom (85%), auto-load more tags
+                        if scroll_percent >= 0.85 and rendered < total:
+                            _log_timing_message(f"[TIMING] [SCROLL] Tags pane: Loading more tags (scroll_percent={scroll_percent:.2f}, rendered={rendered}, total={total})")
+                            self._load_more_tags()
+            except Exception:
+                pass  # Silently fail if scroll detection fails
+        
+        # Handle scroll for tags pane - virtual scrolling
+        if widget_id == "tags-pane" or (hasattr(widget, 'id') and widget.id == "tags-pane"):
+            try:
+                # Get scroll position
+                scroll_y = 0
+                max_scroll_y = 0
+                
+                if hasattr(widget, 'scroll_y'):
+                    scroll_y = widget.scroll_y
+                if hasattr(widget, 'max_scroll_y'):
+                    max_scroll_y = widget.max_scroll_y
+                elif hasattr(widget, 'virtual_size'):
+                    max_scroll_y = widget.virtual_size.height if hasattr(widget.virtual_size, 'height') else 0
+                
+                # Check if we need to load more tags
+                if hasattr(self.tags_pane, '_rendered_count') and hasattr(self.tags_pane, '_total_tags_count'):
+                    rendered = self.tags_pane._rendered_count
+                    total = self.tags_pane._total_tags_count
+                    
+                    if max_scroll_y > 0 and total > 0:
+                        scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                        
+                        # If scrolled near bottom (85%), auto-load more tags
+                        if scroll_percent >= 0.85 and rendered < total:
+                            _log_timing_message(f"[TIMING] [SCROLL] Tags pane: Loading more tags (scroll_percent={scroll_percent:.2f}, rendered={rendered}, total={total})")
+                            self._load_more_tags()
             except Exception:
                 pass  # Silently fail if scroll detection fails
         
