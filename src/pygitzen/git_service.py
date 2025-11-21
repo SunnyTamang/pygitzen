@@ -544,11 +544,6 @@ class GitService:
         except Exception as e:
             # On any error, fallback to dulwich
             import sys
-            try:
-                with open("debug_list_commits_native.log", "a", encoding="utf-8") as f:
-                    f.write(f"Error in list_commits_native for {branch}: {type(e).__name__}: {e}\n")
-            except:
-                pass
             return self.list_commits(branch, max_count, skip, show_full_history)
     
     def list_commits(self, branch: str, max_count: int = 200, skip: int = 0, show_full_history: bool = False) -> List[CommitInfo]:
@@ -704,12 +699,7 @@ class GitService:
             # Timeout - fallback to dulwich
             pass
         except Exception as e:
-            # Log error for debugging but continue to fallback
-            try:
-                with open("debug_count_commits_native.log", "a", encoding="utf-8") as f:
-                    f.write(f"Error in count_commits_native for {branch}: {type(e).__name__}: {e}\n")
-            except:
-                pass
+            # Continue to fallback
             # Fallback to dulwich if git command fails
             pass
         
@@ -802,34 +792,18 @@ class GitService:
                 # If no diff separator found, return everything (might be root commit or special case)
                 return output
             else:
-                # git show failed, log the error
+                # git show failed
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                try:
-                    with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                        f.write(f"git show failed for {sha_hex}: returncode={result.returncode}, stderr={error_msg}\n")
-                except:
-                    pass
                 # Return a helpful error message instead of trying dulwich fallback
                 return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
         except subprocess.TimeoutExpired:
-            try:
-                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                    f.write(f"Timeout in git show for {sha_hex}\n")
-            except:
-                pass
             return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
         except Exception as e:
-            # Log error but continue to dulwich fallback
-            try:
-                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                    f.write(f"Error in git-native get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
-            except:
-                pass
-        
-        # Fallback to dulwich is disabled because it causes AssertionError with hex_to_sha
-        # The error has already been returned above if git show failed
-        # This code should never be reached, but kept for safety
-        return f"Error: Could not get diff for commit {sha_hex[:8]}. Both git show and dulwich fallback failed.\n"
+            # Continue to dulwich fallback
+            # Fallback to dulwich is disabled because it causes AssertionError with hex_to_sha
+            # The error has already been returned above if git show failed
+            # This code should never be reached, but kept for safety
+            return f"Error: Could not get diff for commit {sha_hex[:8]}. Both git show and dulwich fallback failed.\n"
         
         # OLD DULWICH FALLBACK (DISABLED - causes AssertionError)
         # try:
@@ -869,7 +843,6 @@ class GitService:
         # except Exception as e:
         #     # If dulwich also fails, return error message
         #     try:
-        #         with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
         #             f.write(f"Error in dulwich fallback get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
         #             import traceback
         #             f.write(f"Traceback:\n{traceback.format_exc()}\n")
@@ -1174,13 +1147,6 @@ class GitService:
                 timeout=10,
                 cwd=str(self.repo_path)
             )
-            # Debug: Log if git command fails
-            if result.returncode != 0:
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[ERROR] git status failed: returncode={result.returncode}, stderr={result.stderr}\n")
-                except:
-                    pass
             if result.returncode == 0:
                 # Get list of actually staged files to verify (fast check)
                 staged_files_set = set()
@@ -1199,17 +1165,6 @@ class GitService:
                 
                 files = []
                 output_lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
-                # Debug: Log raw output
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[DEBUG] Native git status output ({len(output_lines)} lines):\n")
-                        for line in output_lines[:10]:  # Log first 10 lines
-                            f.write(f"  {line}\n")
-                        f.write(f"[DEBUG] Actually staged files (from git diff --cached): {len(staged_files_set)} files\n")
-                        for staged_file in list(staged_files_set)[:5]:
-                            f.write(f"  {staged_file}\n")
-                except:
-                    pass
                 for line in output_lines:
                     if not line.strip():
                         continue
@@ -1311,14 +1266,6 @@ class GitService:
                 
                 # Sort by path
                 files.sort(key=lambda f: f.path)
-                # Debug: Log parsed files to verify
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[DEBUG] Native git status parsed {len(files)} files\n")
-                        for file_status in files[:10]:  # Log first 10
-                            f.write(f"  {file_status.path}: status={file_status.status}, staged={file_status.staged}, unstaged={file_status.unstaged}\n")
-                except:
-                    pass
                 
                 # Filter to only include files with changes (same logic as Cython version)
                 files_with_changes = []
@@ -1340,18 +1287,9 @@ class GitService:
                 return files_with_changes
         except Exception as e:
             # Fallback to dulwich if git command fails
-            # Log the error for debugging
-            try:
-                import traceback
-                with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                    f.write(f"[ERROR] Native git status failed: {type(e).__name__}: {e}\n")
-                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
-            except:
-                pass
-        
-        # Fallback: Return empty list if git command fails (don't use slow dulwich)
-        # This ensures consistent behavior and avoids performance issues
-        return []
+            # Fallback: Return empty list if git command fails (don't use slow dulwich)
+            # This ensures consistent behavior and avoids performance issues
+            return []
 
     def list_stashes(self) -> List[StashInfo]:
         """Get list of stashes using git stash list command.

@@ -143,13 +143,6 @@ cdef class GitServiceCython:
                         # If not hex, try to get hex representation
                         if isinstance(sha, (int, float)):
                             commit_sha = format(int(sha), '040x')
-                        else:
-                            # Log error
-                            try:
-                                with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
-                                    f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
-                            except:
-                                pass
                 
                 # Stop at merge-base (don't include merge-base itself, only commits after it)
                 if merge_base_bytes and sha == merge_base_bytes:
@@ -212,13 +205,6 @@ cdef class GitServiceCython:
                     # If not hex, try to get hex representation
                     if isinstance(sha, (int, float)):
                         commit_sha = format(int(sha), '040x')
-                    else:
-                        # Log error
-                        try:
-                            with open("debug_cython_sha.log", "a", encoding="utf-8") as f:
-                                f.write(f"WARNING: Unexpected sha type: {type(sha)}, value: {repr(sha)}\n")
-                        except:
-                            pass
             
             # If not main/master branch, exclude commits that exist in base branch
             if branch not in ["main", "master"] and commit_sha in base_branch_commits:
@@ -299,13 +285,8 @@ cdef class GitServiceCython:
                                 pass
                     break
         except Exception as e:
-            # Log error for debugging but continue to fallback
+            # Continue to fallback
             import sys
-            try:
-                with open("debug_count_commits.log", "a") as f:
-                    f.write(f"Error in native git count_commits for {branch}: {e}\n")
-            except:
-                pass
             # Fallback to Python iteration if Git command fails
             pass
         
@@ -959,28 +940,13 @@ cdef class GitServiceCython:
                 # If no diff separator found, return everything (might be root commit or special case)
                 return output
             else:
-                # git show failed, log the error
+                # git show failed
                 error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-                try:
-                    with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                        f.write(f"[CYTHON] git show failed for {sha_hex}: returncode={result.returncode}, stderr={error_msg}\n")
-                except:
-                    pass
                 return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
         except subprocess.TimeoutExpired:
-            try:
-                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                    f.write(f"[CYTHON] Timeout in git show for {sha_hex}\n")
-            except:
-                pass
             return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
         except Exception as e:
-            # Log error
-            try:
-                with open("debug_get_commit_diff.log", "a", encoding="utf-8") as f:
-                    f.write(f"[CYTHON] Error in git-native get_commit_diff for {sha_hex}: {type(e).__name__}: {e}\n")
-            except:
-                pass
+            pass
             return f"Error: Could not get diff for commit {sha_hex[:8]}. Exception: {type(e).__name__}\n"
     
     def _find_in_tree(self, tree, path_parts):
@@ -1222,13 +1188,6 @@ cdef class GitServiceCython:
                 timeout=10,
                 cwd=str(self.repo_path)
             )
-            # Debug: Log if git command fails
-            if result.returncode != 0:
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[ERROR] git status failed: returncode={result.returncode}, stderr={result.stderr}\n")
-                except:
-                    pass
             if result.returncode == 0:
                 # Get list of actually staged files to verify (fast check)
                 staged_files_set = set()
@@ -1247,17 +1206,6 @@ cdef class GitServiceCython:
                 
                 files = []
                 output_lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
-                # Debug: Log raw output
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[DEBUG] Native git status output ({len(output_lines)} lines):\n")
-                        for line in output_lines[:10]:  # Log first 10 lines
-                            f.write(f"  {line}\n")
-                        f.write(f"[DEBUG] Actually staged files (from git diff --cached): {len(staged_files_set)} files\n")
-                        for staged_file in list(staged_files_set)[:5]:
-                            f.write(f"  {staged_file}\n")
-                except:
-                    pass
                 for line in output_lines:
                     if not line.strip():
                         continue
@@ -1359,238 +1307,221 @@ cdef class GitServiceCython:
                 
                 # Sort by path
                 files.sort(key=lambda f: f.path)
-                # Debug: Log parsed files to verify
-                try:
-                    with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                        f.write(f"[DEBUG] Native git status parsed {len(files)} files\n")
-                        for file_status in files[:10]:  # Log first 10
-                            f.write(f"  {file_status.path}: status={file_status.status}, staged={file_status.staged}, unstaged={file_status.unstaged}\n")
-                except:
-                    pass
                 return files
         except Exception as e:
             # Fallback to dulwich if git command fails
-            # Log the error for debugging
-            try:
-                import traceback
-                with open("debug_git_status.log", "a", encoding="utf-8") as f:
-                    f.write(f"[ERROR] Native git status failed: {type(e).__name__}: {e}\n")
-                    f.write(f"Traceback:\n{traceback.format_exc()}\n")
-            except:
-                pass
-        
-        # Fallback: Original dulwich-based implementation
-        from dulwich.index import Index
-        from dulwich.objects import Blob
-        
-        files = []
-        
-        # Read the index (staged files)
-        try:
-            index = Index(str(self.repo_path / ".git" / "index"))
-            index_entries = {path.decode(errors="replace"): entry for path, entry in index.items()}
-        except Exception:
-            index_entries = {}
-        
-        def calculate_blob_sha(file_data: bytes) -> bytes:
-            """Calculate Git blob SHA using dulwich's method."""
-            blob = Blob()
-            blob.data = file_data
-            return blob.id
-        
-        # Get HEAD commit and tree
-        try:
-            from dulwich import refs as dulwich_refs
-            # Use dulwich's read_ref which safely handles symbolic refs
-            try:
-                head_sha = dulwich_refs.read_ref(self.repo, b"HEAD")
-                if head_sha and len(head_sha) == 20:
-                    head_commit = self.repo[head_sha]
-                    head_tree = self.repo[head_commit.tree]
-                else:
-                    head_tree = None
-            except (KeyError, AttributeError, TypeError, ValueError):
-                head_tree = None
-        except Exception:
-            head_tree = None
-        
-        # Build file-to-SHA map from HEAD tree in ONE pass (no caching - just efficient)
-        head_file_map = {}
-        if head_tree:
-            head_file_map = self._build_head_file_map(head_tree)
-        
-        # Compile .gitignore patterns once per call (no caching)
-        compiled_gitignore = self._compile_gitignore_patterns()
-        
-        # Track files we've processed
-        processed_files = set()
-        
-        # Check files in index (staged) - optimized with mtime check
-        for path, entry in index_entries.items():
-            processed_files.add(path)
-            full_path = self.repo_path / path
+            # Fallback: Original dulwich-based implementation
+            from dulwich.index import Index
+            from dulwich.objects import Blob
             
-            if not full_path.exists():
-                # File deleted
-                files.append(FileStatus(path=path, status="deleted", staged=True, unstaged=False))
-                continue
+            files = []
             
-            # Calculate working directory file SHA (always needed to check unstaged changes)
+            # Read the index (staged files)
             try:
-                with open(full_path, "rb") as f:
-                    file_data = f.read()
-                    file_sha = calculate_blob_sha(file_data)
+                index = Index(str(self.repo_path / ".git" / "index"))
+                index_entries = {path.decode(errors="replace"): entry for path, entry in index.items()}
             except Exception:
-                continue
+                index_entries = {}
             
-            index_sha = entry.sha
-            head_sha = head_file_map.get(path)
+            def calculate_blob_sha(file_data: bytes) -> bytes:
+                """Calculate Git blob SHA using dulwich's method."""
+                blob = Blob()
+                blob.data = file_data
+                return blob.id
             
-            # Check if staged (index differs from HEAD or new file)
-            # Only add as staged if index differs from HEAD (has staged changes)
-            if head_sha is not None:
-                if head_sha != index_sha:
-                    # Staged changes (index differs from HEAD)
-                    files.append(FileStatus(path=path, status="modified", staged=True, unstaged=False))
-                # else: index matches HEAD, no staged changes, but might have unstaged changes (checked in walk_directory)
-            else:
-                # New file (not in HEAD) - always staged
-                files.append(FileStatus(path=path, status="staged", staged=True, unstaged=False))
-        
-        # Check working directory for untracked and unstaged modified files
-        # Optimized directory walking with early skipping
-        def walk_directory(path: Path, base: Path, current_path: str = ""):
-            """Recursively walk directory with early skipping of ignored directories."""
-            # Skip .git directory itself
-            if path.name == ".git" and path.is_dir():
-                return
-            
-            # Check if this directory should be skipped (early exit)
-            if current_path:
-                if self._is_directory_ignored(current_path, compiled_gitignore):
-                    return  # Skip entire directory tree
-            
+            # Get HEAD commit and tree
             try:
-                for item in path.iterdir():
-                    # Skip hidden files/directories early
-                    if item.name.startswith("."):
-                        continue
-                    
-                    if item.is_dir():
-                        # Build path for directory
-                        dir_path = f"{current_path}/{item.name}" if current_path else item.name
-                        # Recursively walk (will check if directory is ignored)
-                        walk_directory(item, base, dir_path)
-                    elif item.is_file():
-                        rel_path = str(item.relative_to(base)).replace("\\", "/")
+                from dulwich import refs as dulwich_refs
+                # Use dulwich's read_ref which safely handles symbolic refs
+                try:
+                    head_sha = dulwich_refs.read_ref(self.repo, b"HEAD")
+                    if head_sha and len(head_sha) == 20:
+                        head_commit = self.repo[head_sha]
+                        head_tree = self.repo[head_commit.tree]
+                    else:
+                        head_tree = None
+                except (KeyError, AttributeError, TypeError, ValueError):
+                    head_tree = None
+            except Exception:
+                head_tree = None
+            
+            # Build file-to-SHA map from HEAD tree in ONE pass (no caching - just efficient)
+            head_file_map = {}
+            if head_tree:
+                head_file_map = self._build_head_file_map(head_tree)
+            
+            # Compile .gitignore patterns once per call (no caching)
+            compiled_gitignore = self._compile_gitignore_patterns()
+            
+            # Track files we've processed
+            processed_files = set()
+            
+            # Check files in index (staged) - optimized with mtime check
+            for path, entry in index_entries.items():
+                processed_files.add(path)
+                full_path = self.repo_path / path
+                
+                if not full_path.exists():
+                    # File deleted
+                    files.append(FileStatus(path=path, status="deleted", staged=True, unstaged=False))
+                    continue
+                
+                # Calculate working directory file SHA (always needed to check unstaged changes)
+                try:
+                    with open(full_path, "rb") as f:
+                        file_data = f.read()
+                        file_sha = calculate_blob_sha(file_data)
+                except Exception:
+                    continue
+                
+                index_sha = entry.sha
+                head_sha = head_file_map.get(path)
+                
+                # Check if staged (index differs from HEAD or new file)
+                # Only add as staged if index differs from HEAD (has staged changes)
+                if head_sha is not None:
+                    if head_sha != index_sha:
+                        # Staged changes (index differs from HEAD)
+                        files.append(FileStatus(path=path, status="modified", staged=True, unstaged=False))
+                    # else: index matches HEAD, no staged changes, but might have unstaged changes (checked in walk_directory)
+                else:
+                    # New file (not in HEAD) - always staged
+                    files.append(FileStatus(path=path, status="staged", staged=True, unstaged=False))
+            
+            # Check working directory for untracked and unstaged modified files
+            # Optimized directory walking with early skipping
+            def walk_directory(path: Path, base: Path, current_path: str = ""):
+                """Recursively walk directory with early skipping of ignored directories."""
+                # Skip .git directory itself
+                if path.name == ".git" and path.is_dir():
+                    return
+                
+                # Check if this directory should be skipped (early exit)
+                if current_path:
+                    if self._is_directory_ignored(current_path, compiled_gitignore):
+                        return  # Skip entire directory tree
+                
+                try:
+                    for item in path.iterdir():
+                        # Skip hidden files/directories early
+                        if item.name.startswith("."):
+                            continue
                         
-                        if rel_path not in processed_files:
-                            # File not in index, check if it's tracked in HEAD or untracked
-                            head_sha = head_file_map.get(rel_path)
+                        if item.is_dir():
+                            # Build path for directory
+                            dir_path = f"{current_path}/{item.name}" if current_path else item.name
+                            # Recursively walk (will check if directory is ignored)
+                            walk_directory(item, base, dir_path)
+                        elif item.is_file():
+                            rel_path = str(item.relative_to(base)).replace("\\", "/")
                             
-                            if head_sha is not None:
-                                # File is tracked in HEAD but not in index (modified, not staged)
-                                # Calculate working directory file SHA to verify changes
-                                try:
-                                    with open(item, "rb") as f:
-                                        file_data = f.read()
-                                        file_sha = calculate_blob_sha(file_data)
-                                    
-                                    if head_sha != file_sha:
-                                        # Modified from HEAD, not staged
-                                        files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
-                                except Exception:
-                                    pass
+                            if rel_path not in processed_files:
+                                # File not in index, check if it's tracked in HEAD or untracked
+                                head_sha = head_file_map.get(rel_path)
+                                
+                                if head_sha is not None:
+                                    # File is tracked in HEAD but not in index (modified, not staged)
+                                    # Calculate working directory file SHA to verify changes
+                                    try:
+                                        with open(item, "rb") as f:
+                                            file_data = f.read()
+                                            file_sha = calculate_blob_sha(file_data)
+                                        
+                                        if head_sha != file_sha:
+                                            # Modified from HEAD, not staged
+                                            files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
+                                    except Exception:
+                                        pass
+                                else:
+                                    # Not in HEAD, so it's untracked
+                                    # Only add if not ignored by .gitignore
+                                    if not self._is_path_ignored(rel_path, compiled_gitignore):
+                                        # Untracked files should have unstaged=True to show in Changes pane
+                                        files.append(FileStatus(path=rel_path, status="untracked", staged=False, unstaged=True))
                             else:
-                                # Not in HEAD, so it's untracked
-                                # Only add if not ignored by .gitignore
-                                if not self._is_path_ignored(rel_path, compiled_gitignore):
-                                    # Untracked files should have unstaged=True to show in Changes pane
-                                    files.append(FileStatus(path=rel_path, status="untracked", staged=False, unstaged=True))
-                        else:
-                            # File is in index, check if modified in working directory (unstaged changes)
-                            if rel_path in index_entries:
-                                entry = index_entries[rel_path]
-                                try:
-                                    # Always calculate SHA to check for unstaged changes
-                                    # (working directory might differ from index even if mtime unchanged)
-                                    with open(item, "rb") as f:
-                                        file_data = f.read()
-                                        file_sha = calculate_blob_sha(file_data)
-                                    
-                                    # Get index SHA (staged version)
-                                    index_sha = entry.sha
-                                    
-                                    # Get HEAD SHA
-                                    head_sha = head_file_map.get(rel_path)
-                                    
-                                    # If working directory differs from index, there are unstaged modifications
-                                    # But only add if the file actually differs from HEAD (has actual changes)
-                                    # If working == HEAD exactly, don't show it (file is up to date)
-                                    if index_sha != file_sha:
-                                        # Only add if file differs from HEAD (has actual changes)
-                                        # Exclude files where working directory matches HEAD exactly (up to date)
-                                        if head_sha is None:
-                                            # Not in HEAD, so it's a change
-                                            if not any(f.path == rel_path and not f.staged for f in files):
-                                                files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
-                                        elif file_sha != head_sha:
-                                            # File differs from HEAD, so it has unstaged changes
-                                            if not any(f.path == rel_path and not f.staged for f in files):
-                                                files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
-                                        # else: file_sha == head_sha, meaning working directory matches HEAD exactly
-                                        # Even though working != index, if working == HEAD, the file is up to date, don't show
-                                except Exception:
-                                    pass
-            except PermissionError:
-                pass
-        
-        walk_directory(self.repo_path, self.repo_path)
-        
-        # Combine entries for same file path to show both staged and unstaged status
-        file_dict: dict[str, FileStatus] = {}
-        for file_status in files:
-            if file_status.path in file_dict:
-                # File already exists - merge statuses
-                existing = file_dict[file_status.path]
-                # If one is staged and one is unstaged, combine them
-                if existing.staged != file_status.staged:
-                    # File has both staged and unstaged changes
-                    file_dict[file_status.path] = FileStatus(
-                        path=file_status.path,
-                        status="modified",  # Show as modified
-                        staged=True,  # Has staged changes
-                        unstaged=True  # Has unstaged changes
-                    )
-                # Otherwise keep the more specific status
-                elif file_status.status == "modified" or existing.status != "modified":
+                                # File is in index, check if modified in working directory (unstaged changes)
+                                if rel_path in index_entries:
+                                    entry = index_entries[rel_path]
+                                    try:
+                                        # Always calculate SHA to check for unstaged changes
+                                        # (working directory might differ from index even if mtime unchanged)
+                                        with open(item, "rb") as f:
+                                            file_data = f.read()
+                                            file_sha = calculate_blob_sha(file_data)
+                                        
+                                        # Get index SHA (staged version)
+                                        index_sha = entry.sha
+                                        
+                                        # Get HEAD SHA
+                                        head_sha = head_file_map.get(rel_path)
+                                        
+                                        # If working directory differs from index, there are unstaged modifications
+                                        # But only add if the file actually differs from HEAD (has actual changes)
+                                        # If working == HEAD exactly, don't show it (file is up to date)
+                                        if index_sha != file_sha:
+                                            # Only add if file differs from HEAD (has actual changes)
+                                            # Exclude files where working directory matches HEAD exactly (up to date)
+                                            if head_sha is None:
+                                                # Not in HEAD, so it's a change
+                                                if not any(f.path == rel_path and not f.staged for f in files):
+                                                    files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
+                                            elif file_sha != head_sha:
+                                                # File differs from HEAD, so it has unstaged changes
+                                                if not any(f.path == rel_path and not f.staged for f in files):
+                                                    files.append(FileStatus(path=rel_path, status="modified", staged=False, unstaged=True))
+                                            # else: file_sha == head_sha, meaning working directory matches HEAD exactly
+                                            # Even though working != index, if working == HEAD, the file is up to date, don't show
+                                    except Exception:
+                                        pass
+                except PermissionError:
+                    pass
+            
+            walk_directory(self.repo_path, self.repo_path)
+            
+            # Combine entries for same file path to show both staged and unstaged status
+            file_dict: dict[str, FileStatus] = {}
+            for file_status in files:
+                if file_status.path in file_dict:
+                    # File already exists - merge statuses
+                    existing = file_dict[file_status.path]
+                    # If one is staged and one is unstaged, combine them
+                    if existing.staged != file_status.staged:
+                        # File has both staged and unstaged changes
+                        file_dict[file_status.path] = FileStatus(
+                            path=file_status.path,
+                            status="modified",  # Show as modified
+                            staged=True,  # Has staged changes
+                            unstaged=True  # Has unstaged changes
+                        )
+                    # Otherwise keep the more specific status
+                    elif file_status.status == "modified" or existing.status != "modified":
+                        file_dict[file_status.path] = file_status
+                else:
                     file_dict[file_status.path] = file_status
-            else:
-                file_dict[file_status.path] = file_status
-        
-        # Convert back to list and filter out files that are up to date with the branch
-        files = list(file_dict.values())
-        
-        # Only return files with actual changes
-        files_with_changes = []
-        for f in files:
-            # Only include files with actual changes
-            if f.staged or f.unstaged:
-                # File has staged or unstaged changes - include it
-                files_with_changes.append(f)
-            elif f.status == "untracked":
-                # Untracked file - always include it (already checked for ignore when created, unstaged=True set at creation)
-                files_with_changes.append(f)
-            elif f.status == "deleted":
-                # Deleted file - include it
-                files_with_changes.append(f)
-            elif f.status == "staged":
-                # New file (staged) - include it
-                files_with_changes.append(f)
-        
-        files_with_changes.sort(key=lambda f: f.path)
-        
-        return files_with_changes
+            
+            # Convert back to list and filter out files that are up to date with the branch
+            files = list(file_dict.values())
+            
+            # Only return files with actual changes
+            files_with_changes = []
+            for f in files:
+                # Only include files with actual changes
+                if f.staged or f.unstaged:
+                    # File has staged or unstaged changes - include it
+                    files_with_changes.append(f)
+                elif f.status == "untracked":
+                    # Untracked file - always include it (already checked for ignore when created, unstaged=True set at creation)
+                    files_with_changes.append(f)
+                elif f.status == "deleted":
+                    # Deleted file - include it
+                    files_with_changes.append(f)
+                elif f.status == "staged":
+                    # New file (staged) - include it
+                    files_with_changes.append(f)
+            
+            files_with_changes.sort(key=lambda f: f.path)
+            
+            return files_with_changes
     
     def list_stashes(self):
         """Get list of stashes using git stash list command.

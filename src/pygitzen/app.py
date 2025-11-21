@@ -65,19 +65,21 @@ def format_recency(timestamp: int) -> str:
         return f"{years}y"
 
 # Performance timing utilities
-_TIMING_LOG_FILE = None
-_TIMING_LOG_PATH = "timing.log"
+# DISABLED: Timing logs commented out for main branch
+# Uncomment to enable timing logs for debugging/performance analysis
+# _TIMING_LOG_FILE = None
+# _TIMING_LOG_PATH = "timing.log"
 
-def _get_timing_log_file():
-    """Get or create timing log file handle."""
-    global _TIMING_LOG_FILE
-    if _TIMING_LOG_FILE is None:
-        try:
-            _TIMING_LOG_FILE = open(_TIMING_LOG_PATH, "a", encoding="utf-8")
-        except Exception:
-            # If we can't open the file, return None and timing will be skipped
-            pass
-    return _TIMING_LOG_FILE
+# def _get_timing_log_file():
+#     """Get or create timing log file handle."""
+#     global _TIMING_LOG_FILE
+#     if _TIMING_LOG_FILE is None:
+#         try:
+#             _TIMING_LOG_FILE = open(_TIMING_LOG_PATH, "a", encoding="utf-8")
+#         except Exception:
+#             # If we can't open the file, return None and timing will be skipped
+#             pass
+#     return _TIMING_LOG_FILE
 
 def _normalize_commit_sha(sha) -> str:
     """
@@ -128,25 +130,28 @@ def _normalize_commit_sha(sha) -> str:
 
 def _log_timing_message(message: str):
     """Log timing message to file (non-blocking, won't interfere with TUI)."""
-    try:
-        log_file = _get_timing_log_file()
-        if log_file:
-            log_file.write(f"{message}\n")
-            log_file.flush()  # Ensure it's written immediately
-        else:
-            # Fallback: try to write directly if file handle creation failed
-            try:
-                with open(_TIMING_LOG_PATH, "a", encoding="utf-8") as f:
-                    f.write(f"{message}\n")
-            except Exception:
-                pass  # Silently fail if logging doesn't work
-    except Exception as e:
-        # Log error to stderr for debugging (only if file logging fails)
-        try:
-            import sys
-            print(f"[TIMING LOG ERROR] {e}", file=sys.stderr)
-        except Exception:
-            pass
+    # DISABLED: Timing logs commented out for main branch
+    # Uncomment the code below to enable timing logs
+    # try:
+    #     log_file = _get_timing_log_file()
+    #     if log_file:
+    #         log_file.write(f"{message}\n")
+    #         log_file.flush()  # Ensure it's written immediately
+    #     else:
+    #         # Fallback: try to write directly if file handle creation failed
+    #         try:
+    #             with open(_TIMING_LOG_PATH, "a", encoding="utf-8") as f:
+    #                 f.write(f"{message}\n")
+    #         except Exception:
+    #             pass  # Silently fail if logging doesn't work
+    # except Exception as e:
+    #     # Log error to stderr for debugging (only if file logging fails)
+    #     try:
+    #         import sys
+    #         print(f"[TIMING LOG ERROR] {e}", file=sys.stderr)
+    #     except Exception:
+    #         pass
+    pass  # Timing logs disabled
 
 def log_timing(operation_name: str):
     """Decorator to log timing for operations."""
@@ -300,14 +305,6 @@ class ChangesPane(ListView):
             elif not f.staged and f.status in ["modified", "untracked", "deleted"]:
                 unstaged_files.append(f)
         
-        # Debug: Log what we received and filtered
-        try:
-            with open("debug_changes_pane.log", "a", encoding="utf-8") as f:
-                f.write(f"[DEBUG] ChangesPane.update_files: received {len(files)} files, filtered to {len(unstaged_files)} unstaged\n")
-                for file_status in files[:5]:  # Log first 5
-                    f.write(f"  {file_status.path}: status={file_status.status}, staged={file_status.staged}, unstaged={file_status.unstaged}\n")
-        except:
-            pass
         
         if not unstaged_files:
             from rich.text import Text
@@ -769,8 +766,6 @@ class CommitsPane(ListView):
         if not hasattr(self, '_commit_info_map'):
             self._commit_info_map = {}
         
-        _log_timing_message(f"[DEBUG] append_commits: Adding {len(commits)} commits, current _commit_shas count: {len(self._commit_shas)}")
-        
         for commit in commits:
             from rich.text import Text
             
@@ -824,7 +819,6 @@ class CommitsPane(ListView):
     def update_push_status_in_place(self, commits: list[CommitInfo]) -> None:
         """Update push status for existing commits without clearing the list."""
         if not commits or len(commits) == 0:
-            _log_timing_message(f"[DEBUG] update_push_status_in_place: No commits to update")
             return
         
         # Create maps of normalized SHA to push status and merged status for quick lookup
@@ -835,18 +829,13 @@ class CommitsPane(ListView):
             push_status_map[commit_sha] = commit.pushed
             merged_status_map[commit_sha] = commit.merged
         
-        _log_timing_message(f"[DEBUG] update_push_status_in_place: Processing {len(commits)} commits, {len(push_status_map)} in push_map, {len(merged_status_map)} in merged_map")
-        
         # Check if we have stored commit SHAs
         if not hasattr(self, '_commit_shas') or len(self._commit_shas) == 0:
-            _log_timing_message(f"[DEBUG] update_push_status_in_place: No _commit_shas found")
             return
         
         # Check if we have stored commit info map
         if not hasattr(self, '_commit_info_map'):
             self._commit_info_map = {}
-        
-        _log_timing_message(f"[DEBUG] update_push_status_in_place: Have {len(self._commit_shas)} stored SHAs, {len(self.children)} UI items")
         
         # Update items in place using stored SHAs
         from rich.text import Text
@@ -860,7 +849,6 @@ class CommitsPane(ListView):
         # update UI items whose SHAs are in the maps. This prevents skipping old commits.
         # Build a set of normalized SHAs that we should update
         commits_to_update = set(push_status_map.keys())
-        _log_timing_message(f"[DEBUG] update_push_status_in_place: Will update {len(commits_to_update)} commits from batch")
         
         for i, item in enumerate(self.children):
             try:
@@ -879,10 +867,6 @@ class CommitsPane(ListView):
                 
                 pushed_status = push_status_map[normalized_stored_sha]
                 merged_status = merged_status_map.get(normalized_stored_sha, False)  # Default to False if not in map
-                
-                # DEBUG: Log first few updates to see what's happening
-                if updated_ui_count < 5:
-                    _log_timing_message(f"[DEBUG] update_push_status_in_place: Updating commit {stored_sha[:8]} at index {i}: merged={merged_status}, pushed={pushed_status}")
                 
                 # Get commit info from stored map (we have the commit message here)
                 commit_info = self._commit_info_map.get(stored_sha)
@@ -943,10 +927,7 @@ class CommitsPane(ListView):
                 else:
                     skipped_no_commit_info += 1
             except Exception as e:
-                _log_timing_message(f"[DEBUG] update_push_status_in_place: Exception at index {i}: {type(e).__name__}: {e}")
                 continue
-        
-        _log_timing_message(f"[DEBUG] update_push_status_in_place: Updated {updated_ui_count} commits, skipped {skipped_not_in_map} (not in map), {skipped_no_commit_info} (no commit_info)")
 
 
 class StashPane(ListView):
@@ -1122,18 +1103,9 @@ class LogPane(Static):
             # Check if git_service has repo_path attribute
             repo_path = None
             try:
-                # Debug: log what we're receiving
+                # Try to get repo_path to see if it exists
                 try:
-                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                        f.write(f"DEBUG show_branch_log: Received git_service type={type(git_service)} for branch={branch}\n")
-                        f.write(f"git_service type name: {type(git_service).__name__}\n")
-                        f.write(f"hasattr repo_path: {hasattr(git_service, 'repo_path')}\n")
-                        # Try to get repo_path to see if it exists
-                        try:
-                            test_repo_path = getattr(git_service, 'repo_path', 'NOT_FOUND')
-                            f.write(f"getattr repo_path: {test_repo_path}\n")
-                        except Exception as e:
-                            f.write(f"getattr repo_path failed: {e}\n")
+                    test_repo_path = getattr(git_service, 'repo_path', 'NOT_FOUND')
                 except:
                     pass
                 
@@ -1144,21 +1116,8 @@ class LogPane(Static):
                     # Verify it's not None or empty
                     if not repo_path or (isinstance(repo_path, str) and not repo_path.strip()):
                         repo_path = None
-                    else:
-                        # Debug: log successful access
-                        try:
-                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                                f.write(f"SUCCESS show_branch_log: Found repo_path={repo_path} via direct access for branch={branch}\n\n")
-                        except:
-                            pass
                 except (AttributeError, TypeError) as e:
                     repo_path = None
-                    # Debug: log failure
-                    try:
-                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                            f.write(f"FAILED show_branch_log: Direct access failed: {e} for branch={branch}\n")
-                    except:
-                        pass
                 
                 # Method 2: Use getattr (works even if hasattr returns False for cython)
                 if repo_path is None:
@@ -1201,35 +1160,12 @@ class LogPane(Static):
                     # Don't validate path existence here - let git command handle it (it will fail gracefully)
                     self._show_native_git_log(branch, branch_info, git_service, append=append)
                 else:
-                    # No repo_path found or invalid - log for debugging
-                    try:
-                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                            f.write(f"DEBUG: No valid repo_path found for branch={branch}\n")
-                            f.write(f"repo_path value: {repo_path}\n")
-                            f.write(f"git_service type: {type(git_service)}\n")
-                            f.write(f"hasattr repo_path: {hasattr(git_service, 'repo_path')}\n")
-                            # Try to get repo_path directly
-                            try:
-                                repo_path_attr = getattr(git_service, 'repo_path', 'NOT_FOUND')
-                                f.write(f"Direct access repo_path: {repo_path_attr}\n")
-                                f.write(f"repo_path type: {type(repo_path_attr)}\n")
-                            except Exception as e:
-                                f.write(f"Direct access failed: {e}\n")
-                            f.write(f"git_service dir (repo-related): {[x for x in dir(git_service) if 'repo' in x.lower()]}\n\n")
-                    except:
-                        pass
+                    # No repo_path found or invalid
+                    pass
                     self.update(Text())
             except Exception as e:
-                # On any error, show empty and log the error for debugging
+                # On any error, show empty
                 import traceback
-                try:
-                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                        f.write(f"Error in show_branch_log (branch={branch}): {e}\n")
-                        f.write(f"git_service type: {type(git_service)}\n")
-                        f.write(f"git_service attrs: {dir(git_service)}\n")
-                        f.write(f"Traceback:\n{traceback.format_exc()}\n\n")
-                except:
-                    pass
                 self.update(Text())
         else:
             # Show empty if no git service
@@ -2183,13 +2119,6 @@ class PatchPane(Static):
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         
-        # Debug: Log if SHA was fixed
-        if commit.sha != commit_sha:
-            try:
-                with open("debug_sha_format.log", "a", encoding="utf-8") as f:
-                    f.write(f"FIXED SHA: original={repr(commit.sha)}, normalized={commit_sha}\n")
-            except:
-                pass
         
         # Create commit header
         header_text = f"""commit {commit_sha}
@@ -2698,7 +2627,6 @@ class PygitzenApp(App):
                     import sys
                     cython_init_elapsed = time.perf_counter() - cython_init_start
                     _log_timing_message(f"[TIMING] GitServiceCython.__init__: {cython_init_elapsed:.4f}s")
-                    print(f"[DEBUG] Cython extension initialized successfully")
                 except Exception as e:
                     # If Cython initialization fails, fall back to Python
                     import sys
@@ -2708,11 +2636,6 @@ class PygitzenApp(App):
                     error_msg += f"Traceback:\n{traceback.format_exc()}\n"
                     _log_timing_message(f"[TIMING] GitServiceCython.__init__ (FAILED): {cython_init_elapsed:.4f}s")
                     _log_timing_message(error_msg)
-                    try:
-                        with open("debug_cython_init.log", "a", encoding="utf-8") as f:
-                            f.write(error_msg)
-                    except Exception:
-                        pass
                     python_init_start = time.perf_counter()
                     self.git = GitService(repo_dir)
                     python_init_elapsed = time.perf_counter() - python_init_start
@@ -2865,22 +2788,12 @@ class PygitzenApp(App):
                     import traceback
                     error_msg = f"Error in UI update function: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
                     _log_timing_message(f"[ERROR] {error_msg}")
-                    try:
-                        with open("debug_ui_queue.log", "a", encoding="utf-8") as f:
-                            f.write(f"{error_msg}\n")
-                    except:
-                        pass
                     # Continue processing other updates
         except Exception as e:
             # Log errors in the queue processing itself
             import traceback
             error_msg = f"Error in _process_ui_update_queue: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
             _log_timing_message(f"[ERROR] {error_msg}")
-            try:
-                with open("debug_ui_queue.log", "a", encoding="utf-8") as f:
-                    f.write(f"{error_msg}\n")
-            except:
-                pass
     
     def _check_commits_pane_scroll(self) -> None:
         """Periodically check if we need to load more commits in commits pane (fallback if scroll events don't fire)."""
@@ -3602,18 +3515,8 @@ class PygitzenApp(App):
                             repo_path_to_use = str(repo_path_value)
                         else:
                             repo_path_to_use = str(repo_path_value)
-                        # Debug log
-                        try:
-                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                                f.write(f"DEBUG load_commits_for_log: Using self.repo_path={repo_path_to_use} for branch={branch}\n")
-                        except:
-                            pass
                 except Exception as e:
-                    try:
-                        with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                            f.write(f"DEBUG load_commits_for_log: Error getting self.repo_path: {e}\n")
-                    except:
-                        pass
+                    pass
             
             # Method 2: Try to get from git_service (for cython, this might not work)
             if not repo_path_to_use:
@@ -3649,36 +3552,8 @@ class PygitzenApp(App):
                     # Also expose repo if available
                     if hasattr(git_service, 'repo'):
                         self.repo = git_service.repo
-                    # Debug: verify repo_path is set
-                    if not self.repo_path or str(self.repo_path) == ".":
-                        try:
-                            with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                                f.write(f"WARNING: GitServiceWithPath created with invalid repo_path: {repo_path}\n")
-                                f.write(f"self.repo_path value: {self.repo_path}\n")
-                        except:
-                            pass
             
             git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use)
-            
-            # Debug: verify wrapper has repo_path before passing
-            try:
-                wrapper_repo_path = getattr(git_service_wrapper, 'repo_path', None)
-                if wrapper_repo_path:
-                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                        f.write(f"SUCCESS: GitServiceWithPath wrapper created with repo_path={wrapper_repo_path} for branch={branch}\n")
-                        f.write(f"wrapper type: {type(git_service_wrapper)}\n")
-                        f.write(f"wrapper.repo_path type: {type(wrapper_repo_path)}\n\n")
-                else:
-                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                        f.write(f"ERROR: GitServiceWithPath wrapper missing repo_path for branch={branch}\n")
-                        f.write(f"repo_path_to_use was: {repo_path_to_use}\n")
-                        f.write(f"self.repo_path was: {getattr(self, 'repo_path', 'NOT_SET')}\n\n")
-            except Exception as e:
-                try:
-                    with open("debug_log_pane.log", "a", encoding="utf-8") as f:
-                        f.write(f"ERROR checking wrapper: {e}\n\n")
-                except:
-                    pass
             
             self.log_pane.show_branch_log(branch, [], basic_branch_info, git_service_wrapper, append=not reset)
             show_log_elapsed = time.perf_counter() - show_log_start
@@ -3690,11 +3565,6 @@ class PygitzenApp(App):
             error_msg = f"Error in show_branch_log for branch {branch}: {type(e).__name__}: {e}\n"
             error_msg += f"Traceback:\n{traceback.format_exc()}\n"
             _log_timing_message(error_msg)
-            try:
-                with open("debug_show_log.log", "a", encoding="utf-8") as f:
-                    f.write(error_msg)
-            except Exception:
-                pass
         
         # Don't auto-select first commit when in log view (only on reset)
         if reset:
@@ -3935,12 +3805,6 @@ class PygitzenApp(App):
             except Exception as e:
                 # If stash fetching fails, show empty
                 import traceback
-                try:
-                    with open("debug_stash.log", "a", encoding="utf-8") as f:
-                        f.write(f"Error loading stashes (background): {type(e).__name__}: {e}\n")
-                        f.write(f"Traceback:\n{traceback.format_exc()}\n")
-                except:
-                    pass
                 
                 # Update UI from main thread on error (use queue which is thread-safe)
                 self._ui_update_queue.put(lambda: self._update_stashes_ui([]))
@@ -4021,11 +3885,6 @@ class PygitzenApp(App):
                 import traceback
                 error_msg = f"Error loading tags (background): {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
                 _log_timing_message(f"[ERROR] {error_msg}")
-                try:
-                    with open("debug_tags.log", "a", encoding="utf-8") as f:
-                        f.write(f"{error_msg}\n")
-                except:
-                    pass
                 
                 # Update UI from main thread on error (use queue which is thread-safe)
                 self._ui_update_queue.put(lambda: self._update_tags_ui([]))
@@ -4053,11 +3912,6 @@ class PygitzenApp(App):
             import traceback
             error_msg = f"Error in _update_tags_ui: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
             _log_timing_message(f"[ERROR] {error_msg}")
-            try:
-                with open("debug_tags.log", "a", encoding="utf-8") as f:
-                    f.write(f"{error_msg}\n")
-            except:
-                pass
             self._loading_tags = False
     
     def load_file_status_background(self) -> None:
@@ -4098,14 +3952,7 @@ class PygitzenApp(App):
                 file_status_elapsed = time.perf_counter() - file_status_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background TOTAL: {file_status_elapsed:.4f}s")
             except Exception as e:
-                # Log error to file
-                try:
-                    with open("debug_file_status.log", "a") as f:
-                        f.write(f"Error loading file status: {e}\n")
-                        import traceback
-                        f.write(traceback.format_exc())
-                except:
-                    pass
+                pass
                 
                 # Update UI from main thread on error (use queue which is thread-safe)
                 self._ui_update_queue.put(lambda: self._update_file_status_ui([]))
@@ -4164,14 +4011,7 @@ class PygitzenApp(App):
             update_elapsed = time.perf_counter() - update_start
             _log_timing_message(f"[TIMING]   _update_file_status_ui (limited to {display_count}): {update_elapsed:.4f}s")
         except Exception as e:
-            # Log error to file
-            try:
-                with open("debug_file_status.log", "a") as f:
-                    f.write(f"Error updating file status UI: {e}\n")
-                    import traceback
-                    f.write(traceback.format_exc())
-            except:
-                pass
+            pass
             
             # Show empty on error
             self.staged_pane.clear()
@@ -4288,11 +4128,6 @@ class PygitzenApp(App):
                 error_msg = f"Error in get_branch_info for branch {branch}: {type(e).__name__}: {e}\n"
                 error_msg += f"Traceback:\n{traceback.format_exc()}\n"
                 _log_timing_message(error_msg)
-                try:
-                    with open("debug_branch_info.log", "a", encoding="utf-8") as f:
-                        f.write(error_msg)
-                except Exception:
-                    pass
                 # Use empty branch info as fallback
                 branch_info = {"name": branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
                 # Use queue which is thread-safe
@@ -4471,10 +4306,6 @@ class PygitzenApp(App):
         import subprocess
         from datetime import datetime
         
-        # Debug: log that function was called
-        _log_timing_message(f"[DEBUG] load_commits CALLED with branch={branch}")
-        print(f"[DEBUG] load_commits CALLED with branch={branch}")
-        
         # Update Commits pane title to show current branch (matching lazygit)
         self.commits_pane.border_title = f"Commits ({branch})" if branch else "Commits (HEAD)"
         
@@ -4517,10 +4348,6 @@ class PygitzenApp(App):
             # Convert to string if it's a Path object
             repo_path_str = str(repo_path) if repo_path else "."
             
-            # Debug: log repo_path and command
-            _log_timing_message(f"[DEBUG] load_commits: repo_path={repo_path_str}, cmd={cmd}")
-            print(f"[DEBUG] load_commits: repo_path={repo_path_str}")
-            
             # Run git log with timeout
             result = subprocess.run(
                 cmd,
@@ -4529,12 +4356,6 @@ class PygitzenApp(App):
                 timeout=30,
                 cwd=repo_path_str
             )
-            
-            # Debug: log result
-            _log_timing_message(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
-            print(f"[DEBUG] load_commits: git log returncode={result.returncode}, stdout_lines={len(result.stdout.strip().split(chr(10))) if result.stdout else 0}")
-            if result.returncode != 0:
-                print(f"[DEBUG] load_commits: git log stderr={result.stderr}")
             
             if result.returncode == 0:
                 # Parse output and deduplicate by SHA (git log --all shouldn't have duplicates, but be safe)
@@ -4990,8 +4811,6 @@ class PygitzenApp(App):
                         else:
                             pushed_count += 1
                     
-                    _log_timing_message(f"[DEBUG] Three-tier status (lazygit approach): {merged_count} merged (✓ green), {pushed_count} pushed (↑ yellow), {unpushed_count} unpushed (- red)")
-                    
                     # Always update UI in main thread
                     self.call_from_thread(self._update_commits_push_status_ui, commits)
                     _log_timing_message(f"[TIMING] update_commits_metadata_background TOTAL: Updated push status for {len(commits)} commits")
@@ -5027,10 +4846,6 @@ class PygitzenApp(App):
         loaded_commits = commits
         self.all_commits = loaded_commits.copy()  # Store all commits for search
         
-        # Debug: log how many commits were loaded
-        _log_timing_message(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches")
-        print(f"[DEBUG] load_commits: Loaded {len(loaded_commits)} commits from all branches, total_commits={self.total_commits}")
-        
         # Apply search filter if there's a search query
         if self._search_query:
             self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
@@ -5038,10 +4853,6 @@ class PygitzenApp(App):
             self.commits = loaded_commits
         
         self.loaded_commits = len(self.commits)
-        
-        # Debug: log before setting commits
-        _log_timing_message(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
-        print(f"[DEBUG] load_commits: Setting {len(self.commits)} commits to commits_pane")
         
         # OPTIMIZATION: Show commits to UI immediately (critical path)
         self.commits_pane.set_commits(self.commits)
@@ -5096,8 +4907,6 @@ class PygitzenApp(App):
                     if commit.merged:
                         merged_count_in_self += 1
             
-            _log_timing_message(f"[DEBUG] _update_commits_push_status_ui: Updated {updated_count}/{len(self.commits)} commits in self.commits, {pushed_count_in_self} marked as pushed, {merged_count_in_self} marked as merged")
-            
             # Update the commits pane display in place (no clearing)
             # CRITICAL: Also update _commit_info_map so update_push_status_in_place can access merged status
             if hasattr(self.commits_pane, '_commit_info_map'):
@@ -5137,17 +4946,12 @@ class PygitzenApp(App):
         """Load more commits for the current branch (matching lazygit behavior)."""
         import subprocess
         
-        _log_timing_message(f"[DEBUG] load_more_commits CALLED: loaded={self.loaded_commits}, total={self.total_commits}, branch={self.active_branch}")
-        
         # If searching, don't load more - we're filtering existing commits
         if self._search_query:
-            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (search active)")
             return
         if not self.active_branch:
-            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (no active branch)")
             return
         if self.loaded_commits >= self.total_commits:
-            _log_timing_message(f"[DEBUG] load_more_commits: Skipping (all commits loaded: {self.loaded_commits} >= {self.total_commits})")
             return
         
         # Get more commits for the current branch (matching lazygit format)
@@ -5285,7 +5089,6 @@ class PygitzenApp(App):
                 # Start background thread to update push status for this batch
                 def update_push_status_background_batch():
                     """Update push status for commits in background with cache."""
-                    _log_timing_message(f"[DEBUG] update_push_status_background_batch START: Processing {len(next_batch)} commits for branch {ref_spec}")
                     try:
                         # Resolve HEAD to branch name if needed
                         actual_ref = ref_spec
@@ -5499,12 +5302,6 @@ class PygitzenApp(App):
                             else:
                                 pushed_count += 1
                         
-                        _log_timing_message(f"[DEBUG] Three-tier status (load_more, lazygit approach): {merged_count} merged (✓ green), {pushed_count} pushed (↑ yellow), {unpushed_count} unpushed (- red)")
-                        
-                        # DEBUG: Log first few commits to verify status
-                        for i, commit in enumerate(next_batch[:5]):
-                            _log_timing_message(f"[DEBUG] load_more commit {i}: {commit.sha[:8]} merged={commit.merged}, pushed={commit.pushed}")
-                        
                         # Update UI in main thread
                         self.call_from_thread(self._update_commits_push_status_ui, next_batch)
                         _log_timing_message(f"[TIMING] update_push_status_background_batch TOTAL: Updated push status for {len(next_batch)} commits")
@@ -5527,16 +5324,12 @@ class PygitzenApp(App):
                     pass
         
         if not next_batch:
-            _log_timing_message(f"[DEBUG] load_more_commits: No commits returned from git log")
             return
-        
-        _log_timing_message(f"[DEBUG] load_more_commits: Got {len(next_batch)} commits, appending to UI")
         self.all_commits.extend(next_batch)
         self.commits.extend(next_batch)
         self.loaded_commits = len(self.commits)
         self.commits_pane.append_commits(next_batch)
         self._update_commits_title()
-        _log_timing_message(f"[DEBUG] load_more_commits: Completed, total loaded={self.loaded_commits}")
 
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
@@ -5919,21 +5712,11 @@ class PygitzenApp(App):
                 if max_scroll_y > 0 and self.total_commits > 0:
                     scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
                     
-                    # DEBUG: Log scroll events (but limit frequency to avoid spam)
-                    if not hasattr(self, '_last_scroll_log_time'):
-                        self._last_scroll_log_time = 0
-                    import time
-                    current_time = time.time()
-                    if current_time - self._last_scroll_log_time > 0.5:  # Log at most every 0.5 seconds
-                        _log_timing_message(f"[DEBUG] [SCROLL] Commits pane: scroll_y={scroll_y}, max_scroll_y={max_scroll_y}, scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits}")
-                        self._last_scroll_log_time = current_time
-                    
                     # If scrolled near bottom (85%), auto-load more commits
                     if scroll_percent >= 0.85 and self.loaded_commits < self.total_commits:
                         _log_timing_message(f"[TIMING] [SCROLL] Commits pane: Loading more commits (scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits})")
                         self.load_more_commits()
             except Exception as e:
-                _log_timing_message(f"[DEBUG] [SCROLL] Exception in scroll handler: {type(e).__name__}: {e}")
                 pass  # Silently fail if scroll detection fails
         
         # Handle scroll for tags pane - virtual scrolling
