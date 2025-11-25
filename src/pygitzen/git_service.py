@@ -772,6 +772,10 @@ class GitService:
         sha_hex = sha_hex.lower()
         
         try:
+            # Validate repo path exists
+            if not self.repo_path.exists():
+                return f"Error: Repository path does not exist: {self.repo_path}\n"
+            
             # Use git show to get the diff (handles root commits automatically)
             # This avoids dulwich's hex_to_sha issues completely
             result = subprocess.run(
@@ -798,12 +802,14 @@ class GitService:
                 return f"Error: Could not get diff for commit {sha_hex[:8]}. git show failed: {error_msg[:100]}\n"
         except subprocess.TimeoutExpired:
             return f"Error: Timeout getting diff for commit {sha_hex[:8]}\n"
+        except OSError as e:
+            # OSError usually means file/command not found or permission issues
+            error_detail = str(e) if str(e) else "Unknown OS error"
+            return f"Error: Could not get diff for commit {sha_hex[:8]}. OSError: {error_detail[:200]}\n"
         except Exception as e:
-            # Continue to dulwich fallback
-            # Fallback to dulwich is disabled because it causes AssertionError with hex_to_sha
-            # The error has already been returned above if git show failed
-            # This code should never be reached, but kept for safety
-            return f"Error: Could not get diff for commit {sha_hex[:8]}. Both git show and dulwich fallback failed.\n"
+            # Return error with exception type and message for debugging
+            error_detail = str(e) if str(e) else f"{type(e).__name__}"
+            return f"Error: Could not get diff for commit {sha_hex[:8]}. Exception: {type(e).__name__}: {error_detail[:200]}\n"
         
         # OLD DULWICH FALLBACK (DISABLED - causes AssertionError)
         # try:

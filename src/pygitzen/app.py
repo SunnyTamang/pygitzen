@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import time
 import queue
+import subprocess
+import threading
 from functools import wraps
 from pathlib import Path
+from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
@@ -130,28 +133,21 @@ def _normalize_commit_sha(sha) -> str:
 
 def _log_timing_message(message: str):
     """Log timing message to file (non-blocking, won't interfere with TUI)."""
-    # DISABLED: Timing logs commented out for main branch
-    # Uncomment the code below to enable timing logs
-    # try:
-    #     log_file = _get_timing_log_file()
-    #     if log_file:
-    #         log_file.write(f"{message}\n")
-    #         log_file.flush()  # Ensure it's written immediately
-    #     else:
-    #         # Fallback: try to write directly if file handle creation failed
-    #         try:
-    #             with open(_TIMING_LOG_PATH, "a", encoding="utf-8") as f:
-    #                 f.write(f"{message}\n")
-    #         except Exception:
-    #             pass  # Silently fail if logging doesn't work
-    # except Exception as e:
-    #     # Log error to stderr for debugging (only if file logging fails)
-    #     try:
-    #         import sys
-    #         print(f"[TIMING LOG ERROR] {e}", file=sys.stderr)
-    #     except Exception:
-    #         pass
-    pass  # Timing logs disabled
+    # ENABLED for debugging PTY issues
+    try:
+        # Write directly to file (simple approach for debugging)
+        with open("timing.log", "a", encoding="utf-8") as f:
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            f.write(f"[{timestamp}] {message}\n")
+            f.flush()  # Ensure it's written immediately
+    except Exception as e:
+        # Log error to stderr for debugging (only if file logging fails)
+        try:
+            import sys
+            print(f"[TIMING LOG ERROR] {e}", file=sys.stderr)
+        except Exception:
+            pass  # Timing logs disabled
 
 def log_timing(operation_name: str):
     """Decorator to log timing for operations."""
@@ -694,19 +690,33 @@ class CommitsPane(ListView):
             self._parent_app.show_commit_diff(index)
     
     def set_commits(self, commits: list[CommitInfo]) -> None:
+        """Set commits in the commits pane.
+        
+        Phase 2: Added timing diagnostics to identify lag sources.
+        """
+        import time
+        set_start = time.perf_counter()
+        
+        clear_start = time.perf_counter()
         self.clear()
+        clear_time = time.perf_counter() - clear_start
+        
         self._last_highlighted = None  # Reset highlighting tracker
         
         # Store commit SHAs and commit info for in-place updates
         self._commit_shas = []
         self._commit_info_map = {}  # SHA -> CommitInfo for quick lookup
         
-        # Virtual scrolling: limit initial commits to 200 for performance
+        # Virtual scrolling: limit initial commits to 300 for performance
         # ListView has built-in virtual scrolling, but we still need to limit initial DOM elements
-        initial_limit = 200
+        initial_limit = 300
         commits_to_render = commits[:initial_limit] if len(commits) > initial_limit else commits
         
+        text_creation_time = 0.0
+        listview_append_time = 0.0
+        
         for commit in commits_to_render:
+            text_start = time.perf_counter()
             from rich.text import Text
             
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
@@ -757,16 +767,37 @@ class CommitsPane(ListView):
             else:
                 text.append(summary, style="white")
             
+            text_creation_time += time.perf_counter() - text_start
+            
+            # Time the ListView.append operation (this is where Textual might lag)
+            append_item_start = time.perf_counter()
             self.append(ListItem(Static(text)))
+            listview_append_time += time.perf_counter() - append_item_start
+        
+        set_total = time.perf_counter() - set_start
+        if set_total > 0.01:  # Only log if it takes more than 10ms
+            _log_timing_message(f"[TIMING] [RENDER] set_commits({len(commits_to_render)} commits): {set_total*1000:.1f}ms total (clear: {clear_time*1000:.1f}ms, text creation: {text_creation_time*1000:.1f}ms, ListView.append: {listview_append_time*1000:.1f}ms)")
 
     def append_commits(self, commits: list[CommitInfo]) -> None:
+        """Append commits to the commits pane.
+        
+        Phase 2: Added timing diagnostics and batched appends to reduce Textual lag.
+        Textual ListView.append() is expensive, so we batch commits into smaller chunks.
+        """
+        import time
+        append_start = time.perf_counter()
+        
         # Initialize _commit_shas and _commit_info_map if not exists
         if not hasattr(self, '_commit_shas'):
             self._commit_shas = []
         if not hasattr(self, '_commit_info_map'):
             self._commit_info_map = {}
         
+        text_creation_time = 0.0
+        listview_append_time = 0.0
+        
         for commit in commits:
+            text_start = time.perf_counter()
             from rich.text import Text
             
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
@@ -814,7 +845,16 @@ class CommitsPane(ListView):
             else:
                 text.append(summary, style="white")
             
+            text_creation_time += time.perf_counter() - text_start
+            
+            # Time the ListView.append operation (this is where Textual might lag)
+            append_item_start = time.perf_counter()
             self.append(ListItem(Static(text)))
+            listview_append_time += time.perf_counter() - append_item_start
+        
+        append_total = time.perf_counter() - append_start
+        if append_total > 0.01:  # Only log if it takes more than 10ms
+            _log_timing_message(f"[TIMING] [RENDER] append_commits({len(commits)} commits): {append_total*1000:.1f}ms total (text creation: {text_creation_time*1000:.1f}ms, ListView.append: {listview_append_time*1000:.1f}ms)")
     
     def update_push_status_in_place(self, commits: list[CommitInfo]) -> None:
         """Update push status for existing commits without clearing the list."""
@@ -1097,6 +1137,18 @@ class LogPane(Static):
         """
         from rich.text import Text
         from pathlib import Path
+        from pygitzen.pty_utils import should_use_pty
+        
+        # Check if PTY streaming should be used
+        if should_use_pty():
+            try:
+                self._show_native_git_log_pty(branch, branch_info, git_service, append=append)
+                return
+            except Exception as e:
+                # Fallback to subprocess if PTY fails
+                import traceback
+                _log_timing_message(f"[PTY] Fallback to subprocess: {type(e).__name__}: {e}")
+                # Continue to subprocess method below
         
         # Only show native git log if we have git_service with repo_path
         if git_service is not None:
@@ -1156,9 +1208,18 @@ class LogPane(Static):
                     if str(repo_path) == ".":
                         repo_path = Path(".").resolve()
                     
-                    # Pass git_service directly to _show_native_git_log (it should already have repo_path)
-                    # Don't validate path existence here - let git command handle it (it will fail gracefully)
-                    self._show_native_git_log(branch, branch_info, git_service, append=append)
+                    # Check if PTY streaming should be used
+                    from pygitzen.pty_utils import should_use_pty
+                    if should_use_pty():
+                        try:
+                            self._show_native_git_log_pty(branch, branch_info, git_service, append=append)
+                        except Exception as e:
+                            # Fallback to subprocess if PTY fails
+                            _log_timing_message(f"[PTY] Fallback to subprocess: {type(e).__name__}: {e}")
+                            self._show_native_git_log(branch, branch_info, git_service, append=append)
+                    else:
+                        # Use subprocess method (default)
+                        self._show_native_git_log(branch, branch_info, git_service, append=append)
                 else:
                     # No repo_path found or invalid
                     pass
@@ -1192,11 +1253,14 @@ class LogPane(Static):
         Display native git log --graph --color=always output directly.
         This shows exactly what git outputs, preserving all colors and formatting.
         Supports virtual scrolling - loads more commits as user scrolls.
+        
+        Phase 2: Moved git command execution to background thread to prevent UI blocking.
         """
         from rich.text import Text
         from rich.console import Group
         from pathlib import Path
         import subprocess
+        import threading
         from pygitzen.git_graph import parse_ansi_to_rich_text
         
         # Prevent concurrent loads
@@ -1204,167 +1268,551 @@ class LogPane(Static):
             return
         self._native_git_log_loading = True
         
-        try:
-            # Get repo path from git_service
-            # Try multiple methods to get repo_path (works for both cython and non-cython)
-            repo_path = None
-            
-            # Method 1: Direct attribute access
+        # Phase 2: Run git command in background thread to prevent UI blocking (400ms+ lag fix)
+        def load_log_in_background():
+            """Load git log in background thread to prevent UI blocking."""
             try:
-                if hasattr(git_service, 'repo_path'):
-                    repo_path = git_service.repo_path
-            except (AttributeError, TypeError):
-                pass
-            
-            # Method 2: Use getattr (works even if hasattr returns False for cython)
-            if repo_path is None:
-                try:
-                    repo_path = getattr(git_service, 'repo_path', None)
-                except (AttributeError, TypeError):
-                    pass
-            
-            # Method 3: Try via repo.path
-            if repo_path is None:
-                try:
-                    if hasattr(git_service, 'repo'):
-                        repo = getattr(git_service, 'repo', None)
-                        if repo and hasattr(repo, 'path'):
-                            repo_path = getattr(repo, 'path', None)
-                except (AttributeError, TypeError):
-                    pass
-            
-            # Convert to Path object
-            if repo_path:
-                if isinstance(repo_path, str):
-                    repo_path = Path(repo_path)
-                elif not isinstance(repo_path, Path):
-                    repo_path = Path(str(repo_path))
-            else:
-                # Fallback to current directory
-                repo_path = Path(".")
-            
-            # If appending, increase the limit; otherwise reset
-            if not append:
-                self._native_git_log_count = 50
-                self._native_git_log_lines = []
-            else:
-                # Increase limit by 50 more commits
-                self._native_git_log_count += 50
-            
-            # Build git command - use native git log --graph --color=always
-            # Add --abbrev-commit for short SHAs and --decorate to show refs (branches, tags, HEAD)
-            cmd = ['git', 'log', '--graph', '--color=always', '--abbrev-commit', '--decorate', f'-{self._native_git_log_count}']
-            
-            # Add branch if specified (don't use --all, it's slower)
-            # Only add branch if it's not empty
-            if branch and branch.strip():
-                # Use refs/heads/ prefix for branches with '/' to ensure they're treated as branches, not paths
-                # This avoids the "ambiguous argument" error for branch names like feature/fuzzy-search-commits
-                if branch.startswith('refs/'):
-                    # Already a full ref path, use as is
-                    cmd.append(branch)
-                elif '/' in branch:
-                    # Branch name contains '/' - use refs/heads/ prefix to avoid ambiguity
-                    cmd.append(f'refs/heads/{branch}')
-                else:
-                    # Simple branch name without '/' - use as is
-                    cmd.append(branch)
-            
-            # Run git command with error handling for encoding issues
-            # Use shorter timeout for faster failure
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=False,  # Get bytes first
-                cwd=str(repo_path),
-                timeout=5  # Short timeout for fast feedback
-            )
-            
-            # Decode with error handling for non-UTF-8 characters
-            # Use errors='replace' to handle any invalid UTF-8 bytes
-            output_text = result.stdout.decode('utf-8', errors='replace')
-            error_text = result.stderr.decode('utf-8', errors='replace')
-            
-            # Create a simple result-like object with decoded text
-            class DecodedResult:
-                def __init__(self, returncode, stdout, stderr):
-                    self.returncode = returncode
-                    self.stdout = stdout
-                    self.stderr = stderr
-            
-            result = DecodedResult(result.returncode, output_text, error_text)
-            
-            if result.returncode != 0:
-                # Show error message
-                error_text = Text()
-                error_text.append(f"Error running git log: {result.stderr}\n", style="red")
-                self.update(error_text)
-                self._native_git_log_loading = False
-                return
-        
-            # Parse ANSI-colored output and convert to Rich Text
-            # Process the entire output at once for better performance
-            if not output_text.strip():
-                # No output, show empty
-                self.update(Text())
-                self._native_git_log_loading = False
-                return
-            
-            # Split into lines and process
-            output_lines = output_text.split('\n')
-            new_log_lines = []
-            
-            # Convert each line from ANSI to Rich Text
-            # Process in batches for better performance
-            for line in output_lines:
-                if line:  # Only process non-empty lines
-                    try:
-                        rich_line = parse_ansi_to_rich_text(line)
-                        new_log_lines.append(rich_line)
-                    except Exception:
-                        # If parsing fails, strip ANSI and add as plain text
-                        from pygitzen.git_graph import strip_ansi_codes
-                        plain_line = strip_ansi_codes(line)
-                        new_log_lines.append(Text(plain_line, style="white"))
-            
-            # If appending, only add new lines (skip already loaded ones)
-            if append and self._native_git_log_lines:
-                # Count existing content lines (excluding header and empty line)
-                existing_content_lines = len(self._native_git_log_lines) - 2  # Subtract header and empty line
+                import time
+                load_start = time.perf_counter()
                 
-                # Only add lines that weren't in the previous load
-                if existing_content_lines < len(new_log_lines):
-                    # Add only the new lines (skip the ones we already have)
-                    new_lines_to_add = new_log_lines[existing_content_lines:]
-                    self._native_git_log_lines.extend(new_lines_to_add)
-            else:
-                # First load - build full content with header
-                log_lines = []
-                # Add header
-                header = self._build_header(branch, branch_info)
-                log_lines.append(header)
-                log_lines.append(Text())  # Empty line
-                log_lines.extend(new_log_lines)
-                self._native_git_log_lines = log_lines
+                # Track if this is the first update (for progressive updates)
+                is_first_update = not append
+                
+                # Get repo path from git_service
+                # Try multiple methods to get repo_path (works for both cython and non-cython)
+                repo_path = None
+                
+                # Method 1: Direct attribute access
+                try:
+                    if hasattr(git_service, 'repo_path'):
+                        repo_path = git_service.repo_path
+                except (AttributeError, TypeError):
+                    pass
+                
+                # Method 2: Use getattr (works even if hasattr returns False for cython)
+                if repo_path is None:
+                    try:
+                        repo_path = getattr(git_service, 'repo_path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Method 3: Try via repo.path
+                if repo_path is None:
+                    try:
+                        if hasattr(git_service, 'repo'):
+                            repo = getattr(git_service, 'repo', None)
+                            if repo and hasattr(repo, 'path'):
+                                repo_path = getattr(repo, 'path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Convert to Path object
+                if repo_path:
+                    if isinstance(repo_path, str):
+                        repo_path = Path(repo_path)
+                    elif not isinstance(repo_path, Path):
+                        repo_path = Path(str(repo_path))
+                else:
+                    # Fallback to current directory
+                    repo_path = Path(".")
+                
+                # If appending, increase the limit; otherwise reset
+                if not append:
+                    self._native_git_log_count = 50
+                    self._native_git_log_lines = []
+                else:
+                    # Increase limit by 50 more commits
+                    self._native_git_log_count += 50
+                
+                # Build git command - use native git log --graph --color=always
+                # Add --abbrev-commit for short SHAs and --decorate to show refs (branches, tags, HEAD)
+                cmd = ['git', 'log', '--graph', '--color=always', '--abbrev-commit', '--decorate', f'-{self._native_git_log_count}']
+                
+                # Add branch if specified (don't use --all, it's slower)
+                # Only add branch if it's not empty
+                if branch and branch.strip():
+                    # Use refs/heads/ prefix for branches with '/' to ensure they're treated as branches, not paths
+                    # This avoids the "ambiguous argument" error for branch names like feature/fuzzy-search-commits
+                    if branch.startswith('refs/'):
+                        # Already a full ref path, use as is
+                        cmd.append(branch)
+                    elif '/' in branch:
+                        # Branch name contains '/' - use refs/heads/ prefix to avoid ambiguity
+                        cmd.append(f'refs/heads/{branch}')
+                    else:
+                        # Simple branch name without '/' - use as is
+                        cmd.append(branch)
+                
+                # Time git command execution
+                git_cmd_start = time.perf_counter()
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=False,  # Get bytes first
+                    cwd=str(repo_path),
+                    timeout=5  # Short timeout for fast feedback
+                )
+                git_cmd_time = time.perf_counter() - git_cmd_start
+                
+                # Decode with error handling for non-UTF-8 characters
+                # Use errors='replace' to handle any invalid UTF-8 bytes
+                decode_start = time.perf_counter()
+                output_text = result.stdout.decode('utf-8', errors='replace')
+                error_text = result.stderr.decode('utf-8', errors='replace')
+                decode_time = time.perf_counter() - decode_start
+                
+                # Create a simple result-like object with decoded text
+                class DecodedResult:
+                    def __init__(self, returncode, stdout, stderr):
+                        self.returncode = returncode
+                        self.stdout = stdout
+                        self.stderr = stderr
+                
+                result = DecodedResult(result.returncode, output_text, error_text)
+                
+                if result.returncode != 0:
+                    # Show error message via main thread
+                    error_text = Text()
+                    error_text.append(f"Error running git log: {result.stderr}\n", style="red")
+                    if hasattr(self, 'app') and self.app:
+                        self.app.call_from_thread(lambda: self.update(error_text))
+                    else:
+                        self.update(error_text)
+                    self._native_git_log_loading = False
+                    return
+                
+                # Parse ANSI-colored output and convert to Rich Text
+                # Process the entire output at once for better performance
+                if not output_text.strip():
+                    # No output, show empty via main thread
+                    if hasattr(self, 'app') and self.app:
+                        self.app.call_from_thread(lambda: self.update(Text()))
+                    else:
+                        self.update(Text())
+                    self._native_git_log_loading = False
+                    return
+                
+                # Phase 2: Progressive updates - parse and update UI incrementally to prevent "stuck" scroll
+                parse_start = time.perf_counter()
+                output_lines = output_text.split('\n')
+                new_log_lines = []
+                
+                # Progressive update strategy: Line-based batching only (no time-based to reduce update frequency)
+                # Start with smaller batches for immediate feedback, then increase for efficiency
+                initial_batch_size = 50  # First few updates: every 50 lines
+                large_batch_size = 100  # After initial feedback: every 100 lines
+                batch_size_switch = 200  # Switch to large batch after 200 lines
+                
+                progressive_append = append  # Track append state for progressive updates
+                lines_processed = 0  # Track total lines processed (including empty lines)
+                last_update_line_count = 0  # Track the last line count at which we updated
+                
+                # Convert each line from ANSI to Rich Text with progressive updates
+                for i, line in enumerate(output_lines):
+                    lines_processed += 1
+                    
+                    if line:  # Only process non-empty lines
+                        try:
+                            rich_line = parse_ansi_to_rich_text(line)
+                            new_log_lines.append(rich_line)
+                        except Exception:
+                            # If parsing fails, strip ANSI and add as plain text
+                            from pygitzen.git_graph import strip_ansi_codes
+                            plain_line = strip_ansi_codes(line)
+                            new_log_lines.append(Text(plain_line, style="white"))
+                    
+                    # Adaptive batch size: smaller batches initially, larger as content grows
+                    current_batch_size = initial_batch_size if len(new_log_lines) < batch_size_switch else large_batch_size
+                    
+                    # Progressive update: update UI ONLY when we've accumulated enough NEW lines since last update
+                    # This prevents multiple updates from being queued when processing is fast
+                    new_lines_since_update = len(new_log_lines) - last_update_line_count
+                    should_update = (
+                        len(new_log_lines) >= current_batch_size and 
+                        new_lines_since_update >= current_batch_size
+                    )
+                    
+                    if should_update and new_log_lines:
+                        # CRITICAL: Update the tracker IMMEDIATELY (synchronously) before queuing the async update
+                        # This prevents the loop from queuing multiple updates for milestones that were passed quickly
+                        last_update_line_count = len(new_log_lines)
+                        
+                        # Prepare lines for update
+                        if progressive_append and self._native_git_log_lines:
+                            # Count existing content lines (excluding header and empty line)
+                            existing_content_lines = len(self._native_git_log_lines) - 2
+                            if existing_content_lines < len(new_log_lines):
+                                new_lines_to_add = new_log_lines[existing_content_lines:]
+                                self._native_git_log_lines.extend(new_lines_to_add)
+                        else:
+                            # First load - build full content with header
+                            log_lines = []
+                            header = self._build_header(branch, branch_info)
+                            log_lines.append(header)
+                            log_lines.append(Text())  # Empty line
+                            log_lines.extend(new_log_lines)
+                            self._native_git_log_lines = log_lines
+                            progressive_append = True  # After first update, always append
+                        
+                        # Progressive UI update via main thread
+                        def progressive_update_ui():
+                            import time
+                            update_start = time.perf_counter()
+                            
+                            # Preserve scroll position
+                            scroll_container = None
+                            preserved_scroll_y = 0
+                            try:
+                                if hasattr(self, 'app') and self.app:
+                                    scroll_container = self.app.query_one("#patch-scroll-container", None)
+                                    if scroll_container and hasattr(scroll_container, 'scroll_y'):
+                                        preserved_scroll_y = scroll_container.scroll_y
+                            except:
+                                pass
+                            
+                            # Update the pane
+                            if self._native_git_log_lines:
+                                full_content = Group(*self._native_git_log_lines)
+                                self.update(full_content)
+                            
+                            # Restore scroll position
+                            if scroll_container and hasattr(scroll_container, 'scroll_y') and preserved_scroll_y > 0:
+                                try:
+                                    scroll_container.scroll_y = preserved_scroll_y
+                                except:
+                                    pass
+                            
+                            update_total = time.perf_counter() - update_start
+                            # Always log progressive updates to track if they're happening
+                            _log_timing_message(f"[TIMING] [RENDER] [LOG] Progressive update: {update_total*1000:.1f}ms (lines={len(self._native_git_log_lines)}, new_lines={len(new_log_lines)})")
+                        
+                        if hasattr(self, 'app') and self.app:
+                            self.app.call_from_thread(progressive_update_ui)
+                        else:
+                            progressive_update_ui()
+                
+                # Final update with all remaining lines
+                if new_log_lines:
+                    # If appending, only add new lines (skip already loaded ones)
+                    if progressive_append and self._native_git_log_lines:
+                        existing_content_lines = len(self._native_git_log_lines) - 2
+                        if existing_content_lines < len(new_log_lines):
+                            new_lines_to_add = new_log_lines[existing_content_lines:]
+                            self._native_git_log_lines.extend(new_lines_to_add)
+                    else:
+                        # First load - build full content with header
+                        log_lines = []
+                        header = self._build_header(branch, branch_info)
+                        log_lines.append(header)
+                        log_lines.append(Text())  # Empty line
+                        log_lines.extend(new_log_lines)
+                        self._native_git_log_lines = log_lines
+                
+                parse_time = time.perf_counter() - parse_start
+                load_time = time.perf_counter() - load_start
+                _log_timing_message(f"[TIMING] [SCROLL] [LOG] Background load: {load_time*1000:.1f}ms total (git_cmd: {git_cmd_time*1000:.1f}ms, decode: {decode_time*1000:.1f}ms, parse: {parse_time*1000:.1f}ms)")
+                
+                # Final UI update via main thread
+                def update_ui():
+                    import time
+                    update_start = time.perf_counter()
+                    
+                    # Preserve scroll position before update
+                    scroll_container = None
+                    preserved_scroll_y = 0
+                    preserve_start = time.perf_counter()
+                    try:
+                        if hasattr(self, 'app') and self.app:
+                            scroll_container = self.app.query_one("#patch-scroll-container", None)
+                            if scroll_container and hasattr(scroll_container, 'scroll_y'):
+                                preserved_scroll_y = scroll_container.scroll_y
+                    except:
+                        pass
+                    preserve_time = time.perf_counter() - preserve_start
+                    
+                    # Update the pane
+                    group_start = time.perf_counter()
+                    if self._native_git_log_lines:
+                        full_content = Group(*self._native_git_log_lines)
+                        group_time = time.perf_counter() - group_start
+                        
+                        update_ui_start = time.perf_counter()
+                        self.update(full_content)
+                        update_ui_time = time.perf_counter() - update_ui_start
+                    else:
+                        group_time = 0
+                        update_ui_start = time.perf_counter()
+                        self.update(Text())
+                        update_ui_time = time.perf_counter() - update_ui_start
+                    
+                    # Restore scroll position after update
+                    restore_start = time.perf_counter()
+                    if scroll_container and hasattr(scroll_container, 'scroll_y') and preserved_scroll_y > 0:
+                        try:
+                            scroll_container.scroll_y = preserved_scroll_y
+                        except Exception as e:
+                            pass
+                    restore_time = time.perf_counter() - restore_start
+                    
+                    update_total = time.perf_counter() - update_start
+                    
+                    # Always log timing for UI updates (even if < 50ms) to track scroll "stuck" issue
+                    _log_timing_message(f"[TIMING] [RENDER] [LOG] update_ui: {update_total*1000:.1f}ms total (preserve: {preserve_time*1000:.1f}ms, Group: {group_time*1000:.1f}ms, update: {update_ui_time*1000:.1f}ms, restore: {restore_time*1000:.1f}ms, append={progressive_append}, lines={len(self._native_git_log_lines)})")
+                    
+                    # If update took significant time, it's likely causing the "stuck" scroll
+                    if update_total > 0.05:  # More than 50ms
+                        _log_timing_message(f"[TIMING] [RENDER] [LOG] [LAG] WARNING: update_ui took {update_total*1000:.1f}ms - likely causing scroll to stick")
+                    
+                    # Update cache
+                    self._cached_branch = branch
+                    self._cached_branch_info = branch_info.copy()
+                    
+                    self._native_git_log_loading = False
+                
+                # Call UI update from main thread
+                if hasattr(self, 'app') and self.app:
+                    self.app.call_from_thread(update_ui)
+                else:
+                    update_ui()
+                
+                load_time = time.perf_counter() - load_start
+                _log_timing_message(f"[TIMING] [SCROLL] [LOG] Background load: {load_time*1000:.1f}ms total")
+                
+            except Exception as e:
+                # On error, show error message via main thread
+                error_text = Text()
+                error_text.append(f"Error showing native git log: {e}\n", style="red")
+                if hasattr(self, 'app') and self.app:
+                    self.app.call_from_thread(lambda: self.update(error_text))
+                else:
+                    self.update(error_text)
+                self._native_git_log_loading = False
+        
+        # Start background thread
+        thread = threading.Thread(target=load_log_in_background, daemon=True)
+        thread.start()
+    
+    def _show_native_git_log_pty(self, branch: str, branch_info: dict, git_service, append: bool = False) -> None:
+        """
+        Display native git log using PTY streaming for real-time output.
+        This provides progressive display and better UX, especially for large repos.
+        
+        Runs in background thread to avoid blocking UI.
+        """
+        from rich.text import Text
+        from rich.console import Group
+        from pathlib import Path
+        from pygitzen.pty_utils import stream_git_command_pty
+        import threading
+        
+        # Prevent concurrent loads
+        if self._native_git_log_loading:
+            return
+        self._native_git_log_loading = True
+        
+        # Get app reference for call_from_thread
+        # LogPane is a Static widget, need to get app from parent
+        app = None
+        try:
+            if hasattr(self, 'app'):
+                app = self.app
+            elif hasattr(self, 'parent') and hasattr(self.parent, 'app'):
+                app = self.parent.app
+        except:
+            pass
+        
+        def stream_in_background():
+            """Stream git log output in background thread."""
+            try:
+                # Get repo path from git_service (same logic as subprocess version)
+                repo_path = None
+                
+                # Method 1: Direct attribute access
+                try:
+                    if hasattr(git_service, 'repo_path'):
+                        repo_path = git_service.repo_path
+                except (AttributeError, TypeError):
+                    pass
+                
+                # Method 2: Use getattr (works even if hasattr returns False for cython)
+                if repo_path is None:
+                    try:
+                        repo_path = getattr(git_service, 'repo_path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Method 3: Try via repo.path
+                if repo_path is None:
+                    try:
+                        if hasattr(git_service, 'repo'):
+                            repo = getattr(git_service, 'repo', None)
+                            if repo and hasattr(repo, 'path'):
+                                repo_path = getattr(repo, 'path', None)
+                    except (AttributeError, TypeError):
+                        pass
+                
+                # Convert to Path object
+                if repo_path:
+                    if isinstance(repo_path, str):
+                        repo_path = Path(repo_path)
+                    elif not isinstance(repo_path, Path):
+                        repo_path = Path(str(repo_path))
+                else:
+                    repo_path = Path(".")
+                
+                # If appending, increase the limit; otherwise reset
+                if not append:
+                    self._native_git_log_count = 50
+                    self._native_git_log_lines = []
+                else:
+                    self._native_git_log_count += 50
+                
+                # Build git command (same as subprocess version)
+                cmd = ['git', 'log', '--graph', '--color=always', '--abbrev-commit', '--decorate', f'-{self._native_git_log_count}']
+                
+                # Add branch if specified
+                if branch and branch.strip():
+                    if branch.startswith('refs/'):
+                        cmd.append(branch)
+                    elif '/' in branch:
+                        cmd.append(f'refs/heads/{branch}')
+                    else:
+                        cmd.append(branch)
+                
+                # Prepare for progressive display
+                new_log_lines = []
+                batch_size = 10  # Update UI every 10 lines for performance
+                
+                # Stream output using PTY and collect lines
+                for rich_line in stream_git_command_pty(
+                    cmd,
+                    repo_path,
+                    timeout=30.0,
+                    max_lines=None  # No limit, use git's --max-count
+                ):
+                    new_log_lines.append(rich_line)
+                    
+                    # Update UI periodically (every batch_size lines) via main thread
+                    if len(new_log_lines) % batch_size == 0:
+                        if app:
+                            app.call_from_thread(
+                                lambda: self._update_log_pane_ui(branch, branch_info, new_log_lines.copy(), append)
+                            )
+                        else:
+                            self._update_log_pane_ui(branch, branch_info, new_log_lines, append)
+                
+                # Final update with all lines via main thread
+                if app:
+                    app.call_from_thread(
+                        lambda: self._update_log_pane_ui(branch, branch_info, new_log_lines, append)
+                    )
+                    app.call_from_thread(
+                        lambda: setattr(self, '_cached_branch', branch)
+                    )
+                    app.call_from_thread(
+                        lambda: setattr(self, '_cached_branch_info', branch_info.copy())
+                    )
+                else:
+                    self._update_log_pane_ui(branch, branch_info, new_log_lines, append)
+                    self._cached_branch = branch
+                    self._cached_branch_info = branch_info.copy()
+                    
+            except Exception as e:
+                # Show error message and fallback via main thread
+                error_text = Text()
+                error_text.append(f"Error streaming git log: {e}\n", style="red")
+                if app:
+                    app.call_from_thread(lambda: self.update(error_text))
+                    app.call_from_thread(
+                        lambda: self._show_native_git_log(branch, branch_info, git_service, append=append)
+                    )
+                else:
+                    self.update(error_text)
+                    self._show_native_git_log(branch, branch_info, git_service, append=append)
+            finally:
+                if app:
+                    app.call_from_thread(lambda: setattr(self, '_native_git_log_loading', False))
+                else:
+                    self._native_git_log_loading = False
+        
+        # Start streaming in background thread
+        thread = threading.Thread(target=stream_in_background, daemon=True)
+        thread.start()
+        
+        # Return immediately - streaming happens in background
+        # Show initial "Loading..." message
+        loading_text = Text()
+        loading_text.append("Loading git log...", style="dim white")
+        self.update(loading_text)
+    
+    def _update_log_pane_ui(self, branch: str, branch_info: dict, new_log_lines: list, append: bool) -> None:
+        """Helper method to update log pane UI with new lines.
+        
+        Phase 2: Added timing diagnostics and scroll position preservation to prevent "stuck" scroll.
+        """
+        import time
+        from rich.console import Group
+        
+        update_start = time.perf_counter()
+        
+        # Phase 2: Preserve scroll position before update to prevent "stuck" scroll
+        # Get the scroll container (parent of log pane)
+        scroll_container = None
+        preserved_scroll_y = 0
+        try:
+            # Try to get the scroll container from the app
+            if hasattr(self, 'app') and self.app:
+                scroll_container = self.app.query_one("#patch-scroll-container", None)
+                if scroll_container and hasattr(scroll_container, 'scroll_y'):
+                    preserved_scroll_y = scroll_container.scroll_y
+        except:
+            pass
+        
+        # If appending, only add new lines
+        if append and self._native_git_log_lines:
+            existing_content_lines = len(self._native_git_log_lines) - 2  # Subtract header and empty line
+            if existing_content_lines < len(new_log_lines):
+                new_lines_to_add = new_log_lines[existing_content_lines:]
+                self._native_git_log_lines.extend(new_lines_to_add)
+        else:
+            # First load - build full content with header
+            log_lines = []
+            header = self._build_header(branch, branch_info)
+            log_lines.append(header)
+            log_lines.append(Text())  # Empty line
+            log_lines.extend(new_log_lines)
+            self._native_git_log_lines = log_lines
+        
+        # Time the Group creation and update
+        group_start = time.perf_counter()
+        if self._native_git_log_lines:
+            full_content = Group(*self._native_git_log_lines)
+            group_time = time.perf_counter() - group_start
             
-            # Update the pane
-            if self._native_git_log_lines:
-                full_content = Group(*self._native_git_log_lines)
-                self.update(full_content)
-            else:
-                self.update(Text())
-            
-            # Update cache
-            self._cached_branch = branch
-            self._cached_branch_info = branch_info.copy()
-            
-        except Exception as e:
-            # On error, show error message
-            error_text = Text()
-            error_text.append(f"Error showing native git log: {e}\n", style="red")
-            self.update(error_text)
-        finally:
-            self._native_git_log_loading = False
+            update_ui_start = time.perf_counter()
+            self.update(full_content)
+            update_ui_time = time.perf_counter() - update_ui_start
+        else:
+            group_time = 0
+            update_ui_start = time.perf_counter()
+            self.update(Text())
+            update_ui_time = time.perf_counter() - update_ui_start
+        
+        update_total = time.perf_counter() - update_start
+        
+        # Log timing if significant
+        if update_total > 0.05:  # More than 50ms
+            _log_timing_message(f"[TIMING] [RENDER] [LOG] _update_log_pane_ui: {update_total*1000:.1f}ms total (Group: {group_time*1000:.1f}ms, update: {update_ui_time*1000:.1f}ms, append={append}, lines={len(new_log_lines)})")
+        
+        # Phase 2: Restore scroll position after update to prevent "stuck" scroll
+        if scroll_container and hasattr(scroll_container, 'scroll_y') and preserved_scroll_y > 0:
+            try:
+                scroll_container.scroll_y = preserved_scroll_y
+                if update_total > 0.05:
+                    _log_timing_message(f"[TIMING] [SCROLL] [LOG] Scroll position restored: {preserved_scroll_y}")
+            except Exception as e:
+                if update_total > 0.05:
+                    _log_timing_message(f"[TIMING] [SCROLL] [LOG] Failed to restore scroll position: {e}")
     
     def _build_graph_structure(self, commits: list[CommitInfo], git_service) -> dict:
         """
@@ -2098,7 +2546,7 @@ class PatchPane(Static):
         super().__init__(*args, **kwargs)
         self.border_title = "Patch"
     
-    def show_commit_info(self, commit: CommitInfo, diff_text: str) -> None:
+    def show_commit_info(self, commit: CommitInfo, diff_text: str | Text, is_partial: bool = False) -> None:
         from rich.text import Text
         from rich.console import Console
         from rich.syntax import Syntax
@@ -2132,16 +2580,47 @@ Date: {commit_date}
         # Create diff content with proper colors
         if diff_text:
             try:
-                # Use Rich syntax highlighting for diff
-                syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
-                # Use Group to combine Text and Syntax objects
-                full_content = Group(
-                    Text(header_text, style="white"),
-                    syntax
-                )
-            except:
+                # Handle both string and Rich Text objects
+                if isinstance(diff_text, Text):
+                    # Already a Rich Text object (from PTY streaming) - use directly
+                    diff_text_obj = diff_text
+                else:
+                    # String input - parse ANSI or use syntax highlighting
+                    if is_partial:
+                        # For partial updates, parse ANSI colors from git output
+                        try:
+                            diff_text_obj = Text.from_ansi(diff_text)
+                        except:
+                            # Fallback to plain text
+                            diff_text_obj = Text(diff_text, style="white")
+                    else:
+                        # Use Rich syntax highlighting for complete diff
+                        syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
+                        # Convert Syntax to Text for consistency
+                        from rich.console import Console
+                        console = Console()
+                        diff_text_obj = Text()
+                        # Render syntax to get colored text
+                        with console.capture() as capture:
+                            console.print(syntax)
+                        diff_text_obj = Text.from_ansi(capture.get())
+                
+                full_content = Text(header_text, style="white") + diff_text_obj
+                if is_partial:
+                    # Add "Loading..." indicator for partial updates
+                    full_content.append("\n...", style="dim white")
+                # Note: For complete diff, we use the diff_text_obj directly (already formatted)
+            except Exception as e:
                 # Fallback to manual color formatting with Text only
-                lines = diff_text.split('\n')
+                # Handle both string and Text objects
+                if isinstance(diff_text, Text):
+                    # Convert Text object to string for processing
+                    # Extract plain text from Rich Text object
+                    diff_text_str = str(diff_text.plain)
+                else:
+                    diff_text_str = str(diff_text)
+                
+                lines = diff_text_str.split('\n')
                 diff_text_obj = Text()
                 for line in lines:
                     if line.startswith('+'):
@@ -2155,6 +2634,8 @@ Date: {commit_date}
                 
                 # Now we can concatenate Text objects
                 full_content = Text(header_text, style="white") + diff_text_obj
+                if is_partial:
+                    full_content.append("\n...", style="dim white")
         else:
             # Both are Text objects, so concatenation works
             full_content = Text(header_text, style="white") + Text(diff_text or "No diff available", style="white")
@@ -2657,7 +3138,12 @@ class PygitzenApp(App):
             self.all_commits: list[CommitInfo] = []  # Store all commits for search (commits pane)
             self.log_commits: list[CommitInfo] = []  # Commits for log pane (right side) - separate from commits pane
             self.repo_path = repo_dir
-            self.page_size = 200  # For commits pane
+            
+            # PTY Task Manager for commit diff streaming (similar to Lazygit's ViewBufferManager)
+            # This ensures only one PTY task runs at a time, with automatic cancellation
+            from pygitzen.pty_task_manager import PtyTaskManager
+            self._pty_diff_task_manager = PtyTaskManager(log_callback=_log_timing_message)
+            self.page_size = 300  # For commits pane
             # Reasonable limit to prevent blocking (dulwich iteration is slow for 78k+ commits)
             self.log_initial_size = 200  # Load 200 commits initially (can load more via pagination)
             self.total_commits = 0
@@ -2667,6 +3153,9 @@ class PygitzenApp(App):
             self._loading_stashes = False
             self._loading_tags = False
             self._search_query: str = ""
+            # Phase 4: Debouncing for file status updates
+            self._last_file_status_update_time = 0.0
+            self._file_status_debounce_delay = 0.5  # 500ms debounce
             self._view_mode: str = "patch"  # "patch" or "log"
             
             # Thread-safe queue for UI updates from background threads
@@ -2688,6 +3177,16 @@ class PygitzenApp(App):
             
             # Cache branch sync status (behind/ahead counts)
             self._branch_sync_status_cache: dict[str, dict] = {}
+            
+            # Phase 2: Pre-buffering for virtual scrolling
+            self._prebuffering = False  # Track if pre-buffering is in progress
+            self._last_scroll_time = 0.0  # For debouncing scroll events
+            self._scroll_debounce_delay = 0.1  # 100ms debounce delay
+            self._prebuffer_batch_size = 100  # Load 100 commits ahead
+            self._prebuffer_threshold = 0.8  # Start pre-buffering at 80% of loaded commits
+            
+            # Phase 4: Real-time change detection (GitWatcher)
+            self._git_watcher = None  # Will be initialized in on_mount
             
             init_elapsed = time.perf_counter() - init_start
             _log_timing_message(f"[TIMING] ===== PygitzenApp.__init__ TOTAL: {init_elapsed:.4f}s =====")
@@ -2767,11 +3266,176 @@ class PygitzenApp(App):
         self.set_interval(0.2, self._check_virtual_scroll_expansion)
         self.set_interval(0.2, self._check_commits_pane_scroll)  # Check commits pane scrolling
         
+        # Phase 4: Start GitWatcher for real-time change detection
+        self._start_git_watcher()
+        
         # Set up periodic processing of UI update queue from background threads
         self.set_interval(0.05, self._process_ui_update_queue)  # Check every 50ms
-        
-        mount_elapsed = time.perf_counter() - mount_start
-        _log_timing_message(f"[TIMING] ===== on_mount TOTAL: {mount_elapsed:.4f}s =====")
+    
+    def _start_git_watcher(self) -> None:
+        """Start GitWatcher for real-time change detection."""
+        try:
+            from pygitzen.git_watcher import GitWatcher, ChangeEvent, ChangeType
+            
+            def handle_change(event: ChangeEvent) -> None:
+                """Handle Git repository change events."""
+                _log_timing_message(f"[GITWATCHER] Change detected: {event.change_type.value} (branch={event.branch}, tag={event.tag}, file={event.file})")
+                
+                # Smart refresh: Only refresh affected panes
+                if event.change_type in (ChangeType.FILE_STAGED, ChangeType.FILE_UNSTAGED, ChangeType.FILE_CHANGED):
+                    # File changes - refresh files pane and status pane
+                    # Use call_from_thread to ensure it runs on main thread
+                    try:
+                        _log_timing_message(f"[GITWATCHER] Calling load_file_status_background from thread")
+                        self.call_from_thread(self.load_file_status_background)
+                        _log_timing_message(f"[GITWATCHER] load_file_status_background called successfully")
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Error calling load_file_status_background: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                        _log_timing_message(f"[GITWATCHER] [ERROR] {error_msg}")
+                        # Fallback: try calling directly (might work if we're already on main thread)
+                        try:
+                            self.load_file_status_background()
+                        except Exception as e2:
+                            _log_timing_message(f"[GITWATCHER] [ERROR] Fallback also failed: {e2}")
+                elif event.change_type == ChangeType.NEW_COMMIT:
+                    # New commit - refresh commits pane, log pane, and status
+                    try:
+                        _log_timing_message(f"[GITWATCHER] Calling _refresh_on_new_commit from thread")
+                        self.call_from_thread(self._refresh_on_new_commit)
+                        _log_timing_message(f"[GITWATCHER] _refresh_on_new_commit called successfully")
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Error calling _refresh_on_new_commit: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                        _log_timing_message(f"[GITWATCHER] [ERROR] {error_msg}")
+                elif event.change_type == ChangeType.NEW_TAG:
+                    # New tag - refresh tags pane only
+                    try:
+                        self.call_from_thread(self._refresh_tags)
+                    except Exception as e:
+                        _log_timing_message(f"[GITWATCHER] [ERROR] Error calling _refresh_tags: {e}")
+                elif event.change_type == ChangeType.TAG_DELETED:
+                    # Tag deleted - refresh tags pane only
+                    try:
+                        self.call_from_thread(self._refresh_tags)
+                    except Exception as e:
+                        _log_timing_message(f"[GITWATCHER] [ERROR] Error calling _refresh_tags: {e}")
+                elif event.change_type in (ChangeType.BRANCH_CREATED, ChangeType.BRANCH_DELETED):
+                    # Branch created/deleted - refresh branches pane
+                    try:
+                        self.call_from_thread(self._refresh_branches)
+                    except Exception as e:
+                        _log_timing_message(f"[GITWATCHER] [ERROR] Error calling _refresh_branches: {e}")
+                elif event.change_type == ChangeType.COMMIT_PUSHED:
+                    # Commits pushed - update commit status in commits pane
+                    try:
+                        _log_timing_message(f"[GITWATCHER] Calling _refresh_commit_status from thread")
+                        self.call_from_thread(self._refresh_commit_status)
+                        _log_timing_message(f"[GITWATCHER] _refresh_commit_status called successfully")
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Error calling _refresh_commit_status: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                        _log_timing_message(f"[GITWATCHER] [ERROR] {error_msg}")
+            
+            self._git_watcher = GitWatcher(
+                repo_path=self.repo_path,
+                on_change=handle_change,
+                head_poll_interval=1.5,
+                remote_poll_interval=8.0,
+                use_watchdog=True
+            )
+            self._git_watcher.start()
+            _log_timing_message("[GITWATCHER] Started real-time change detection")
+        except Exception as e:
+            _log_timing_message(f"[GITWATCHER] Failed to start: {e}")
+            # Continue without watcher - manual refresh still works
+    
+    def _refresh_on_new_commit(self) -> None:
+        """Refresh UI when new commit is detected."""
+        # Refresh commits pane and log pane
+        if self.active_branch:
+            _log_timing_message(f"[GITWATCHER] Refreshing UI for new commit on branch {self.active_branch}")
+            
+            # CRITICAL: Clear commit status cache when new commit is detected
+            # This ensures fresh status is fetched instead of using stale cache
+            cache_keys_to_clear = [
+                f"refs/heads/{self.active_branch}_unpushed",
+                f"refs/heads/{self.active_branch}_merged",
+                f"{self.active_branch}_unpushed",
+                f"{self.active_branch}_merged",
+            ]
+            for key in cache_keys_to_clear:
+                if key in self._remote_commits_cache:
+                    del self._remote_commits_cache[key]
+                    _log_timing_message(f"[GITWATCHER] Cleared cache key: {key}")
+            
+            # OPTIMIZATION: Call load_commits() for commits pane, and load_commits_for_log() with reset=False
+            # to update log pane without triggering load_commits_full_history_background() (which causes duplicate refresh)
+            self.load_commits(self.active_branch)
+            # Use reset=False to avoid triggering load_commits_full_history_background() which causes duplicate refresh
+            self.load_commits_for_log(self.active_branch, reset=False)
+            self.update_status_info()
+            
+            # CRITICAL: Trigger commit status update after reloading commits
+            # This ensures the new commit gets the correct status (green ✓, yellow ↑, or red -)
+            # Use a small delay to ensure commits are loaded first
+            import threading
+            import time
+            
+            def trigger_status_update():
+                time.sleep(0.2)  # Brief delay to let commits load
+                if hasattr(self, 'commits') and self.commits:
+                    _log_timing_message(f"[GITWATCHER] Triggering status update for {len(self.commits)} commits (cache cleared)")
+                    # Get ref_spec and repo_path for status update
+                    repo_path_str = str(self.repo_path)
+                    ref_spec = f"refs/heads/{self.active_branch}"
+                    
+                    # CRITICAL: Clear cache again right before status update to ensure fresh fetch
+                    # (in case load_commits repopulated it)
+                    cache_keys_to_clear = [
+                        f"refs/heads/{self.active_branch}_unpushed",
+                        f"refs/heads/{self.active_branch}_merged",
+                        f"{self.active_branch}_unpushed",
+                        f"{self.active_branch}_merged",
+                    ]
+                    for key in cache_keys_to_clear:
+                        if key in self._remote_commits_cache:
+                            del self._remote_commits_cache[key]
+                            _log_timing_message(f"[GITWATCHER] Cleared cache key before status update: {key}")
+                    
+                    # Force fresh fetch by calling the full background update directly
+                    # This bypasses cache and always fetches from Git
+                    self._update_commits_status_full_background(self.commits, ref_spec, self.active_branch, repo_path_str)
+            
+            status_thread = threading.Thread(target=trigger_status_update, daemon=True)
+            status_thread.start()
+    
+    def _refresh_tags(self) -> None:
+        """Refresh tags pane when tags change."""
+        self.load_tags_background()
+    
+    def _refresh_branches(self) -> None:
+        """Refresh branches pane when branches change."""
+        self.branches = self.git.list_branches()
+        if self.branches:
+            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
+    
+    def _refresh_commit_status(self) -> None:
+        """Refresh commit status when commits are pushed."""
+        # Update commit status (green tick for merged commits)
+        if self.active_branch and hasattr(self, 'commits') and self.commits:
+            # Clear cache to force refresh
+            self._remote_commits_cache.clear()
+            # Trigger status update with correct parameters
+            repo_path_str = str(self.repo_path)
+            ref_spec = f"refs/heads/{self.active_branch}"
+            self._start_commits_status_update_background(self.commits, ref_spec, self.active_branch, repo_path_str)
+    
+    def on_unmount(self) -> None:
+        """Stop GitWatcher when app unmounts."""
+        if self._git_watcher:
+            self._git_watcher.stop()
+            _log_timing_message("[GITWATCHER] Stopped")
     
     def _process_ui_update_queue(self) -> None:
         """Process UI updates from background threads (called periodically from main thread)."""
@@ -2883,7 +3547,36 @@ class PygitzenApp(App):
                             
                             git_service_wrapper = GitServiceWithPath(self.git, repo_path_to_use or ".")
                             basic_branch_info = {"name": self.active_branch, "head_sha": None, "remote_tracking": None, "upstream": None, "is_current": False}
+                            
+                            # Phase 2: Time the load operation to identify scroll "stuck" issue
+                            import time
+                            load_start = time.perf_counter()
+                            _log_timing_message(f"[TIMING] [SCROLL] [LOG] _show_native_git_log START (append=True, current_count={self.log_pane._native_git_log_count})")
+                            
+                            # Phase 2: Preserve scroll position before loading
+                            scroll_container = self.query_one("#patch-scroll-container", None)
+                            preserved_scroll_y = 0
+                            if scroll_container and hasattr(scroll_container, 'scroll_y'):
+                                preserved_scroll_y = scroll_container.scroll_y
+                            
                             self.log_pane._show_native_git_log(self.active_branch, basic_branch_info, git_service_wrapper, append=True)
+                            
+                            load_time = time.perf_counter() - load_start
+                            _log_timing_message(f"[TIMING] [SCROLL] [LOG] _show_native_git_log TOTAL: {load_time*1000:.1f}ms")
+                            
+                            # Phase 2: Restore scroll position after loading
+                            if scroll_container and hasattr(scroll_container, 'scroll_y') and preserved_scroll_y > 0:
+                                try:
+                                    scroll_container.scroll_y = preserved_scroll_y
+                                    if load_time > 0.05:
+                                        _log_timing_message(f"[TIMING] [SCROLL] [LOG] Scroll position restored: {preserved_scroll_y}")
+                                except Exception as e:
+                                    if load_time > 0.05:
+                                        _log_timing_message(f"[TIMING] [SCROLL] [LOG] Failed to restore scroll position: {e}")
+                            
+                            # If load took significant time, it's likely causing the "stuck" scroll
+                            if load_time > 0.1:  # More than 100ms
+                                _log_timing_message(f"[TIMING] [SCROLL] [LOG] [LAG] WARNING: _show_native_git_log took {load_time*1000:.1f}ms - likely causing scroll to stick")
                         return
             except Exception:
                 pass  # Silently fail if check fails
@@ -3596,7 +4289,11 @@ class PygitzenApp(App):
         _log_timing_message(f"--- load_commits_for_log TOTAL: {log_elapsed:.4f}s ---")
     
     def load_more_commits_for_log(self, branch: str) -> None:
-        """Load more commits for log view (pagination)."""
+        """Load more commits for log view (pagination).
+        
+        Phase 2: Added timing diagnostics to identify scroll "stuck" issue.
+        """
+        import time
         if not branch:
             return
         
@@ -3604,8 +4301,35 @@ class PygitzenApp(App):
         if self.log_pane._total_commits_count > 0 and self.log_pane._loaded_commits_count >= self.log_pane._total_commits_count:
             return
         
+        # Phase 2: Preserve scroll position before loading to prevent "stuck" scroll
+        scroll_container = self.query_one("#patch-scroll-container", None)
+        preserved_scroll_y = 0
+        if scroll_container and hasattr(scroll_container, 'scroll_y'):
+            preserved_scroll_y = scroll_container.scroll_y
+        
+        # Time the load operation
+        load_start = time.perf_counter()
+        _log_timing_message(f"[TIMING] [SCROLL] [LOG] load_more_commits_for_log START (preserved_scroll_y={preserved_scroll_y})")
+        
         # Load next batch
         self.load_commits_for_log(branch, reset=False)
+        
+        load_time = time.perf_counter() - load_start
+        _log_timing_message(f"[TIMING] [SCROLL] [LOG] load_more_commits_for_log TOTAL: {load_time*1000:.1f}ms")
+        
+        # Phase 2: Restore scroll position after loading to prevent "stuck" scroll
+        if scroll_container and hasattr(scroll_container, 'scroll_y') and preserved_scroll_y > 0:
+            restore_start = time.perf_counter()
+            try:
+                scroll_container.scroll_y = preserved_scroll_y
+                restore_time = time.perf_counter() - restore_start
+                _log_timing_message(f"[TIMING] [SCROLL] [LOG] Scroll position restored: {preserved_scroll_y} (took {restore_time*1000:.1f}ms)")
+            except Exception as e:
+                _log_timing_message(f"[TIMING] [SCROLL] [LOG] Failed to restore scroll position: {e}")
+        
+        # If load took significant time, it's likely causing the "stuck" scroll
+        if load_time > 0.1:  # More than 100ms
+            _log_timing_message(f"[TIMING] [SCROLL] [LOG] [LAG] WARNING: load_more_commits_for_log took {load_time*1000:.1f}ms - likely causing scroll to stick")
     
     def load_commits_fast(self, branch: str) -> None:
         """Load first page of commits immediately (fast, non-blocking)."""
@@ -3916,10 +4640,20 @@ class PygitzenApp(App):
     
     def load_file_status_background(self) -> None:
         """Load file status in background (non-blocking)."""
+        import time
+        
+        # Phase 4: Debouncing to prevent rapid-fire updates from GitWatcher
+        current_time = time.perf_counter()
+        if current_time - self._last_file_status_update_time < self._file_status_debounce_delay:
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background: Debounced (last update {current_time - self._last_file_status_update_time:.3f}s ago)")
+            return
+        
         if self._loading_file_status:
+            _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background: Already loading, skipping")
             return
         
         self._loading_file_status = True
+        self._last_file_status_update_time = current_time
         
         # Use a thread to load files asynchronously without blocking the UI
         # This ensures commits can display immediately while files load in background
@@ -3945,17 +4679,39 @@ class PygitzenApp(App):
                 update_start = time.perf_counter()
                 # Use queue which is thread-safe and doesn't require event loop
                 files_copy = files_with_changes.copy()
-                self._ui_update_queue.put(lambda: self._update_file_status_ui(files_copy))
+                # CRITICAL: Wrap in a function that ensures flag is reset even on error
+                def update_ui_safely():
+                    try:
+                        _log_timing_message(f"[TIMING] [BACKGROUND]   _update_file_status_ui called from queue")
+                        self._update_file_status_ui(files_copy)
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Error in _update_file_status_ui: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                        _log_timing_message(f"[ERROR] [BACKGROUND] {error_msg}")
+                        # CRITICAL: Reset flag even on error
+                        self._loading_file_status = False
+                
+                self._ui_update_queue.put(update_ui_safely)
                 update_elapsed = time.perf_counter() - update_start
                 _log_timing_message(f"[TIMING] [BACKGROUND]   _update_file_status_ui (queued): {update_elapsed:.4f}s")
                 
                 file_status_elapsed = time.perf_counter() - file_status_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background TOTAL: {file_status_elapsed:.4f}s")
             except Exception as e:
-                pass
+                import traceback
+                error_msg = f"Error loading file status: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                _log_timing_message(f"[ERROR] [BACKGROUND] {error_msg}")
                 
                 # Update UI from main thread on error (use queue which is thread-safe)
-                self._ui_update_queue.put(lambda: self._update_file_status_ui([]))
+                # CRITICAL: Always reset the flag, even on error
+                def update_ui_on_error():
+                    try:
+                        self._update_file_status_ui([])
+                    except Exception:
+                        # Even if UI update fails, reset the flag
+                        self._loading_file_status = False
+                
+                self._ui_update_queue.put(update_ui_on_error)
                 file_status_elapsed = time.perf_counter() - file_status_start
                 _log_timing_message(f"[TIMING] [BACKGROUND] load_file_status_background (ERROR): {file_status_elapsed:.4f}s")
         
@@ -4011,14 +4767,21 @@ class PygitzenApp(App):
             update_elapsed = time.perf_counter() - update_start
             _log_timing_message(f"[TIMING]   _update_file_status_ui (limited to {display_count}): {update_elapsed:.4f}s")
         except Exception as e:
-            pass
+            import traceback
+            error_msg = f"Error updating file status UI: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+            _log_timing_message(f"[ERROR] {error_msg}")
             
             # Show empty on error
-            self.staged_pane.clear()
-            self.changes_pane.clear()
-            self.staged_pane.update_files([])
-            self.changes_pane.update_files([])
-            self._loading_file_status = False
+            try:
+                self.staged_pane.clear()
+                self.changes_pane.clear()
+                self.staged_pane.update_files([])
+                self.changes_pane.update_files([])
+            except:
+                pass
+            finally:
+                # CRITICAL: Always reset the flag, even on error
+                self._loading_file_status = False
     
     def _update_file_status_full(self, files_with_changes: list) -> None:
         """Update file status UI with full file list - DEPRECATED: Not used anymore (virtual scrolling instead)."""
@@ -4301,10 +5064,1079 @@ class PygitzenApp(App):
         except Exception:
             pass  # Silently fail if branch changed
 
+    def _load_commits_pty(self, cmd: list[str], repo_path_str: str, ref_spec: str, branch: str) -> None:
+        """Load commits using PTY streaming for progressive display.
+        
+        UX Optimization: Load first page instantly, then stream the rest in background.
+        This gives instant feedback while still being efficient for large repos.
+        """
+        from pathlib import Path
+        from pygitzen.pty_utils import stream_git_command_pty
+        from rich.text import Text
+        import threading
+        import time
+        import subprocess
+        
+        # Reset flags for new load
+        if hasattr(self, '_status_update_started'):
+            delattr(self, '_status_update_started')
+        if hasattr(self, '_commits_initialized'):
+            delattr(self, '_commits_initialized')
+        
+        # UX OPTIMIZATION: Load first page instantly for immediate feedback
+        # This makes the app feel instant instead of waiting for streaming
+        def load_first_page_instantly():
+            """Load first page of commits instantly using fast git command."""
+            try:
+                # Use fast git log command to get first page immediately
+                fast_cmd = ["git", "log", ref_spec, "--oneline", f"--max-count={self.page_size}",
+                           "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
+                           "--abbrev=40", "--no-show-signature"]
+                
+                result = subprocess.run(
+                    fast_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=repo_path_str
+                )
+                
+                if result.returncode == 0:
+                    # Parse commits from output
+                    first_page_commits = []
+                    seen_shas = set()
+                    
+                    for line in result.stdout.strip().split('\n'):
+                        if not line:
+                            continue
+                        
+                        # Parse commit line (same format as PTY streaming)
+                        if line.startswith('+'):
+                            line = line[1:]
+                        
+                        parts = line.split("\x00")
+                        if len(parts) >= 8:
+                            sha = parts[0].strip()
+                            if sha.startswith('+'):
+                                sha = sha[1:]
+                            
+                            if sha in seen_shas:
+                                continue
+                            seen_shas.add(sha)
+                            
+                            timestamp_str = parts[1].strip()
+                            author_name = parts[2].strip()
+                            author_email = parts[3].strip()
+                            summary = parts[7].strip()
+                            
+                            author = f"{author_name} <{author_email}>" if author_email else author_name
+                            
+                            try:
+                                timestamp = int(timestamp_str)
+                            except ValueError:
+                                timestamp = 0
+                            
+                            from pygitzen.git_service import CommitInfo
+                            first_page_commits.append(
+                                CommitInfo(
+                                    sha=sha,
+                                    summary=summary,
+                                    author=author,
+                                    timestamp=timestamp,
+                                    pushed=False,  # Default to unpushed (red -), will be updated by background thread
+                                    merged=False,  # Will be updated by background thread
+                                )
+                            )
+                        elif len(parts) >= 5:
+                            # Fallback: try to parse with old format
+                            sha = parts[0].strip()
+                            if sha.startswith('+'):
+                                sha = sha[1:]
+                            
+                            if sha in seen_shas:
+                                continue
+                            seen_shas.add(sha)
+                            
+                            author_name = parts[1].strip()
+                            author_email = parts[2].strip()
+                            timestamp_str = parts[3].strip()
+                            summary = parts[4].strip()
+                            
+                            author = f"{author_name} <{author_email}>" if author_email else author_name
+                            
+                            try:
+                                timestamp = int(timestamp_str)
+                            except ValueError:
+                                timestamp = 0
+                            
+                            from pygitzen.git_service import CommitInfo
+                            first_page_commits.append(
+                                CommitInfo(
+                                    sha=sha,
+                                    summary=summary,
+                                    author=author,
+                                    timestamp=timestamp,
+                                    pushed=False,  # Default to unpushed (red -), will be updated by background thread
+                                    merged=False,  # Will be updated by background thread
+                                )
+                            )
+                    
+                    # Show first page instantly in UI
+                    if first_page_commits:
+                        self.call_from_thread(
+                            lambda: self._show_first_page_instantly(first_page_commits, ref_spec, branch, repo_path_str)
+                        )
+                        _log_timing_message(f"[PTY] [DEBUG] Loaded first page instantly: {len(first_page_commits)} commits")
+            except Exception as e:
+                _log_timing_message(f"[ERROR] load_first_page_instantly: {type(e).__name__}: {e}")
+        
+        # Start loading first page instantly in separate thread
+        instant_thread = threading.Thread(target=load_first_page_instantly, daemon=True)
+        instant_thread.start()
+        
+        # Start fetching total commit count IMMEDIATELY in separate thread (independent of streaming)
+        # This ensures we show the real total count as soon as possible, not wait for streaming
+        def fetch_total_count_background():
+            """Fetch total commit count independently."""
+            try:
+                # Resolve HEAD to branch name if needed
+                actual_ref = ref_spec
+                if ref_spec == "HEAD":
+                    branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                    branch_result = subprocess.run(
+                        branch_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    if branch_result.returncode == 0:
+                        actual_ref = branch_result.stdout.strip()
+                
+                # Check cache first
+                if actual_ref and actual_ref in self._commit_count_cache:
+                    count = self._commit_count_cache[actual_ref]
+                    self.call_from_thread(self._update_commits_count_ui, count)
+                    _log_timing_message(f"[PTY] [DEBUG] Total commit count from cache: {count}")
+                    return
+                
+                # Fetch total count
+                count_cmd = ["git", "rev-list", "--count", ref_spec]
+                count_result = subprocess.run(
+                    count_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=repo_path_str
+                )
+                if count_result.returncode == 0:
+                    count = int(count_result.stdout.strip())
+                    # Cache the result
+                    if actual_ref:
+                        self._commit_count_cache[actual_ref] = count
+                    # Update UI immediately
+                    self.call_from_thread(self._update_commits_count_ui, count)
+                    _log_timing_message(f"[PTY] [DEBUG] Total commit count fetched: {count}")
+            except Exception as e:
+                _log_timing_message(f"[ERROR] fetch_total_count_background: {type(e).__name__}: {e}")
+        
+        # Start count fetch in separate thread immediately
+        count_thread = threading.Thread(target=fetch_total_count_background, daemon=True)
+        count_thread.start()
+        
+        # Start status update immediately (independent of streaming)
+        # This ensures status updates happen continuously, not just at the end
+        def start_status_update_immediately():
+            """Start status update immediately, not waiting for commits to load."""
+            # Small delay to ensure self.commits exists, then start status update
+            import time
+            time.sleep(0.1)  # Brief delay to let first commit load
+            if hasattr(self, 'commits') and self.commits:
+                self._start_commits_status_update_background(self.commits, ref_spec, branch, repo_path_str)
+        
+        status_thread = threading.Thread(target=start_status_update_immediately, daemon=True)
+        status_thread.start()
+        
+        _log_timing_message(f"[PTY] [DEBUG] _load_commits_pty: Starting for branch {branch}")
+        
+        # Parse commit lines as they stream in
+        commits: list[CommitInfo] = []
+        seen_shas = set()
+        batch_size = 20  # Update UI every 20 commits for better performance
+        
+        def parse_commit_line(line: str) -> Optional[CommitInfo]:
+            """Parse a single commit line from git log output."""
+            if not line:
+                return None
+            
+            # Skip the '+' prefix (lazygit format)
+            if line.startswith('+'):
+                line = line[1:]
+            
+            parts = line.split("\x00")
+            # LazyGit format has 8 fields: SHA, timestamp, author name, author email, parents, merge, refs, subject
+            if len(parts) >= 8:
+                sha = parts[0].strip()
+                # Remove '+' prefix if present (from lazygit format: +%H)
+                if sha.startswith('+'):
+                    sha = sha[1:]
+                
+                # Skip if we've already seen this commit SHA (deduplicate)
+                if sha in seen_shas:
+                    return None
+                seen_shas.add(sha)
+                
+                timestamp_str = parts[1].strip()
+                author_name = parts[2].strip()
+                author_email = parts[3].strip()
+                # parts[4] = parents (not used)
+                # parts[5] = merge status (not used)
+                # parts[6] = refs (not used)
+                summary = parts[7].strip()
+                
+                # Combine author name and email
+                author = f"{author_name} <{author_email}>" if author_email else author_name
+                
+                # Parse timestamp
+                try:
+                    timestamp = int(timestamp_str)
+                except ValueError:
+                    timestamp = 0
+                
+                return CommitInfo(
+                    sha=sha,
+                    summary=summary,
+                    author=author,
+                    timestamp=timestamp,
+                    pushed=False,  # Default to unpushed (red -) initially, will be updated in background
+                    merged=False,  # Will be updated in background
+                )
+            elif len(parts) >= 5:
+                # Fallback: try to parse with old format if new format fails
+                sha = parts[0].strip()
+                if sha in seen_shas:
+                    return None
+                seen_shas.add(sha)
+                
+                # Try old format: %H%x00%an%x00%ae%x00%at%x00%s
+                author_name = parts[1].strip()
+                author_email = parts[2].strip()
+                timestamp_str = parts[3].strip()
+                summary = parts[4].strip()
+                
+                author = f"{author_name} <{author_email}>" if author_email else author_name
+                
+                try:
+                    timestamp = int(timestamp_str)
+                except ValueError:
+                    timestamp = 0
+                
+                return CommitInfo(
+                    sha=sha,
+                    summary=summary,
+                    author=author,
+                    timestamp=timestamp,
+                    pushed=False,  # Default to unpushed (red -) initially, will be updated in background
+                    merged=False,  # Will be updated in background
+                )
+            return None
+        
+        def stream_commits_in_background():
+            """Stream commits in background thread."""
+            try:
+                repo_path = Path(repo_path_str)
+                line_count = 0
+                
+                # Stream git log output via PTY
+                for rich_line in stream_git_command_pty(
+                    cmd,
+                    repo_path,
+                    timeout=30.0,
+                    max_lines=None
+                ):
+                    # Get plain text from Rich Text object
+                    line = rich_line.plain
+                    
+                    # Parse commit from line
+                    commit = parse_commit_line(line)
+                    if commit:
+                        # Skip commits that are already in first page (loaded instantly)
+                        if hasattr(self, 'commits') and self.commits:
+                            # Check if this commit is already displayed
+                            existing_shas = {_normalize_commit_sha(c.sha) for c in self.commits}
+                            if _normalize_commit_sha(commit.sha) in existing_shas:
+                                continue  # Skip, already shown in first page
+                        
+                        commits.append(commit)
+                        line_count += 1
+                        
+                        # Update UI progressively (every batch_size commits)
+                        # First page is already shown, so we just append new commits
+                        should_update = len(commits) % batch_size == 0
+                        if should_update:
+                            # Update commits pane from main thread (append new commits)
+                            commits_copy = commits.copy()
+                            self.call_from_thread(
+                                lambda: self._update_commits_ui_progressive(commits_copy, ref_spec, branch)
+                            )
+                            
+                            # Trigger status update periodically as commits load (every batch = 20 commits)
+                            if len(commits) % batch_size == 0:
+                                # Update status for all currently displayed commits
+                                self.call_from_thread(
+                                    lambda: self._start_commits_status_update_background(commits_copy, ref_spec, branch, repo_path_str)
+                                )
+                
+                # Final update with all commits
+                _log_timing_message(f"[PTY] [DEBUG] _load_commits_pty: Streamed {len(commits)} commits")
+                self.call_from_thread(
+                    lambda: self._finalize_commits_loading(commits, ref_spec, branch, repo_path_str)
+                )
+                
+            except Exception as e:
+                import traceback
+                error_msg = f"Error streaming commits with PTY: {e}"
+                _log_timing_message(f"[PTY] [ERROR] {error_msg}")
+                _log_timing_message(f"[PTY] [ERROR] Traceback:\n{traceback.format_exc()}")
+                # Fallback to empty commits list
+                self.call_from_thread(
+                    lambda: self._finalize_commits_loading([], ref_spec, branch, repo_path_str)
+                )
+        
+        # Start streaming in background thread
+        thread = threading.Thread(target=stream_commits_in_background, daemon=True)
+        thread.start()
+    
+    def _prebuffer_commits_ahead(self, start_index: int, count: int) -> None:
+        """Pre-buffer commits ahead of current scroll position.
+        
+        Phase 2: Loads commits in background before user scrolls to them,
+        ensuring smooth virtual scrolling without visible lag.
+        
+        Args:
+            start_index: Index to start loading from (current loaded count)
+            count: Number of commits to pre-buffer
+        """
+        if self._prebuffering:
+            return  # Already pre-buffering
+        
+        if not self.active_branch:
+            return
+        
+        if self._search_query:
+            return  # Don't pre-buffer when searching
+        
+        self._prebuffering = True
+        
+        def prebuffer_in_background():
+            """Load commits in background thread."""
+            try:
+                self._load_commits_batch_background(start_index, count)
+            finally:
+                self._prebuffering = False
+        
+        # Start pre-buffering in background thread (non-blocking)
+        import threading
+        thread = threading.Thread(target=prebuffer_in_background, daemon=True)
+        thread.start()
+    
+    def _load_commits_batch_background(self, start_index: int, count: int) -> None:
+        """Load a batch of commits in background thread.
+        
+        Phase 2: Loads commits and appends them to all_commits without
+        triggering full UI re-render. Commits are ready when user scrolls.
+        
+        Args:
+            start_index: Index to start loading from
+            count: Number of commits to load
+        """
+        import subprocess
+        from pathlib import Path
+        
+        if not self.active_branch:
+            return
+        
+        ref_spec = self.active_branch if self.active_branch else "HEAD"
+        
+        # Get repo path
+        repo_path = getattr(self, 'repo_path', None)
+        if not repo_path:
+            try:
+                repo_path = getattr(self.git, 'repo_path', None)
+            except:
+                pass
+        if not repo_path:
+            repo_path = "."
+        
+        repo_path_str = str(repo_path) if repo_path else "."
+        
+        try:
+            # Build git log command
+            cmd = [
+                "git", "log",
+                ref_spec,
+                "--oneline",
+                f"--max-count={count}",
+                f"--skip={start_index}",
+                "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
+                "--abbrev=40",
+                "--no-show-signature",
+            ]
+            
+            # Run git log
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=repo_path_str
+            )
+            
+            if result.returncode == 0:
+                # Parse commits
+                new_commits = []
+                seen_shas = set()
+                
+                # Get existing SHAs to avoid duplicates
+                existing_shas = {_normalize_commit_sha(c.sha) for c in self.all_commits} if hasattr(self, 'all_commits') and self.all_commits else set()
+                
+                for line in result.stdout.strip().split("\n"):
+                    if not line:
+                        continue
+                    
+                    # Skip the '+' prefix (lazygit format)
+                    if line.startswith('+'):
+                        line = line[1:]
+                    
+                    parts = line.split("\x00")
+                    if len(parts) >= 8:
+                        sha = parts[0].strip()
+                        if sha.startswith('+'):
+                            sha = sha[1:]
+                        
+                        normalized_sha = _normalize_commit_sha(sha)
+                        if normalized_sha in seen_shas or normalized_sha in existing_shas:
+                            continue
+                        seen_shas.add(normalized_sha)
+                        
+                        timestamp_str = parts[1].strip()
+                        author_name = parts[2].strip()
+                        author_email = parts[3].strip()
+                        summary = parts[7].strip()
+                        
+                        author = f"{author_name} <{author_email}>" if author_email else author_name
+                        
+                        try:
+                            timestamp = int(timestamp_str)
+                        except ValueError:
+                            timestamp = 0
+                        
+                        from pygitzen.git_service import CommitInfo
+                        commit = CommitInfo(
+                            sha=sha,
+                            summary=summary,
+                            author=author,
+                            timestamp=timestamp,
+                            pushed=True,  # Will be updated by background thread
+                            merged=False,  # Will be updated by background thread
+                        )
+                        new_commits.append(commit)
+                
+                if new_commits:
+                    # Append to all_commits (but don't render yet - they'll be rendered when user scrolls)
+                    if not hasattr(self, 'all_commits') or not self.all_commits:
+                        self.all_commits = []
+                    self.all_commits.extend(new_commits)
+                    
+                    # Update loaded_commits count
+                    self.loaded_commits = len(self.all_commits)
+                    
+                    _log_timing_message(f"[TIMING] [PREBUFFER] Loaded {len(new_commits)} commits in background (total loaded: {self.loaded_commits})")
+                    
+                    # Note: We don't call append_commits() here - commits are pre-buffered
+                    # and will be rendered when user actually scrolls to them via load_more_commits()
+        except Exception as e:
+            _log_timing_message(f"[ERROR] [PREBUFFER] Error loading commits batch: {type(e).__name__}: {e}")
+    
+    def _show_first_page_instantly(self, commits: list[CommitInfo], ref_spec: str, branch: str, repo_path_str: str) -> None:
+        """Show first page of commits instantly for immediate UX feedback.
+        
+        This loads the first page immediately and starts status updates right away.
+        """
+        # Store commits
+        self.commits = commits.copy()
+        self.all_commits = commits.copy()
+        
+        # Apply search filter if there's a search query
+        if self._search_query:
+            self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+        
+        # Update UI immediately
+        self.commits_pane.set_commits(self.commits)
+        self._commits_initialized = True
+        
+        # Select first commit if available
+        if self.commits and self.selected_commit_index is None:
+            self.selected_commit_index = 0
+            self.commits_pane.index = 0
+            self.commits_pane.highlighted = 0
+            self.commits_pane._last_index = None
+            self.commits_pane._update_highlighting(0)
+        
+        # Update title
+        self._update_commits_title()
+        
+        # CRITICAL: Start status update IMMEDIATELY for instant commits
+        # This ensures status is correct from the start, not waiting for streaming
+        self._start_commits_status_update_background(self.commits, ref_spec, branch, repo_path_str)
+    
+    def _update_commits_ui_progressive(self, commits: list[CommitInfo], ref_spec: str, branch: str) -> None:
+        """Update commits pane progressively as commits stream in."""
+        if not commits:
+            return
+        
+        # Store commits (limit to page_size to match original behavior)
+        all_commits = commits.copy()
+        # Limit displayed commits to page_size (matching original load_commits behavior)
+        displayed_commits = all_commits[:self.page_size] if len(all_commits) > self.page_size else all_commits
+        
+        # Track if this is the first update (to use set_commits vs append_commits)
+        is_first_update = not hasattr(self, '_commits_initialized') or not self._commits_initialized
+        
+        if is_first_update:
+            # First update: use set_commits to initialize the pane
+            self.commits = displayed_commits.copy()
+            self.all_commits = all_commits.copy()  # Store all commits for search
+            
+            # Apply search filter if there's a search query
+            if self._search_query:
+                self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+            
+            # Update UI immediately - show commits as they stream in
+            self.commits_pane.set_commits(self.commits)
+            self._commits_initialized = True
+            
+            # Select first commit if available
+            if self.commits and self.selected_commit_index is None:
+                self.selected_commit_index = 0
+                self.commits_pane.index = 0
+                self.commits_pane.highlighted = 0
+                self.commits_pane._last_index = None
+                self.commits_pane._update_highlighting(0)
+        else:
+            # Subsequent updates: only append new commits (don't clear and re-render)
+            current_count = len(self.commits) if hasattr(self, 'commits') else 0
+            new_commits = displayed_commits[current_count:]
+            
+            if new_commits:
+                # Update stored commits
+                self.commits.extend(new_commits)
+                self.all_commits = all_commits.copy()
+                
+                # Apply search filter if there's a search query
+                if self._search_query:
+                    self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+                
+                # Append only new commits to UI (doesn't clear existing)
+                self.commits_pane.append_commits(new_commits)
+        
+        # Don't update total_commits here - it's fetched independently in background
+        # Only update the title to show current displayed count
+        # The total will be updated by _update_commits_count_ui when background thread finishes
+        self._update_commits_title()
+    
+    def _start_commits_status_update_background(self, commits: list[CommitInfo], ref_spec: str, branch: str, repo_path_str: str) -> None:
+        """Start background thread to update commit status early (not waiting for all commits).
+        
+        This updates ALL currently displayed commits, not just the batch passed to it.
+        """
+        import threading
+        
+        def update_commits_metadata_background():
+            """Update commit count and push status in background with cache and invalidation."""
+            import subprocess
+            import time
+            try:
+                # Resolve HEAD to branch name if needed (for cache key)
+                actual_ref = ref_spec
+                if ref_spec == "HEAD":
+                    branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                    branch_result = subprocess.run(
+                        branch_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    if branch_result.returncode == 0:
+                        actual_ref = branch_result.stdout.strip()
+                
+                # Get ALL currently displayed commits (not just the batch parameter)
+                # This ensures we update all visible commits, not just the first batch
+                all_displayed_commits = self.commits.copy() if hasattr(self, 'commits') and self.commits else commits.copy()
+                
+                # Update push/merge status from cache if available
+                # CRITICAL: Always fetch fresh status when called from GitWatcher (new commit detected)
+                # Skip cache to ensure accurate status for new commits
+                if actual_ref and actual_ref != "HEAD":
+                    cache_key = f"{actual_ref}_unpushed"
+                    merged_cache_key = f"{actual_ref}_merged"
+                    # Also try refs/heads/ prefix
+                    cache_key_refs = f"refs/heads/{actual_ref}_unpushed"
+                    merged_cache_key_refs = f"refs/heads/{actual_ref}_merged"
+                    
+                    # Check both cache key formats
+                    has_cache = (cache_key in self._remote_commits_cache or 
+                               merged_cache_key in self._remote_commits_cache or
+                               cache_key_refs in self._remote_commits_cache or
+                               merged_cache_key_refs in self._remote_commits_cache)
+                    
+                    # CRITICAL: If cache exists but was recently cleared (indicates new commit),
+                    # force fresh fetch instead of using stale cache
+                    # We detect this by checking if cache was cleared in _refresh_on_new_commit
+                    # For now, always fetch fresh when status update is triggered after new commit
+                    # (The cache clearing in _refresh_on_new_commit ensures cache is empty)
+                    if has_cache:
+                        # Update status from cache (only if cache wasn't cleared)
+                        unpushed_commits = (self._remote_commits_cache.get(cache_key, set()) or 
+                                          self._remote_commits_cache.get(cache_key_refs, set()))
+                        merged_commits = (self._remote_commits_cache.get(merged_cache_key, set()) or 
+                                        self._remote_commits_cache.get(merged_cache_key_refs, set()))
+                        normalized_unpushed = {_normalize_commit_sha(sha) for sha in unpushed_commits}
+                        normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
+                        
+                        # Update ALL displayed commits in place
+                        for commit in all_displayed_commits:
+                            normalized_sha = _normalize_commit_sha(commit.sha)
+                            commit.merged = normalized_sha in normalized_merged
+                            commit.pushed = normalized_sha not in normalized_unpushed
+                        
+                        # Update UI with ALL displayed commits
+                        self.call_from_thread(self._update_commits_push_status_ui, all_displayed_commits)
+                        _log_timing_message(f"[PTY] [DEBUG] Updated push/merge status early from cache for {len(all_displayed_commits)} displayed commits")
+                    else:
+                        # Cache miss - need to fetch status (use full background update logic)
+                        # This will fetch merged/unpushed status and update all commits
+                        _log_timing_message(f"[PTY] [DEBUG] Cache miss for {actual_ref}, will fetch status in background")
+                        # Trigger full background update (similar to _finalize_commits_loading)
+                        self._update_commits_status_full_background(all_displayed_commits, ref_spec, branch, repo_path_str)
+                else:
+                    # No valid ref - trigger full background update
+                    _log_timing_message(f"[PTY] [DEBUG] No valid ref, will fetch status in background")
+                    self._update_commits_status_full_background(all_displayed_commits, ref_spec, branch, repo_path_str)
+            except Exception as e:
+                _log_timing_message(f"[ERROR] _start_commits_status_update_background: {type(e).__name__}: {e}")
+        
+        thread = threading.Thread(target=update_commits_metadata_background, daemon=True)
+        thread.start()
+    
+    def _update_commits_status_full_background(self, commits: list[CommitInfo], ref_spec: str, branch: str, repo_path_str: str) -> None:
+        """Full background update of commit status (fetches from git if cache miss).
+        
+        This updates ALL currently displayed commits in self.commits, not just the commits parameter.
+        """
+        import threading
+        import subprocess
+        import time
+        
+        def update_full_background():
+            """Fetch and update commit status from git."""
+            try:
+                # Resolve HEAD to branch name if needed
+                actual_ref = ref_spec
+                if ref_spec == "HEAD":
+                    branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                    branch_result = subprocess.run(
+                        branch_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    if branch_result.returncode == 0:
+                        actual_ref = branch_result.stdout.strip()
+                
+                if not actual_ref or actual_ref == "HEAD":
+                    return
+                
+                # Fetch merged commits from main/master (same logic as load_commits)
+                main_branches = ["main", "master"]
+                merged_commits = set()
+                merged_cache_key = f"{actual_ref}_merged"
+                
+                for main_branch in main_branches:
+                    try:
+                        merged_cmd = ["git", "rev-list", "--max-count=100000", main_branch]
+                        merged_result = subprocess.run(
+                            merged_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=repo_path_str
+                        )
+                        if merged_result.returncode == 0:
+                            merged_shas = set(merged_result.stdout.strip().split('\n'))
+                            merged_commits.update(merged_shas)
+                            # Cache the result
+                            self._remote_commits_cache[merged_cache_key] = merged_commits
+                            break
+                    except Exception:
+                        continue
+                
+                # Fetch unpushed commits (using same logic as load_commits)
+                cache_key = f"{actual_ref}_unpushed"
+                unpushed_commits = set()
+                try:
+                    # Get upstream tracking branch
+                    upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{actual_ref}@{{u}}"]
+                    upstream_result = subprocess.run(
+                        upstream_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                        cwd=repo_path_str
+                    )
+                    
+                    if upstream_result.returncode == 0:
+                        upstream_branch = upstream_result.stdout.strip()
+                        # Get main branches to exclude
+                        main_branches = []
+                        for main_branch in ["origin/main", "origin/master"]:
+                            check_main = subprocess.run(
+                                ["git", "rev-parse", "--verify", main_branch],
+                                capture_output=True,
+                                text=True,
+                                timeout=1,
+                                cwd=repo_path_str
+                            )
+                            if check_main.returncode == 0:
+                                main_branches.append(main_branch)
+                        
+                        # Build command: git rev-list <branch> --not <upstream> --not <main-branches>
+                        unpushed_cmd = ["git", "rev-list", actual_ref, "--not", upstream_branch]
+                        for main_branch in main_branches:
+                            unpushed_cmd.extend(["--not", main_branch])
+                        
+                        unpushed_result = subprocess.run(
+                            unpushed_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            cwd=repo_path_str
+                        )
+                        if unpushed_result.returncode == 0:
+                            unpushed_shas = set(unpushed_result.stdout.strip().split('\n'))
+                            unpushed_commits.update([sha.strip() for sha in unpushed_shas if sha.strip()])
+                            # Cache the result
+                            self._remote_commits_cache[cache_key] = unpushed_commits
+                except Exception:
+                    pass
+                
+                # CRITICAL: Get ALL currently displayed commits (not just the parameter)
+                # This ensures we update all visible commits, even if more were loaded since this started
+                all_displayed_commits = self.commits.copy() if hasattr(self, 'commits') and self.commits else commits.copy()
+                
+                # Update commits with fetched status
+                normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
+                normalized_unpushed = {_normalize_commit_sha(sha) for sha in unpushed_commits}
+                
+                for commit in all_displayed_commits:
+                    normalized_sha = _normalize_commit_sha(commit.sha)
+                    commit.merged = normalized_sha in normalized_merged
+                    commit.pushed = normalized_sha not in normalized_unpushed
+                    # Mark as updated to prevent reset
+                    commit._status_updated = True
+                
+                # Update UI with ALL displayed commits
+                self.call_from_thread(self._update_commits_push_status_ui, all_displayed_commits)
+                _log_timing_message(f"[PTY] [DEBUG] Updated push/merge status from git for {len(all_displayed_commits)} displayed commits")
+            except Exception as e:
+                _log_timing_message(f"[ERROR] _update_commits_status_full_background: {type(e).__name__}: {e}")
+        
+        thread = threading.Thread(target=update_full_background, daemon=True)
+        thread.start()
+    
+    def _finalize_commits_loading(self, commits: list[CommitInfo], ref_spec: str, branch: str, repo_path_str: str) -> None:
+        """Finalize commits loading with cache checking and background updates.
+        
+        CRITICAL: This should NOT reset status that was already set. Only update if status is unknown.
+        """
+        import subprocess
+        # Reset status update flag for next load
+        if hasattr(self, '_status_update_started'):
+            delattr(self, '_status_update_started')
+        
+        # CRITICAL: If commits are already displayed with correct status, DON'T reset them
+        # Only merge in new commits that weren't in the first page
+        if hasattr(self, 'commits') and self.commits and hasattr(self, '_commits_initialized') and self._commits_initialized:
+            # Commits are already displayed - just merge in any new commits from streaming
+            existing_shas = {_normalize_commit_sha(c.sha) for c in self.commits}
+            new_commits = [c for c in commits if _normalize_commit_sha(c.sha) not in existing_shas]
+            
+            if new_commits:
+                # Limit to page_size total
+                current_count = len(self.commits)
+                remaining_slots = max(0, self.page_size - current_count)
+                commits_to_add = new_commits[:remaining_slots] if remaining_slots > 0 else []
+                
+                if commits_to_add:
+                    # Append new commits
+                    self.commits.extend(commits_to_add)
+                    self.all_commits = (self.all_commits + commits_to_add) if hasattr(self, 'all_commits') else commits_to_add.copy()
+                    
+                    # Apply search filter if there's a search query
+                    if self._search_query:
+                        self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+                    
+                    # Append to UI without clearing
+                    self.commits_pane.append_commits(commits_to_add)
+            
+            # Update status for ALL displayed commits (including new ones)
+            # This ensures status is updated without resetting existing status
+            # Only update if status hasn't been set yet (avoid overwriting correct status)
+            # Check if status was already updated - if so, don't reset it
+            needs_status_update = any(not hasattr(c, '_status_updated') or not c._status_updated for c in self.commits)
+            if needs_status_update:
+                self._start_commits_status_update_background(self.commits, ref_spec, branch, repo_path_str)
+            
+            # Update title
+            self._update_commits_title()
+            return  # Don't proceed with the rest - commits are already displayed
+        
+        # Fallback: If commits aren't initialized yet, proceed with normal initialization
+        # Store final commits
+        all_commits = commits.copy()
+        # Limit displayed commits to page_size (matching original load_commits behavior)
+        displayed_commits = all_commits[:self.page_size] if len(all_commits) > self.page_size else all_commits
+        
+        # CRITICAL: Preserve status from existing commits if they're already displayed
+        # This prevents resetting status back to default values
+        existing_status_map = {}
+        if hasattr(self, 'commits') and self.commits:
+            # Create a map of existing commit status by SHA
+            for existing_commit in self.commits:
+                normalized_sha = _normalize_commit_sha(existing_commit.sha)
+                existing_status_map[normalized_sha] = {
+                    'pushed': existing_commit.pushed,
+                    'merged': existing_commit.merged
+                }
+            
+            # Apply preserved status to new commits
+            for commit in displayed_commits:
+                normalized_sha = _normalize_commit_sha(commit.sha)
+                if normalized_sha in existing_status_map:
+                    # Preserve the status that was already set
+                    commit.pushed = existing_status_map[normalized_sha]['pushed']
+                    commit.merged = existing_status_map[normalized_sha]['merged']
+        
+        self.commits = displayed_commits.copy()
+        self.all_commits = all_commits.copy()
+        
+        # Apply search filter if there's a search query
+        if self._search_query:
+            self.commits = self._filter_commits_by_search(self.all_commits, self._search_query)
+        
+        # Only update UI if commits have changed (avoid clearing if already set)
+        # Check if we need to update (different count or different commits)
+        current_commits_count = len(self.commits_pane._commit_shas) if hasattr(self.commits_pane, '_commit_shas') else 0
+        if current_commits_count != len(self.commits) or not hasattr(self, '_commits_initialized') or not self._commits_initialized:
+            # Update UI only if needed (final set ensures consistency)
+            self.commits_pane.set_commits(self.commits)
+            self._commits_initialized = True
+        else:
+            # Commits are already displayed - just update status in place without clearing
+            # This preserves the UI and only updates the status
+            self.commits_pane.update_push_status_in_place(self.commits)
+        
+        # Don't override total_commits here - it's fetched independently in background
+        # Only update title (total will be updated by _update_commits_count_ui when background thread finishes)
+        self._update_commits_title()
+        
+        # Select first commit if available
+        if self.commits and self.selected_commit_index is None:
+            self.selected_commit_index = 0
+            self.commits_pane.index = 0
+            self.commits_pane.highlighted = 0
+        
+        # Try to get status from cache immediately (same logic as original load_commits)
+        actual_ref = ref_spec
+        if ref_spec == "HEAD":
+            try:
+                branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                branch_result = subprocess.run(
+                    branch_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    cwd=repo_path_str
+                )
+                if branch_result.returncode == 0:
+                    actual_ref = branch_result.stdout.strip()
+            except Exception:
+                pass
+        
+        # Check cache for unpushed commits and merged commits (same logic as original)
+        if actual_ref and actual_ref != "HEAD":
+            cache_key = f"{actual_ref}_unpushed"
+            
+            merged_commits = set()
+            merged_cache_key = f"{actual_ref}_merged"
+            if merged_cache_key in self._remote_commits_cache:
+                merged_commits = self._remote_commits_cache[merged_cache_key]
+                _log_timing_message(f"[CACHE] HIT merged_commits_cache for {actual_ref}: {len(merged_commits)} merged commits")
+            else:
+                _log_timing_message(f"[CACHE] MISS merged_commits_cache for {actual_ref}: skipping sync fetch, will fetch in background")
+            
+            normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
+            
+            # Set status immediately from cache if available
+            # CRITICAL: Update status on self.commits (displayed commits), not the commits parameter
+            # This ensures status is preserved and applied to the correct objects
+            # CRITICAL: Only update status if it hasn't been set yet (avoid overwriting correct status)
+            if cache_key in self._remote_commits_cache:
+                unpushed_commits = self._remote_commits_cache[cache_key]
+                normalized_unpushed = {_normalize_commit_sha(sha) for sha in unpushed_commits}
+                
+                for commit in self.commits:
+                    normalized_sha = _normalize_commit_sha(commit.sha)
+                    # Only update if status hasn't been set yet (avoid overwriting correct status)
+                    if not hasattr(commit, '_status_updated') or not commit._status_updated:
+                        commit.merged = normalized_sha in normalized_merged
+                        commit.pushed = normalized_sha not in normalized_unpushed
+                        commit._status_updated = True
+            else:
+                for commit in self.commits:
+                    normalized_sha = _normalize_commit_sha(commit.sha)
+                    # Only update if status hasn't been set yet (avoid overwriting correct status)
+                    if not hasattr(commit, '_status_updated') or not commit._status_updated:
+                        commit.merged = normalized_sha in normalized_merged
+                        # Keep pushed=False (red -) initially - background thread will update it
+                        # Unpushed commits should show red dash (-) until status is determined
+                        commit._status_updated = False  # Mark as not fully updated yet
+        
+        # Start background thread to update commit count and push status
+        # Copy the full background update logic from load_commits() below
+        def update_commits_metadata_background():
+            """Update commit count and push status in background with cache and invalidation."""
+            import subprocess
+            import time
+            try:
+                # Resolve HEAD to branch name if needed (for cache key)
+                actual_ref = ref_spec
+                if ref_spec == "HEAD":
+                    head_resolve_start = time.perf_counter()
+                    branch_cmd = ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+                    branch_result = subprocess.run(
+                        branch_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        cwd=repo_path_str
+                    )
+                    head_resolve_elapsed = time.perf_counter() - head_resolve_start
+                    if branch_result.returncode == 0:
+                        actual_ref = branch_result.stdout.strip()
+                        _log_timing_message(f"[TIMING] git rev-parse --abbrev-ref HEAD: {head_resolve_elapsed:.4f}s (result: {actual_ref})")
+                    else:
+                        _log_timing_message(f"[TIMING] git rev-parse --abbrev-ref HEAD: {head_resolve_elapsed:.4f}s (ERROR: {branch_result.stderr})")
+                
+                # Check if local HEAD changed (for commit count cache invalidation)
+                current_head_sha = None
+                if actual_ref and actual_ref != "HEAD":
+                    try:
+                        head_sha_cmd = ["git", "rev-parse", actual_ref]
+                        head_sha_result = subprocess.run(
+                            head_sha_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            cwd=repo_path_str
+                        )
+                        if head_sha_result.returncode == 0:
+                            current_head_sha = head_sha_result.stdout.strip()
+                    except Exception:
+                        pass  # If we can't get HEAD SHA, proceed without invalidation check
+                
+                # Invalidate commit count cache if HEAD changed
+                cache_invalidated_count = False
+                if current_head_sha and actual_ref in self._last_head_sha:
+                    if self._last_head_sha[actual_ref] != current_head_sha:
+                        # HEAD changed → invalidate commit count cache
+                        self._commit_count_cache.pop(actual_ref, None)
+                        cache_invalidated_count = True
+                        _log_timing_message(f"[CACHE] INVALIDATED commit_count_cache for {actual_ref} (HEAD changed: {self._last_head_sha[actual_ref][:8]} → {current_head_sha[:8]})")
+                
+                # Update commit count - check cache first
+                count_start = time.perf_counter()
+                if actual_ref in self._commit_count_cache and not cache_invalidated_count:
+                    # Cache HIT
+                    count = self._commit_count_cache[actual_ref]
+                    count_elapsed = time.perf_counter() - count_start
+                    self.call_from_thread(self._update_commits_count_ui, count)
+                    _log_timing_message(f"[CACHE] HIT commit_count_cache for {actual_ref}: {count} (saved {count_elapsed:.4f}s)")
+                else:
+                    # Cache MISS or INVALIDATED - fetch fresh data
+                    try:
+                        count_cmd = ["git", "rev-list", "--count", ref_spec]
+                        count_result = subprocess.run(
+                            count_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,  # Increased timeout for large repos (68k+ commits)
+                            cwd=repo_path_str
+                        )
+                        count_elapsed = time.perf_counter() - count_start
+                        if count_result.returncode == 0:
+                            count = int(count_result.stdout.strip())
+                            # Cache the result
+                            self._commit_count_cache[actual_ref] = count
+                            # Update tracked HEAD SHA
+                            if current_head_sha:
+                                self._last_head_sha[actual_ref] = current_head_sha
+                            # Update UI in main thread
+                            self.call_from_thread(self._update_commits_count_ui, count)
+                            cache_reason = "INVALIDATED" if cache_invalidated_count else "MISS"
+                            _log_timing_message(f"[CACHE] {cache_reason} commit_count_cache for {actual_ref}: fetched {count} in {count_elapsed:.4f}s")
+                        else:
+                            _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (ERROR: {count_result.stderr})")
+                    except Exception as count_e:
+                        count_elapsed = time.perf_counter() - count_start
+                        _log_timing_message(f"[TIMING] git rev-list --count {ref_spec}: {count_elapsed:.4f}s (EXCEPTION: {type(count_e).__name__}: {count_e})")
+                
+                # Update push/merge status (simplified version - full implementation in load_commits)
+                # For now, just update the commits we have with cache if available
+                if actual_ref and actual_ref != "HEAD":
+                    cache_key = f"{actual_ref}_unpushed"
+                    merged_cache_key = f"{actual_ref}_merged"
+                    
+                    if cache_key in self._remote_commits_cache or merged_cache_key in self._remote_commits_cache:
+                        # Update status from cache
+                        unpushed_commits = self._remote_commits_cache.get(cache_key, set())
+                        merged_commits = self._remote_commits_cache.get(merged_cache_key, set())
+                        normalized_unpushed = {_normalize_commit_sha(sha) for sha in unpushed_commits}
+                        normalized_merged = {_normalize_commit_sha(sha) for sha in merged_commits}
+                        
+                        # Update commits in place
+                        for commit in commits:
+                            normalized_sha = _normalize_commit_sha(commit.sha)
+                            commit.merged = normalized_sha in normalized_merged
+                            commit.pushed = normalized_sha not in normalized_unpushed
+                        
+                        # Update UI
+                        self.call_from_thread(self._update_commits_push_status_ui, commits)
+                        _log_timing_message(f"[PTY] [DEBUG] Updated push/merge status from cache for {len(commits)} commits")
+            except Exception as e:
+                _log_timing_message(f"[ERROR] update_commits_metadata_background (PTY): {type(e).__name__}: {e}")
+        
+        import threading
+        thread = threading.Thread(target=update_commits_metadata_background, daemon=True)
+        thread.start()
+
     def load_commits(self, branch: str) -> None:
         """Load all commits from all branches (not branch-specific)."""
         import subprocess
         from datetime import datetime
+        from pygitzen.pty_utils import should_use_pty
         
         # Update Commits pane title to show current branch (matching lazygit)
         self.commits_pane.border_title = f"Commits ({branch})" if branch else "Commits (HEAD)"
@@ -4323,7 +6155,7 @@ class PygitzenApp(App):
                 "git", "log",
                 ref_spec,  # Current branch (matching lazygit - shows branch-specific commits)
                 "--oneline",  # Match lazygit
-                f"--max-count={self.page_size}",  # Keep our limit of 200
+                f"--max-count={self.page_size}",  # Keep our limit of 300
                 "--pretty=format:+%H%x00%at%x00%aN%x00%ae%x00%P%x00%m%x00%D%x00%s",
                 "--abbrev=40",  # Match lazygit (40-char abbreviated SHA)
                 "--no-show-signature",  # Match lazygit
@@ -4348,7 +6180,13 @@ class PygitzenApp(App):
             # Convert to string if it's a Path object
             repo_path_str = str(repo_path) if repo_path else "."
             
-            # Run git log with timeout
+            # Check if PTY streaming should be used
+            if should_use_pty():
+                _log_timing_message(f"[PTY] [DEBUG] load_commits: Using PTY streaming for branch {branch}")
+                self._load_commits_pty(cmd, repo_path_str, ref_spec, branch)
+                return  # PTY version handles everything, including UI updates
+            
+            # Run git log with timeout (fallback to subprocess)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -4879,8 +6717,14 @@ class PygitzenApp(App):
     def _update_commits_title(self) -> None:
         # Show current branch (matching lazygit behavior)
         branch_name = self.active_branch if self.active_branch else "HEAD"
-        total_count = self.total_commits if self.total_commits > 0 else len(self.commits)
-        self.commits_pane.border_title = f"Commits ({branch_name}) {len(self.commits)} of {total_count}"
+        displayed_count = len(self.commits) if hasattr(self, 'commits') and self.commits else 0
+        
+        # If total_commits is 0, show "loading..." or just the displayed count
+        if self.total_commits > 0:
+            self.commits_pane.border_title = f"Commits ({branch_name}) {displayed_count} of {self.total_commits}"
+        else:
+            # Total not known yet - show just displayed count or "loading..."
+            self.commits_pane.border_title = f"Commits ({branch_name}) {displayed_count}..."
     
     def _update_commits_count_ui(self, count: int) -> None:
         """Update UI to reflect commit count changes (called from background thread)."""
@@ -4943,7 +6787,10 @@ class PygitzenApp(App):
                     _log_timing_message(f"[TIMING] [SCROLL] Tags pane: Loaded batch {start_idx}-{end_idx} of {total}")
     
     def load_more_commits(self) -> None:
-        """Load more commits for the current branch (matching lazygit behavior)."""
+        """Load more commits for the current branch (matching lazygit behavior).
+        
+        Phase 2: Updated to use pre-buffered commits when available for smoother scrolling.
+        """
         import subprocess
         
         # If searching, don't load more - we're filtering existing commits
@@ -4953,6 +6800,49 @@ class PygitzenApp(App):
             return
         if self.loaded_commits >= self.total_commits:
             return
+        
+        # Phase 2: Check if we have pre-buffered commits ready
+        import time
+        load_more_start = time.perf_counter()
+        
+        current_displayed = len(self.commits) if hasattr(self, 'commits') and self.commits else 0
+        if hasattr(self, 'all_commits') and self.all_commits and len(self.all_commits) > current_displayed:
+            # We have pre-buffered commits - use them instead of fetching from git
+            commits_to_append = self.all_commits[current_displayed:current_displayed + self.page_size]
+            if commits_to_append:
+                _log_timing_message(f"[TIMING] [SCROLL] Using {len(commits_to_append)} pre-buffered commits (displayed: {current_displayed}, available: {len(self.all_commits)})")
+                
+                # Time the append operation
+                append_start = time.perf_counter()
+                self.commits.extend(commits_to_append)
+                extend_time = time.perf_counter() - append_start
+                
+                append_ui_start = time.perf_counter()
+                self.commits_pane.append_commits(commits_to_append)
+                append_ui_time = time.perf_counter() - append_ui_start
+                
+                # Note: Textual may batch updates internally, so lag might appear after append_commits returns
+                # The actual rendering might happen asynchronously in Textual's event loop
+                
+                title_start = time.perf_counter()
+                self.loaded_commits = len(self.commits)
+                self._update_commits_title()
+                title_time = time.perf_counter() - title_start
+                
+                load_more_total = time.perf_counter() - load_more_start
+                _log_timing_message(f"[TIMING] [SCROLL] load_more_commits (pre-buffered): {load_more_total*1000:.1f}ms total (extend: {extend_time*1000:.1f}ms, append_commits: {append_ui_time*1000:.1f}ms, title: {title_time*1000:.1f}ms)")
+                
+                # If append_commits took significant time, it's likely Textual ListView rendering
+                if append_ui_time > 0.05:  # More than 50ms
+                    _log_timing_message(f"[TIMING] [LAG] WARNING: append_commits took {append_ui_time*1000:.1f}ms - likely Textual ListView rendering bottleneck")
+                
+                # Update status for newly displayed commits
+                if self.active_branch:
+                    ref_spec = self.active_branch
+                    repo_path_str = str(getattr(self, 'repo_path', '.'))
+                    self._start_commits_status_update_background(commits_to_append, ref_spec, self.active_branch, repo_path_str)
+                
+                return  # Successfully used pre-buffered commits
         
         # Get more commits for the current branch (matching lazygit format)
         next_batch: list[CommitInfo] = []
@@ -5334,11 +7224,21 @@ class PygitzenApp(App):
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
             import sys
+            from pygitzen.pty_utils import should_use_pty
+            
             diff_start = time.perf_counter()
             ci = self.commits[index]
-            get_diff_start = time.perf_counter()
-            # Normalize SHA before using it
             normalized_sha = _normalize_commit_sha(ci.sha)
+            
+            # Check if PTY streaming should be used
+            if should_use_pty():
+                _log_timing_message(f"[PTY] [DEBUG] show_commit_diff: Using PTY streaming for commit {normalized_sha[:8]}")
+                self._show_commit_diff_pty(ci, normalized_sha)
+                return
+            
+            # Use subprocess method (original) - only if PTY is not enabled
+            _log_timing_message(f"[PTY] [DEBUG] show_commit_diff: PTY not enabled, using subprocess for commit {normalized_sha[:8]}")
+            get_diff_start = time.perf_counter()
             diff = self.git.get_commit_diff(normalized_sha)
             get_diff_elapsed = time.perf_counter() - get_diff_start
             _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {normalized_sha[:8]})")
@@ -5348,6 +7248,380 @@ class PygitzenApp(App):
             _log_timing_message(f"[TIMING] show_commit_info: {show_elapsed:.4f}s")
             diff_total = time.perf_counter() - diff_start
             _log_timing_message(f"[TIMING] show_commit_diff TOTAL: {diff_total:.4f}s")
+    
+    def _load_diff_first_lines(self, normalized_sha: str, num_lines: int = 100) -> tuple[str, int]:
+        """Load first N lines of diff instantly via subprocess (non-PTY, fast).
+        
+        Returns:
+            tuple: (first_lines_text, actual_lines_count)
+        """
+        import subprocess
+        from pathlib import Path
+        
+        # Get repo path
+        repo_path = None
+        if hasattr(self, 'repo_path'):
+            repo_path = Path(self.repo_path)
+        elif hasattr(self.git, 'repo_path'):
+            repo_path = Path(self.git.repo_path)
+        else:
+            repo_path = Path(".")
+        
+        if not repo_path.exists():
+            return ("", 0)
+        
+        try:
+            # Use git show with head to get first N lines (fast, non-PTY)
+            # Use --color=always to preserve ANSI colors
+            cmd = ['git', 'show', normalized_sha, '--color=always']
+            
+            # Use head command to limit to first N lines
+            import shutil
+            if shutil.which('head'):
+                # Use head command via shell to limit output
+                import os
+                full_cmd = f"git show {normalized_sha} --color=always | head -n {num_lines}"
+                result = subprocess.run(
+                    full_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=str(repo_path)
+                )
+            else:
+                # Fallback: run git show and limit lines in Python
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=str(repo_path)
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.split('\n')
+                    result.stdout = '\n'.join(lines[:num_lines])
+            
+            if result.returncode == 0:
+                output = result.stdout
+                # Find where diff starts (usually "diff --git")
+                diff_start = output.find('diff --git')
+                if diff_start >= 0:
+                    # Extract diff part only
+                    diff_text = output[diff_start:]
+                    line_count = len(diff_text.split('\n'))
+                    return (diff_text, min(line_count, num_lines))
+                # If no diff separator found, return everything
+                line_count = len(output.split('\n'))
+                return (output, min(line_count, num_lines))
+            else:
+                return ("", 0)
+        except Exception as e:
+            _log_timing_message(f"[PTY] [DEBUG] Error loading first lines: {e}")
+            return ("", 0)
+    
+    def _show_commit_diff_pty(self, commit: CommitInfo, normalized_sha: str) -> None:
+        """Show commit diff using hybrid approach: first 100 lines instantly, then PTY streaming."""
+        from pathlib import Path
+        from pygitzen.pty_utils import stream_git_command_pty
+        from rich.text import Text
+        
+        # Show commit header immediately (fast, no blocking)
+        from datetime import datetime
+        from time import timezone
+        commit_datetime = datetime.fromtimestamp(commit.timestamp)
+        offset_seconds = -timezone if timezone else 0
+        offset_hours = offset_seconds // 3600
+        offset_sign = '+' if offset_hours >= 0 else '-'
+        offset_abs = abs(offset_hours)
+        offset_str = f"{offset_sign}{offset_abs:02d}00"
+        commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
+        commit_sha = _normalize_commit_sha(commit.sha)
+        
+        header_text = f"""commit {commit_sha}
+Author: {commit.author}
+Date: {commit_date}
+
+{commit.summary}
+
+"""
+        
+        # PHASE 3: Load first 100 lines instantly (non-PTY, fast)
+        import time
+        _log_timing_message(f"[PTY] [DEBUG] Loading first 100 lines instantly for commit {normalized_sha[:8]}")
+        first_lines_start = time.perf_counter()
+        first_lines_text, first_lines_count = self._load_diff_first_lines(normalized_sha, num_lines=100)
+        first_lines_elapsed = time.perf_counter() - first_lines_start
+        _log_timing_message(f"[TIMING] [DIFF] First 100 lines loaded: {first_lines_elapsed*1000:.1f}ms ({first_lines_count} lines)")
+        
+        # Show header + first 100 lines immediately (instant feedback)
+        if first_lines_text:
+            # Parse ANSI to Rich Text for first lines
+            from pygitzen.git_graph import parse_ansi_to_rich_text
+            try:
+                first_lines_rich = parse_ansi_to_rich_text(first_lines_text)
+            except:
+                first_lines_rich = Text(first_lines_text, style="white")
+            
+            # Combine header and first lines
+            full_content = Text(header_text, style="white") + first_lines_rich
+            self.patch_pane.show_commit_info(commit, full_content, is_partial=True)
+            _log_timing_message(f"[PTY] [DEBUG] First 100 lines displayed instantly")
+        else:
+            # Fallback: show header with loading message
+            self.patch_pane.update(Text(header_text + "Loading diff...", style="white"))
+        
+        # Use task manager to handle cancellation automatically (non-blocking)
+        # This returns immediately, so UI selection updates instantly
+        def run_diff_task(should_stop: Callable[[], bool]) -> None:
+            """Stream git show output using PTY task manager."""
+            current_sha = normalized_sha
+            try:
+                _log_timing_message(f"[PTY] [DEBUG] stream_diff_in_background: Starting for commit {current_sha[:8]}")
+                
+                # Get repo path - try multiple methods
+                repo_path = None
+                if hasattr(self, 'repo_path'):
+                    repo_path = Path(self.repo_path)
+                    _log_timing_message(f"[PTY] [DEBUG] Got repo_path from self.repo_path: {repo_path}")
+                elif hasattr(self.git, 'repo_path'):
+                    repo_path = Path(self.git.repo_path)
+                    _log_timing_message(f"[PTY] [DEBUG] Got repo_path from self.git.repo_path: {repo_path}")
+                else:
+                    repo_path = Path(".")
+                    _log_timing_message(f"[PTY] [DEBUG] Using default repo_path: {repo_path}")
+                
+                # Validate repo path exists
+                if not repo_path.exists():
+                    error_msg = f"Repository path does not exist: {repo_path}"
+                    _log_timing_message(f"[PTY] [ERROR] {error_msg}")
+                    raise OSError(error_msg)
+                
+                # Validate it's a git repo
+                if not (repo_path / '.git').exists() and not (repo_path / '.git').is_file():
+                    _log_timing_message(f"[PTY] [DEBUG] Warning: .git not found at {repo_path}, but continuing...")
+                
+                # Build git show command with color support
+                cmd = ['git', 'show', normalized_sha, '--color=always']
+                _log_timing_message(f"[PTY] [DEBUG] Command: {' '.join(cmd)}")
+                _log_timing_message(f"[PTY] [DEBUG] Working directory: {repo_path}")
+                
+                # PHASE 3: Skip first 100 lines (already loaded instantly)
+                # Track lines to skip and remaining lines to append
+                lines_to_skip = first_lines_count if first_lines_text else 0
+                lines_skipped = 0
+                diff_lines_rich = []  # Store Rich Text objects for remaining lines
+                # PHASE 3: Increased batch size to 50 lines for progressive appending (less frequent updates)
+                batch_size = 50  # Update UI every 50 lines for better performance
+                diff_start_found = False
+                
+                _log_timing_message(f"[PTY] [DEBUG] Starting PTY stream for git show (will skip first {lines_to_skip} lines)")
+                
+                # Stream output using PTY (with process callback for task manager)
+                # Store process reference so we can kill it if cancelled
+                current_process_ref = [None]  # Use list to allow modification in callback
+                
+                def set_process(process):
+                    """Set process reference for cancellation."""
+                    current_process_ref[0] = process
+                    self._pty_diff_task_manager.set_current_process(process)
+                
+                line_count = 0
+                pty_stream = stream_git_command_pty(
+                    cmd,
+                    repo_path,
+                    timeout=30.0,
+                    max_lines=None,
+                    process_callback=set_process
+                )
+                try:
+                    for rich_line in pty_stream:
+                        # Check if task was cancelled
+                        if should_stop():
+                            _log_timing_message(f"[PTY] [DEBUG] Task cancelled during streaming for commit {current_sha[:8]}")
+                            # Kill the process directly if we have it (kill entire process group)
+                            if current_process_ref[0] is not None:
+                                try:
+                                    if current_process_ref[0].poll() is None:
+                                        import os
+                                        import signal
+                                        # Kill entire process group (since start_new_session=True was used)
+                                        pgid = os.getpgid(current_process_ref[0].pid)
+                                        _log_timing_message(f"[PTY] [DEBUG] Killing process group {pgid} (PID: {current_process_ref[0].pid}) due to cancellation")
+                                        try:
+                                            os.killpg(pgid, signal.SIGTERM)
+                                            try:
+                                                current_process_ref[0].wait(timeout=0.2)
+                                            except subprocess.TimeoutExpired:
+                                                os.killpg(pgid, signal.SIGKILL)
+                                                try:
+                                                    current_process_ref[0].wait(timeout=0.1)
+                                                except:
+                                                    pass
+                                        except (OSError, ProcessLookupError) as pg_error:
+                                            # Check if it's just "No such process" (process already terminated)
+                                            if isinstance(pg_error, ProcessLookupError) or (isinstance(pg_error, OSError) and pg_error.errno == 3):
+                                                # Process already terminated - this is fine, not an error
+                                                _log_timing_message(f"[PTY] [DEBUG] Process already terminated (PID: {current_process_ref[0].pid})")
+                                            else:
+                                                # Real error - try fallback
+                                                try:
+                                                    current_process_ref[0].terminate()
+                                                    try:
+                                                        current_process_ref[0].wait(timeout=0.1)
+                                                    except subprocess.TimeoutExpired:
+                                                        current_process_ref[0].kill()
+                                                except (OSError, ProcessLookupError):
+                                                    # Process already gone - ignore
+                                                    pass
+                                except (OSError, ProcessLookupError) as e:
+                                    # Process already terminated - this is expected, not an error
+                                    if isinstance(e, ProcessLookupError) or (isinstance(e, OSError) and e.errno == 3):
+                                        _log_timing_message(f"[PTY] [DEBUG] Process already terminated (expected)")
+                                    else:
+                                        _log_timing_message(f"[PTY] [DEBUG] Error killing process: {e}")
+                                except Exception as e:
+                                    _log_timing_message(f"[PTY] [DEBUG] Unexpected error killing process: {e}")
+                            # Close the generator to stop streaming (this will trigger cleanup in finally block)
+                            try:
+                                pty_stream.close()
+                            except Exception:
+                                pass
+                            break
+                        
+                        line_count += 1
+                        if line_count == 1:
+                            _log_timing_message(f"[PTY] [DEBUG] First line received from PTY stream")
+                        
+                        # Convert Rich Text to string for diff detection (keep Rich Text for display)
+                        line_str = str(rich_line)
+                        
+                        # Find where diff starts (usually "diff --git")
+                        if not diff_start_found:
+                            if 'diff --git' in line_str:
+                                diff_start_found = True
+                                # PHASE 3: Skip first N lines that were already loaded
+                                if lines_to_skip > 0:
+                                    lines_skipped = 1  # Count this line as skipped
+                                    _log_timing_message(f"[PTY] [DEBUG] Diff start found, skipping first {lines_to_skip} lines")
+                                    continue
+                                else:
+                                    # No lines to skip, start collecting
+                                    diff_lines_rich.append(rich_line)
+                            # Skip lines before diff starts (commit message, etc.)
+                            continue
+                        
+                        # PHASE 3: Skip lines that were already loaded instantly
+                        if lines_to_skip > 0 and lines_skipped < lines_to_skip:
+                            lines_skipped += 1
+                            continue
+                        
+                        # Collect remaining diff lines as Rich Text objects
+                        diff_lines_rich.append(rich_line)
+                        
+                        # PHASE 3: Update UI periodically (every batch_size lines) for progressive appending
+                        # This appends remaining lines to the already-displayed first 100 lines
+                        if len(diff_lines_rich) % batch_size == 0:
+                            # Check if task was cancelled before updating UI
+                            if should_stop():
+                                _log_timing_message(f"[PTY] [DEBUG] Task cancelled during batch update")
+                                break
+                            # PHASE 3: Combine remaining lines and append to existing content
+                            from rich.text import Text
+                            remaining_diff = Text()
+                            for rich_line_item in diff_lines_rich:
+                                remaining_diff.append(rich_line_item)
+                                remaining_diff.append("\n")
+                            
+                            # PHASE 3: Reconstruct full content (header + first 100 lines + remaining lines)
+                            # We already have header and first_lines_rich from the initial load
+                            def append_remaining_lines(remaining: Text):
+                                # Reconstruct full content: header + first 100 lines + remaining lines
+                                if first_lines_text:
+                                    # Parse first lines again (or use stored first_lines_rich)
+                                    from pygitzen.git_graph import parse_ansi_to_rich_text
+                                    try:
+                                        first_lines_rich = parse_ansi_to_rich_text(first_lines_text)
+                                    except:
+                                        first_lines_rich = Text(first_lines_text, style="white")
+                                    
+                                    # Combine: header + first 100 lines + remaining lines
+                                    full_content = Text(header_text, style="white") + first_lines_rich + remaining
+                                else:
+                                    # Fallback: header + remaining lines only
+                                    full_content = Text(header_text, style="white") + remaining
+                                
+                                self.patch_pane.show_commit_info(commit, full_content, is_partial=True)
+                            
+                            # Update UI from main thread
+                            self.call_from_thread(
+                                lambda rem=remaining_diff: append_remaining_lines(rem)
+                            )
+                finally:
+                    # Ensure generator is closed even if we break early
+                    if should_stop():
+                        try:
+                            pty_stream.close()
+                        except Exception:
+                            pass
+                
+                # PHASE 3: Final update with all remaining diff lines (only if task wasn't cancelled)
+                if not should_stop():
+                    if diff_lines_rich:
+                        # Combine all remaining Rich Text objects
+                        from rich.text import Text
+                        remaining_diff = Text()
+                        for rich_line_item in diff_lines_rich:
+                            remaining_diff.append(rich_line_item)
+                            remaining_diff.append("\n")
+                        
+                        # PHASE 3: Reconstruct full content (header + first 100 lines + remaining lines)
+                        def append_final_lines(remaining: Text):
+                            # Reconstruct full content: header + first 100 lines + remaining lines
+                            if first_lines_text:
+                                # Parse first lines again (or use stored first_lines_rich)
+                                from pygitzen.git_graph import parse_ansi_to_rich_text
+                                try:
+                                    first_lines_rich = parse_ansi_to_rich_text(first_lines_text)
+                                except:
+                                    first_lines_rich = Text(first_lines_text, style="white")
+                                
+                                # Combine: header + first 100 lines + remaining lines
+                                final_content = Text(header_text, style="white") + first_lines_rich + remaining
+                            else:
+                                # Fallback: header + remaining lines only
+                                final_content = Text(header_text, style="white") + remaining
+                            
+                            self.patch_pane.show_commit_info(commit, final_content, is_partial=False)
+                        
+                        _log_timing_message(f"[PTY] [DEBUG] PTY stream completed. Total lines: {line_count}, Remaining diff lines: {len(diff_lines_rich)}")
+                        
+                        # Final UI update from main thread
+                        self.call_from_thread(
+                            lambda rem=remaining_diff: append_final_lines(rem)
+                        )
+                        _log_timing_message(f"[PTY] [DEBUG] UI updated with final diff (hybrid: {first_lines_count} instant + {len(diff_lines_rich)} streamed)")
+                    else:
+                        _log_timing_message(f"[PTY] [WARNING] No remaining diff lines collected from PTY stream (first {first_lines_count} lines were already shown)")
+                else:
+                    _log_timing_message(f"[PTY] [DEBUG] Task cancelled before final update, skipping UI update")
+                
+            except Exception as e:
+                # Log detailed error information
+                import traceback
+                error_type = type(e).__name__
+                error_msg = str(e) if str(e) else f"{error_type}"
+                error_traceback = traceback.format_exc()
+                _log_timing_message(f"[PTY] [ERROR] Exception in stream_diff_in_background: {error_type}: {error_msg}")
+                _log_timing_message(f"[PTY] [ERROR] Traceback:\n{error_traceback}")
+                
+                # Show error - NO FALLBACK, PTY must work
+                if not should_stop():
+                    error_text = Text(f"Error streaming diff with PTY: {error_type}: {error_msg}\n\nCheck timing.log for details.", style="red")
+                    self.call_from_thread(lambda: self.patch_pane.update(error_text))
+        
+        # Use task manager to start the task (automatically cancels previous one)
+        self._pty_diff_task_manager.new_task(run_diff_task, task_key=f"commit_diff_{normalized_sha[:8]}")
     
     def show_stash_diff(self, index: int) -> None:
         """Show stash diff in patch pane when stash is selected."""
@@ -5473,64 +7747,152 @@ class PygitzenApp(App):
                     '--'
                 ]
                 
-                # Get git log output (use bytes first, then decode with error handling for non-UTF-8 characters)
-                # Increased timeout for large repos (haiku can take longer)
-                log_result = subprocess.run(
-                    log_cmd,
-                    capture_output=True,
-                    text=False,  # Get bytes first to handle non-UTF-8 characters
-                    timeout=30,  # Increased timeout for large repos (was 10s)
-                    cwd=repo_path_str
-                )
-                
-                # Decode with error handling for non-UTF-8 characters (like haiku repo)
-                if log_result.returncode == 0:
-                    try:
-                        git_log_output = log_result.stdout.decode('utf-8', errors='replace')
-                    except Exception:
-                        # Fallback if decode fails
-                        try:
-                            git_log_output = log_result.stdout.decode('utf-8', errors='ignore')
-                        except Exception:
-                            git_log_output = "Error: Could not decode git log output"
-                else:
-                    try:
-                        error_msg = log_result.stderr.decode('utf-8', errors='replace')
-                    except Exception:
-                        try:
-                            error_msg = log_result.stderr.decode('utf-8', errors='ignore')
-                        except Exception:
-                            error_msg = "Unknown error"
-                    git_log_output = f"Error loading git log: {error_msg}"
-                
-                # Parse ANSI colors from git log output
+                # Check if PTY streaming should be used
+                from pygitzen.pty_utils import should_use_pty, stream_git_command_pty
                 from pygitzen.git_graph import parse_ansi_to_rich_text
                 from rich.text import Text
                 
-                # Create Text object with tag info and git log
+                # Create initial Text object with tag info header
                 display_text = Text()
                 display_text.append('\n'.join(tag_info_lines), style="white")
                 display_text.append('\n\n', style="white")
                 
-                # Add git log with ANSI colors preserved
-                if git_log_output:
-                    for line in git_log_output.split('\n'):
-                        if line:
+                # Show initial content (tag info header) immediately
+                self._ui_update_queue.put(lambda: self.log_pane.update(display_text))
+                
+                # Try PTY streaming if available, otherwise fallback to subprocess
+                git_log_lines = []
+                try:
+                    if should_use_pty():
+                        # Stream git log output using PTY (progressive display)
+                        repo_path = Path(repo_path_str)
+                        # Optimized: Increased batch size from 5 to 15 lines to reduce call_from_thread overhead
+                        batch_size = 15  # Update UI every 15 lines for better performance
+                        
+                        for rich_line in stream_git_command_pty(
+                            log_cmd,
+                            repo_path,
+                            timeout=30.0,
+                            max_lines=100  # Limit to 100 lines
+                        ):
+                            git_log_lines.append(rich_line)
+                            
+                            # Update UI periodically (every batch_size lines)
+                            if len(git_log_lines) % batch_size == 0:
+                                # Build current display text
+                                current_display = Text()
+                                current_display.append('\n'.join(tag_info_lines), style="white")
+                                current_display.append('\n\n', style="white")
+                                for line in git_log_lines:
+                                    current_display.append(line)
+                                    current_display.append('\n')
+                                
+                                # Update UI from main thread
+                                self._ui_update_queue.put(lambda: self.log_pane.update(current_display))
+                        
+                        # Final update with all lines
+                        final_display = Text()
+                        final_display.append('\n'.join(tag_info_lines), style="white")
+                        final_display.append('\n\n', style="white")
+                        for line in git_log_lines:
+                            final_display.append(line)
+                            final_display.append('\n')
+                        display_text = final_display
+                        
+                        # Final UI update
+                        self._ui_update_queue.put(lambda: self.log_pane.update(display_text))
+                    else:
+                        # Fallback to subprocess (original method)
+                        log_result = subprocess.run(
+                            log_cmd,
+                            capture_output=True,
+                            text=False,  # Get bytes first to handle non-UTF-8 characters
+                            timeout=30,  # Increased timeout for large repos (was 10s)
+                            cwd=repo_path_str
+                        )
+                        
+                        # Decode with error handling for non-UTF-8 characters (like haiku repo)
+                        if log_result.returncode == 0:
                             try:
-                                rich_line = parse_ansi_to_rich_text(line)
-                                display_text.append(rich_line)
-                                display_text.append('\n')
+                                git_log_output = log_result.stdout.decode('utf-8', errors='replace')
                             except Exception:
-                                # If parsing fails, strip ANSI and add as plain text
-                                from pygitzen.git_graph import strip_ansi_codes
-                                plain_line = strip_ansi_codes(line)
-                                display_text.append(plain_line + '\n', style="white")
+                                # Fallback if decode fails
+                                try:
+                                    git_log_output = log_result.stdout.decode('utf-8', errors='ignore')
+                                except Exception:
+                                    git_log_output = "Error: Could not decode git log output"
+                        else:
+                            try:
+                                error_msg = log_result.stderr.decode('utf-8', errors='replace')
+                            except Exception:
+                                try:
+                                    error_msg = log_result.stderr.decode('utf-8', errors='ignore')
+                                except Exception:
+                                    error_msg = "Unknown error"
+                            git_log_output = f"Error loading git log: {error_msg}"
+                        
+                        # Add git log with ANSI colors preserved
+                        if git_log_output:
+                            for line in git_log_output.split('\n'):
+                                if line:
+                                    try:
+                                        rich_line = parse_ansi_to_rich_text(line)
+                                        display_text.append(rich_line)
+                                        display_text.append('\n')
+                                    except Exception:
+                                        # If parsing fails, strip ANSI and add as plain text
+                                        from pygitzen.git_graph import strip_ansi_codes
+                                        plain_line = strip_ansi_codes(line)
+                                        display_text.append(plain_line + '\n', style="white")
+                        
+                        # UI update for subprocess fallback (final update happens below for all paths)
+                except Exception as e:
+                    # If PTY streaming fails, fallback to subprocess
+                    _log_timing_message(f"[PTY] Tag info fallback to subprocess: {type(e).__name__}: {e}")
+                    try:
+                        log_result = subprocess.run(
+                            log_cmd,
+                            capture_output=True,
+                            text=False,
+                            timeout=30,
+                            cwd=repo_path_str
+                        )
+                        
+                        if log_result.returncode == 0:
+                            try:
+                                git_log_output = log_result.stdout.decode('utf-8', errors='replace')
+                            except Exception:
+                                git_log_output = log_result.stdout.decode('utf-8', errors='ignore')
+                        else:
+                            error_msg = log_result.stderr.decode('utf-8', errors='replace')
+                            git_log_output = f"Error loading git log: {error_msg}"
+                        
+                        # Add git log to display
+                        if git_log_output:
+                            for line in git_log_output.split('\n'):
+                                if line:
+                                    try:
+                                        rich_line = parse_ansi_to_rich_text(line)
+                                        display_text.append(rich_line)
+                                        display_text.append('\n')
+                                    except Exception:
+                                        from pygitzen.git_graph import strip_ansi_codes
+                                        plain_line = strip_ansi_codes(line)
+                                        display_text.append(plain_line + '\n', style="white")
+                    except Exception as fallback_error:
+                        error_text = Text(f"Error loading git log: {fallback_error}", style="red")
+                        display_text.append(error_text)
                 
                 tag_elapsed = time.perf_counter() - tag_start
                 _log_timing_message(f"[TIMING] show_tag_info TOTAL: {tag_elapsed:.4f}s")
                 
+                # Clear cached branch info when showing tag (so branch selection detection works)
                 # Update UI from main thread (use queue which is thread-safe)
-                self._ui_update_queue.put(lambda: self.log_pane.update(display_text))
+                def update_tag_info():
+                    self.log_pane._cached_branch = ""
+                    self.log_pane._native_git_log_lines = []
+                    self.log_pane.update(display_text)
+                self._ui_update_queue.put(update_tag_info)
             except Exception as e:
                 # If tag info fetching fails, show error
                 import traceback
@@ -5538,8 +7900,13 @@ class PygitzenApp(App):
                 _log_timing_message(f"[ERROR] show_tag_info: {error_msg}")
                 from rich.text import Text
                 error_text = Text(f"Error loading tag info: {type(e).__name__}: {e}", style="red")
+                # Clear cached branch info when showing tag error (so branch selection detection works)
                 # Update UI from main thread (use queue which is thread-safe)
-                self._ui_update_queue.put(lambda: self.log_pane.update(error_text))
+                def update_tag_error():
+                    self.log_pane._cached_branch = ""
+                    self.log_pane._native_git_log_lines = []
+                    self.log_pane.update(error_text)
+                self._ui_update_queue.put(update_tag_error)
         
         # Run in background thread to avoid blocking UI
         thread = threading.Thread(target=load_tag_info_in_thread, daemon=True)
@@ -5650,8 +8017,26 @@ class PygitzenApp(App):
                     self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
                 else:
-                    # Same branch, no new commits - refresh sync status and update status info
-                    # This preserves the correct commit status that was already determined
+                    # Same branch, no new commits - but if we're switching from patch/tag view, refresh log
+                    was_patch_view = self._view_mode == "patch"
+                    # Check if we're viewing tag info (tag info is shown in log view, but doesn't set _cached_branch)
+                    # Tag info updates log_pane directly but doesn't set _cached_branch, so if we're in log view
+                    # and _cached_branch is empty/not set, we're likely viewing tag info
+                    was_tag_view = False
+                    if self._view_mode == "log":
+                        # Check if log pane has content but no cached branch (indicates tag info)
+                        if hasattr(self.log_pane, '_cached_branch'):
+                            # _cached_branch is empty string "" when tag info is shown (not set by show_tag_info)
+                            was_tag_view = not self.log_pane._cached_branch or self.log_pane._cached_branch == ""
+                    
+                    if was_patch_view or was_tag_view:
+                        # Switch to log view when branch is selected (even if same branch)
+                        self._view_mode = "log"
+                        self.patch_pane.styles.display = "none"
+                        self.log_pane.styles.display = "block"
+                        # Refresh log display even for same branch
+                        self.load_commits_for_log(self.active_branch)
+                    # Refresh sync status and update status info
                     self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
         elif event.list_view is self.commits_pane:
@@ -5690,13 +8075,23 @@ class PygitzenApp(App):
             self.load_more_commits()
     
     def on_scroll(self, event) -> None:
-        """Handle scroll events - update virtual scrolling range and auto-load more commits."""
+        """Handle scroll events - update virtual scrolling range and auto-load more commits.
+        
+        Phase 2: Added pre-buffering and debouncing for smooth virtual scrolling.
+        """
+        import time
         widget = event.widget
         widget_id = widget.id if hasattr(widget, 'id') else None
         
         # Handle scroll for commits pane (left side)
         if widget_id == "commits-pane" or (hasattr(widget, 'id') and widget.id == "commits-pane"):
             try:
+                # Phase 2: Debounce scroll events (100ms delay)
+                current_time = time.perf_counter()
+                if current_time - self._last_scroll_time < self._scroll_debounce_delay:
+                    return  # Skip this scroll event (debouncing)
+                self._last_scroll_time = current_time
+                
                 # Get scroll position
                 scroll_y = 0
                 max_scroll_y = 0
@@ -5711,11 +8106,30 @@ class PygitzenApp(App):
                 # Check if we need to load more commits
                 if max_scroll_y > 0 and self.total_commits > 0:
                     scroll_percent = scroll_y / max_scroll_y if max_scroll_y > 0 else 0
+                    loaded_count = len(self.commits) if hasattr(self, 'commits') and self.commits else self.loaded_commits
                     
-                    # If scrolled near bottom (85%), auto-load more commits
+                    # Phase 2: Pre-buffering at 80% (before the 85% trigger)
+                    # This ensures commits are ready before user scrolls to them
+                    if (scroll_percent >= self._prebuffer_threshold and 
+                        loaded_count < self.total_commits and 
+                        not self._prebuffering):
+                        # Calculate how many commits ahead we need
+                        commits_ahead_needed = self._prebuffer_batch_size
+                        commits_available = self.total_commits - loaded_count
+                        commits_to_load = min(commits_ahead_needed, commits_available)
+                        
+                        if commits_to_load > 0:
+                            _log_timing_message(f"[TIMING] [SCROLL] [PREBUFFER] Commits pane: Pre-buffering {commits_to_load} commits ahead (scroll_percent={scroll_percent:.2f}, loaded={loaded_count}, total={self.total_commits})")
+                            self._prebuffer_commits_ahead(loaded_count, commits_to_load)
+                    
+                    # Original logic: If scrolled near bottom (85%), auto-load more commits
                     if scroll_percent >= 0.85 and self.loaded_commits < self.total_commits:
+                        scroll_handler_start = time.perf_counter()
                         _log_timing_message(f"[TIMING] [SCROLL] Commits pane: Loading more commits (scroll_percent={scroll_percent:.2f}, loaded={self.loaded_commits}, total={self.total_commits})")
                         self.load_more_commits()
+                        scroll_handler_time = time.perf_counter() - scroll_handler_start
+                        if scroll_handler_time > 0.05:  # More than 50ms
+                            _log_timing_message(f"[TIMING] [SCROLL] [LAG] on_scroll handler took {scroll_handler_time*1000:.1f}ms - likely load_more_commits bottleneck")
             except Exception as e:
                 pass  # Silently fail if scroll detection fails
         
