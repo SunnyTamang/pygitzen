@@ -2688,6 +2688,9 @@ class PygitzenApp(App):
             
             # Cache branch sync status (behind/ahead counts)
             self._branch_sync_status_cache: dict[str, dict] = {}
+
+            # real-time change detection (GitWatcher)
+            self._git_watcher = None # initialized during the app mount 
             
             init_elapsed = time.perf_counter() - init_start
             _log_timing_message(f"[TIMING] ===== PygitzenApp.__init__ TOTAL: {init_elapsed:.4f}s =====")
@@ -2766,12 +2769,63 @@ class PygitzenApp(App):
         # Check more frequently (0.2s) for more responsive virtual scrolling
         self.set_interval(0.2, self._check_virtual_scroll_expansion)
         self.set_interval(0.2, self._check_commits_pane_scroll)  # Check commits pane scrolling
+
+        # Start GitWatcher for real-time change detection 
+        self._start_git_watcher()
         
         # Set up periodic processing of UI update queue from background threads
         self.set_interval(0.05, self._process_ui_update_queue)  # Check every 50ms
         
         mount_elapsed = time.perf_counter() - mount_start
         _log_timing_message(f"[TIMING] ===== on_mount TOTAL: {mount_elapsed:.4f}s =====")
+
+    def _start_git_watcher(self) -> None:
+        """Start GitWatcher for real-time change detection"""
+        try:
+            from pygitzen.git_watcher import GitWatcher, ChangeEvent, ChangeType
+
+            def handle_change(event: ChangeEvent) -> None:
+                """Handle Git Repo chnange events"""
+
+                # Refreshing only refresh affected panes
+                if event.change_type in (ChangeType.FILE_STAGED, ChangeType.FILE_UNSTAGED, ChangeType.FILE_CHANGED):
+                    # File changes - refresh files pane and status pane
+                    # Use call_from_thread to ensure it runs on main thread
+                    try:
+                        _log_timing_message(f"[GITWATCHER] Calling load_file_status_background from thread")
+                        self.call_from_thread(self.load_file_status_background)
+                        _log_timing_message(f"[GITWATCHER] load_file_status_background called successfully")
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"Error calling load_file_status_background: {type(e).__name__}: {e}\nTraceback:\n{traceback.format_exc()}"
+                        _log_timing_message(f"[GITWATCHER] [ERROR] {error_msg}")
+                        # Fallback: try calling directly (might work if we're already on main thread)
+                        try:
+                            self.load_file_status_background()
+                        except Exception as e2:
+                            _log_timing_message(f"[GITWATCHER] [ERROR] Fallback also failed: {e2}")
+
+                # --------later will add other changes detection as well ---------------------
+
+            self._git_watcher = GitWatcher(
+                repo_path=self.repo_path,
+                on_change=handle_change,
+                head_poll_interval=1.5,
+                remote_poll_interval=8.0,
+                use_watchdog=True
+            )
+            self._git_watcher.start()
+            _log_timing_message("[GITWATCHER] Started real-time change detection")
+
+
+        except Exception as e:
+            _log_timing_message(f"[GITWATCHER] Failed to start: {e}")
+
+    def on_unmount(self) -> None:
+        """Stop GitWatcher when app unmounts."""
+        if self._git_watcher:
+            self._git_watcher.stop()
+            _log_timing_message("[GITWATCHER] Stopped")
     
     def _process_ui_update_queue(self) -> None:
         """Process UI updates from background threads (called periodically from main thread)."""
