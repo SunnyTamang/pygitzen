@@ -3140,6 +3140,32 @@ class PygitzenApp(App):
             self.log_pane._last_render_time = 0  # Force immediate render
             self._update_branch_info_ui(self.active_branch, self.log_pane._cached_branch_info)
     
+    def _get_current_branch_name(self) -> str | None:
+        """Return the currently checked-out branch name, or None if it can't be determined.
+        
+        Uses `git rev-parse --abbrev-ref HEAD` so that we always respect the real
+        repository HEAD, even if branches are ordered by recency elsewhere.
+        """
+        import subprocess
+        
+        repo_path_str = str(self.repo_path) if hasattr(self, "repo_path") else "."
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_path_str,
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip()
+                # Detached HEAD will return "HEAD" – treat that as no named branch
+                if branch and branch != "HEAD":
+                    return branch
+        except Exception:
+            pass
+        return None
+    
 
     def refresh_data_fast(self) -> None:
         """Load UI immediately with minimal data (fast, non-blocking)."""
@@ -3154,6 +3180,8 @@ class PygitzenApp(App):
         
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
+        # Detect the *actual* currently checked-out branch from Git HEAD
+        current_branch_from_git = self._get_current_branch_name()
         
         # Load branches immediately (fast, ~0.1s)
         branch_start = time.perf_counter()
@@ -3198,17 +3226,31 @@ class PygitzenApp(App):
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
-                    # Branch was deleted, fall back to first branch
-                    self.active_branch = self.branches[0].name
+                    # Branch was deleted, fall back to the actual current branch if available,
+                    # otherwise use the first branch in the list.
+                    branch_names = [b.name for b in self.branches]
+                    if current_branch_from_git and current_branch_from_git in branch_names:
+                        self.active_branch = current_branch_from_git
+                        branch_index = branch_names.index(current_branch_from_git)
+                    else:
+                        self.active_branch = self.branches[0].name
+                        branch_index = 0
                     self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    self.branches_pane.index = 0
-                    self.branches_pane.highlighted = 0
+                    self.branches_pane.index = branch_index
+                    self.branches_pane.highlighted = branch_index
             else:
-                # No previous branch, use first branch
-                self.active_branch = self.branches[0].name
+                # No previous branch, pick the actual current branch if we can,
+                # otherwise fall back to the first branch (existing behavior).
+                branch_names = [b.name for b in self.branches]
+                if current_branch_from_git and current_branch_from_git in branch_names:
+                    self.active_branch = current_branch_from_git
+                    branch_index = branch_names.index(current_branch_from_git)
+                else:
+                    self.active_branch = self.branches[0].name
+                    branch_index = 0
                 self.branches_pane.set_branches(self.branches, self.active_branch)
-                self.branches_pane.index = 0
-                self.branches_pane.highlighted = 0
+                self.branches_pane.index = branch_index
+                self.branches_pane.highlighted = branch_index
 
             # Load commits for commits pane (left side) - shows all commits from all branches
             commits_load_start = time.perf_counter()
@@ -3260,6 +3302,7 @@ class PygitzenApp(App):
     def refresh_data(self) -> None:
         # Preserve current branch selection before refreshing
         previous_branch = self.active_branch
+        current_branch_from_git = self._get_current_branch_name()
         self.branches = self.git.list_branches()
         # Use Python version if Cython version doesn't have the method
         if hasattr(self.git, 'list_remote_branches'):
@@ -3294,17 +3337,30 @@ class PygitzenApp(App):
                     self.branches_pane.index = branch_index
                     self.branches_pane.highlighted = branch_index
                 else:
-                    # Branch was deleted, fall back to first branch
-                    self.active_branch = self.branches[0].name
+                    # Branch was deleted, fall back to the actual current branch if available,
+                    # otherwise use the first branch.
+                    branch_names = [b.name for b in self.branches]
+                    if current_branch_from_git and current_branch_from_git in branch_names:
+                        self.active_branch = current_branch_from_git
+                        branch_index = branch_names.index(current_branch_from_git)
+                    else:
+                        self.active_branch = self.branches[0].name
+                        branch_index = 0
                     self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    self.branches_pane.index = 0
-                    self.branches_pane.highlighted = 0
+                    self.branches_pane.index = branch_index
+                    self.branches_pane.highlighted = branch_index
             else:
-                # No previous branch, use first branch
-                self.active_branch = self.branches[0].name
+                # No previous branch, prefer the actual current branch if we know it.
+                branch_names = [b.name for b in self.branches]
+                if current_branch_from_git and current_branch_from_git in branch_names:
+                    self.active_branch = current_branch_from_git
+                    branch_index = branch_names.index(current_branch_from_git)
+                else:
+                    self.active_branch = self.branches[0].name
+                    branch_index = 0
                 self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                self.branches_pane.index = 0
-                self.branches_pane.highlighted = 0
+                self.branches_pane.index = branch_index
+                self.branches_pane.highlighted = branch_index
 
             
             self.load_commits(self.active_branch)
@@ -5690,12 +5746,15 @@ class PygitzenApp(App):
                     except Exception:
                         # If we can't check HEAD, reload to be safe
                         should_reload = True
-                
+
+                # Always switch to log view when a branch is explicitly selected,
+                # even if it's the same branch as before (e.g., user has just
+                # viewed a tag and now wants the branch log back).
+                self._view_mode = "log"
+                self.patch_pane.styles.display = "none"
+                self.log_pane.styles.display = "block"
+
                 if should_reload:
-                    # Switch to log view when branch is selected
-                    self._view_mode = "log"
-                    self.patch_pane.styles.display = "none"
-                    self.log_pane.styles.display = "block"
                     # Load commits for the selected branch (matching lazygit - shows branch-specific commits)
                     self.load_commits(self.active_branch)
                     # Load commits with full history for feature branches (for log pane)
@@ -5704,8 +5763,10 @@ class PygitzenApp(App):
                     self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
                 else:
-                    # Same branch, no new commits - refresh sync status and update status info
-                    # This preserves the correct commit status that was already determined
+                    # Same branch, no new commits - still ensure branch log is visible
+                    # (e.g., after viewing a tag or switching tabs), and refresh sync
+                    # status and status pane.
+                    self.load_commits_for_log(self.active_branch)
                     self._refresh_branch_sync_status(self.active_branch)
                     self.update_status_info()
         elif event.list_view is self.commits_pane:
