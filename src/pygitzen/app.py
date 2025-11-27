@@ -1314,18 +1314,49 @@ class LogPane(Static):
             output_lines = output_text.split('\n')
             new_log_lines = []
             
+            # Deduplicate merge commits - track seen commit SHAs to avoid showing same commit twice
+            seen_commit_shas = set()
+            skip_until_empty = False
+            
             # Convert each line from ANSI to Rich Text
             # Process in batches for better performance
             for line in output_lines:
-                if line:  # Only process non-empty lines
-                    try:
-                        rich_line = parse_ansi_to_rich_text(line)
-                        new_log_lines.append(rich_line)
-                    except Exception:
-                        # If parsing fails, strip ANSI and add as plain text
-                        from pygitzen.git_graph import strip_ansi_codes
-                        plain_line = strip_ansi_codes(line)
-                        new_log_lines.append(Text(plain_line, style="white"))
+                if not line:  # Empty line
+                    if skip_until_empty:
+                        # End of duplicate commit block - stop skipping
+                        skip_until_empty = False
+                    new_log_lines.append(Text())
+                    continue
+                
+                if skip_until_empty:
+                    # Skip lines until we hit an empty line (end of commit block)
+                    continue
+                
+                # Check if this is a commit line (contains "commit" followed by SHA)
+                from pygitzen.git_graph import strip_ansi_codes
+                plain_line = strip_ansi_codes(line)
+                
+                # Match: "commit" followed by whitespace and then a hex SHA (7-40 chars)
+                import re
+                commit_match = re.search(r'\bcommit\s+([0-9a-f]{7,40})', plain_line, re.IGNORECASE)
+                
+                if commit_match:
+                    commit_sha = commit_match.group(1)
+                    # Check if we've seen this commit SHA before
+                    if commit_sha in seen_commit_shas:
+                        # Duplicate commit - skip this entire commit block
+                        skip_until_empty = True
+                        continue
+                    else:
+                        # New commit - mark as seen and add the line
+                        seen_commit_shas.add(commit_sha)
+                
+                # Add the line (either commit line or part of commit block)
+                try:
+                    rich_line = parse_ansi_to_rich_text(line)
+                    new_log_lines.append(rich_line)
+                except Exception:
+                    new_log_lines.append(Text(plain_line, style="white"))
             
             # If appending, only add new lines (skip already loaded ones)
             if append and self._native_git_log_lines:
@@ -2098,68 +2129,454 @@ class PatchPane(Static):
         super().__init__(*args, **kwargs)
         self.border_title = "Patch"
     
-    def show_commit_info(self, commit: CommitInfo, diff_text: str) -> None:
+    def show_commit_info(self, commit: CommitInfo, diff_text: str, git_service=None) -> None:
+        """
+        Show commit info in patch pane using LazyGit approach: git show --stat -p <hash>
+        This single command provides: commit header, full message, diffstat, and diff.
+        """
         from rich.text import Text
-        from rich.console import Console
         from rich.syntax import Syntax
         from rich.console import Group
-        from datetime import datetime
-        
-        # Format timestamp as human-readable date (matching Git format)
-        commit_datetime = datetime.fromtimestamp(commit.timestamp)
-        from time import timezone
-        # Calculate timezone offset in hours
-        offset_seconds = -timezone if timezone else 0
-        offset_hours = offset_seconds // 3600
-        offset_sign = '+' if offset_hours >= 0 else '-'
-        offset_abs = abs(offset_hours)
-        offset_str = f"{offset_sign}{offset_abs:02d}00"
-        commit_date = commit_datetime.strftime(f"%a %b %d %H:%M:%S %Y {offset_str}")
+        import subprocess
+        import sys
         
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         
+        # Use LazyGit approach: single git show --stat -p command
+        # This provides everything: commit header, full message, diffstat, and diff
+        if git_service is None:
+            # Fallback to basic display if no git_service
+            header_text_obj = Text()
+            header_text_obj.append(f"commit {commit_sha}\n", style="white")
+            header_text_obj.append(f"Author: {commit.author}\n", style="white")
+            header_text_obj.append(f"\n{commit.summary}\n\n", style="white")
+            if diff_text:
+                try:
+                    syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
+                    full_content = Group(header_text_obj, syntax)
+                except:
+                    diff_text_obj = Text(diff_text, style="white")
+                    full_content = header_text_obj + diff_text_obj
+            else:
+                full_content = header_text_obj
+            self.update(full_content)
+            return
         
-        # Create commit header
-        header_text = f"""commit {commit_sha}
-Author: {commit.author}
-Date: {commit_date}
-
-{commit.summary}
-
-"""
-        
-        # Create diff content with proper colors
-        if diff_text:
+        try:
+            # Try multiple methods to get repo_path (works for both cython and non-cython)
+            repo_path = None
+            
+            # Method 1: Direct attribute access
             try:
-                # Use Rich syntax highlighting for diff
-                syntax = Syntax(diff_text, "diff", theme="monokai", line_numbers=False)
-                # Use Group to combine Text and Syntax objects
-                full_content = Group(
-                    Text(header_text, style="white"),
-                    syntax
-                )
-            except:
-                # Fallback to manual color formatting with Text only
-                lines = diff_text.split('\n')
+                if hasattr(git_service, 'repo_path'):
+                    repo_path = git_service.repo_path
+            except (AttributeError, TypeError):
+                pass
+            
+            # Method 2: Use getattr (works even if hasattr returns False for cython)
+            if repo_path is None:
+                try:
+                    repo_path = getattr(git_service, 'repo_path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Method 3: Try via repo.path
+            if repo_path is None:
+                try:
+                    if hasattr(git_service, 'repo'):
+                        repo = getattr(git_service, 'repo', None)
+                        if repo and hasattr(repo, 'path'):
+                            repo_path = getattr(repo, 'path', None)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Convert to Path object if we got something
+            if repo_path:
+                from pathlib import Path
+                if isinstance(repo_path, str):
+                    repo_path = Path(repo_path)
+                elif not isinstance(repo_path, Path):
+                    repo_path = Path(str(repo_path))
+            else:
+                # Fallback to current directory
+                from pathlib import Path
+                repo_path = Path(".")
+            
+            # Use git show --stat --decorate -p (LazyGit approach)
+            # --stat: shows diffstat
+            # --decorate: shows branch and tag refs in commit header
+            # -p: shows full patch/diff
+            # --no-color: avoid ANSI codes (we'll use Rich for syntax highlighting)
+            result = subprocess.run(
+                ['git', 'show', '--stat', '--decorate', '-p', '--no-color', commit_sha],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(repo_path)
+            )
+            
+            if result.returncode != 0:
+                # If git show fails, fallback to basic display
+                fallback_text = Text()
+                fallback_text.append(f"commit {commit_sha}\n", style="white")
+                fallback_text.append(f"Author: {commit.author}\n", style="white")
+                fallback_text.append(f"\n{commit.summary}\n\n", style="white")
+                if diff_text:
+                    fallback_text.append(diff_text[:1000], style="white")
+                self.update(fallback_text)
+                return
+            
+            output = result.stdout
+            
+            if not output or len(output.strip()) == 0:
+                # Empty output - show error
+                error_text = Text()
+                error_text.append(f"commit {commit_sha}\n", style="white")
+                error_text.append(f"Author: {commit.author}\n", style="white")
+                error_text.append(f"\n{commit.summary}\n\n", style="white")
+                error_text.append("Error: git show returned empty output\n", style="red")
+                self.update(error_text)
+                return
+            
+            # Display the git show output with proper formatting
+            # Convert output to Text object line by line to preserve all content
+            display_text = Text()
+            
+            # Process all lines from git show output
+            for line in output.split('\n'):
+                # Basic color coding for better readability
+                # Check for file path markers FIRST (before generic +/- checks)
+                if line.startswith('---') or line.startswith('+++'):
+                    display_text.append(line + '\n', style="yellow")
+                elif line.startswith('@@'):
+                    display_text.append(line + '\n', style="blue")
+                elif line.startswith('+') and not line.startswith('+++'):
+                    # Check if this is a visual diffstat line (only +, -, and spaces)
+                    stripped = line.strip()
+                    if stripped and all(c in '+- ' for c in stripped):
+                        # Visual diffstat line - color character by character
+                        for char in line:
+                            if char == '+':
+                                display_text.append(char, style="green")
+                            elif char == '-':
+                                display_text.append(char, style="red")
+                            else:
+                                display_text.append(char, style="white")
+                        display_text.append('\n')
+                    else:
+                        # Regular added code line
+                        display_text.append(line + '\n', style="green")
+                elif line.startswith('-') and not line.startswith('---'):
+                    # Removed code line
+                    display_text.append(line + '\n', style="red")
+                elif line.startswith('commit '):
+                    # Parse commit header line with colored refs (matching LazyGit)
+                    # Format: "commit <hash> (HEAD -> branch, tag: v0.2.2, origin/main, main)"
+                    # Colors: commit/hash/tag → yellow, HEAD -> → cyan, branch → green, origin/ → red
+                    import re
+                    
+                    # Match: "commit <hash> (refs...)" or "commit <hash>" (no refs)
+                    # Hash can be any length hex characters (case insensitive)
+                    match = re.match(r'^(commit\s+[a-fA-F0-9]+)(\s*\((.*)\))?$', line)
+                    if match:
+                        # Commit and hash → yellow
+                        display_text.append(match.group(1), style="yellow")
+                        
+                        # Parse refs inside parentheses if present
+                        if match.group(3):  # Has refs
+                            display_text.append(' (', style="yellow")
+                            
+                            refs_str = match.group(3)
+                            if refs_str:
+                                # Split by comma, but be careful with nested structures
+                                refs = [r.strip() for r in refs_str.split(',')]
+                                
+                                for i, ref in enumerate(refs):
+                                    if i > 0:
+                                        display_text.append(', ', style="yellow")
+                                    
+                                    # Check for HEAD -> branch
+                                    if ref.startswith('HEAD -> '):
+                                        display_text.append('HEAD -> ', style="cyan")
+                                        branch_name = ref[8:]  # Remove "HEAD -> "
+                                        display_text.append(branch_name, style="green")
+                                    elif ref == 'HEAD':
+                                        display_text.append('HEAD', style="cyan")
+                                    # Check for tag:
+                                    elif ref.startswith('tag: '):
+                                        display_text.append(ref, style="yellow")
+                                    # Check for origin/ (remote branch)
+                                    elif ref.startswith('origin/'):
+                                        display_text.append(ref, style="red")
+                                    # Local branch (default)
+                                    else:
+                                        display_text.append(ref, style="green")
+                            
+                            display_text.append(')', style="yellow")
+                        
+                        display_text.append('\n')
+                    else:
+                        # Fallback: just color entire line yellow
+                        display_text.append(line + '\n', style="yellow")
+                elif line.startswith('Merge:'):
+                    display_text.append(line + '\n', style="yellow")
+                elif line.startswith('Author:') or line.startswith('Date:'):
+                    display_text.append(line + '\n', style="cyan")
+                elif line.startswith('diff --git'):
+                    display_text.append(line + '\n', style="cyan")
+                elif line.startswith('index '):
+                    display_text.append(line + '\n', style="dim white")
+                else:
+                    # Regular text (including commit message, diffstat file lines, summary lines, etc.)
+                    # Check if this is a diffstat file line with + symbols (e.g., "file.py | 54 +++++")
+                    if '|' in line and ('+' in line or '-' in line):
+                        # Parse diffstat file line: file path part is white, + symbols are green, - symbols are red
+                        parts = line.split('|')
+                        if len(parts) == 2:
+                            # First part (file path and count) is white
+                            display_text.append(parts[0] + '|', style="white")
+                            # Second part (the visual diffstat) - color + green and - red
+                            for char in parts[1]:
+                                if char == '+':
+                                    display_text.append(char, style="green")
+                                elif char == '-':
+                                    display_text.append(char, style="red")
+                                else:
+                                    display_text.append(char, style="white")
+                            display_text.append('\n')
+                        else:
+                            # Fallback: just append as white
+                            display_text.append(line + '\n', style="white")
+                    else:
+                        # Regular text (commit message, diffstat summary, etc.)
+                        display_text.append(line + '\n', style="white")
+            
+            # Update the patch pane with all content
+            self.update(display_text)
+            return
+            # commit <hash> (optional refs)
+            # Merge: <parent1> <parent2> (if merge commit)
+            # Author: <author>
+            # Date: <date>
+            # (blank line)
+            # <commit message (multiline, may be indented with 4 spaces)>
+            # (blank line)
+            # <diffstat>
+            # (blank line)
+            # <diff starting with "diff --git">
+            
+            commit_header_line = ""
+            merge_line = None
+            author_line = ""
+            date_line = ""
+            message_lines = []
+            diffstat_lines = []
+            diff_start_idx = -1
+            
+            i = 0
+            # Parse commit header line (may include refs in parentheses)
+            if i < len(lines) and lines[i].startswith('commit '):
+                commit_header_line = lines[i]
+                i += 1
+            
+            # Parse Merge: line if present
+            if i < len(lines) and lines[i].startswith('Merge:'):
+                merge_line = lines[i]
+                i += 1
+            
+            # Parse Author: line
+            if i < len(lines) and lines[i].startswith('Author:'):
+                author_line = lines[i]
+                i += 1
+            
+            # Parse Date: line
+            if i < len(lines) and lines[i].startswith('Date:'):
+                date_line = lines[i]
+                i += 1
+            
+            # Skip blank line after Date
+            if i < len(lines) and not lines[i].strip():
+                i += 1
+            
+            # Extract commit message (until we hit "---" separator, diffstat, or diff)
+            message_start = i
+            while i < len(lines):
+                line = lines[i]
+                
+                # Check for "---" separator (git show adds this before diffstat)
+                if line.strip() == '---':
+                    i += 1  # Skip the separator line
+                    break
+                
+                # Check if this is the start of diffstat (file line with | or "X files changed")
+                stripped = line.strip()
+                if stripped and (('|' in stripped and ('+' in stripped or '-' in stripped)) or 'files changed' in line.lower()):
+                    # Found diffstat start
+                    break
+                
+                # Check if this is the start of actual diff
+                if line.startswith('diff --git'):
+                    diff_start_idx = i
+                    break
+                
+                # This is part of the commit message
+                # Strip leading 4 spaces if present (git show indents messages)
+                if line.startswith('    '):
+                    message_lines.append(line[4:])
+                else:
+                    message_lines.append(line)
+                
+                i += 1
+            
+            # Extract diffstat (if present)
+            # After message extraction, we might be at "---" separator or already at diffstat
+            if i < len(lines) and diff_start_idx == -1:
+                # Skip "---" separator if we're at it
+                if i < len(lines) and lines[i].strip() == '---':
+                    i += 1
+                
+                # We're at diffstat, collect all diffstat lines until we hit the diff
+                # Diffstat structure: file lines with |, then summary line with "files changed", then empty line, then diff
+                while i < len(lines):
+                    line = lines[i]
+                    
+                    # Check if this is the start of actual diff
+                    if line.startswith('diff --git'):
+                        diff_start_idx = i
+                        break
+                    
+                    # Check if this is a diffstat line
+                    stripped = line.strip()
+                    is_diffstat_line = False
+                    if stripped:
+                        # File line with pipe and +/- signs
+                        if '|' in stripped and ('+' in stripped or '-' in stripped):
+                            is_diffstat_line = True
+                        # Summary line (e.g., "1 file changed, 84 insertions(+), 23 deletions(-)")
+                        elif 'files changed' in line.lower() or 'file changed' in line.lower():
+                            is_diffstat_line = True
+                    
+                    if is_diffstat_line:
+                        diffstat_lines.append(line)
+                    elif not stripped:
+                        # Empty line - check if next line is diff (if so, we're done) or more diffstat
+                        if i + 1 < len(lines):
+                            next_line = lines[i + 1]
+                            if next_line.startswith('diff --git'):
+                                # Next is diff, we're done with diffstat
+                                i += 1
+                                break
+                            # Otherwise, continue to next line (might be summary line)
+                    
+                    i += 1
+            
+            # Extract diff (everything from diff_start_idx to end)
+            diff_text_parsed = ""
+            if diff_start_idx >= 0:
+                diff_text_parsed = '\n'.join(lines[diff_start_idx:])
+            
+            # Build header with commit info
+            header_text_obj = Text()
+            
+            # Commit header line
+            if commit_header_line:
+                header_text_obj.append(commit_header_line + "\n", style="white")
+            else:
+                header_text_obj.append(f"commit {commit_sha}\n", style="white")
+            
+            # Merge line if present
+            if merge_line:
+                header_text_obj.append(merge_line + "\n", style="white")
+            
+            # Author line
+            if author_line:
+                header_text_obj.append(author_line + "\n", style="white")
+            else:
+                header_text_obj.append(f"Author: {commit.author}\n", style="white")
+            
+            # Date line
+            if date_line:
+                header_text_obj.append(date_line + "\n", style="white")
+            
+            # Blank line before message
+            header_text_obj.append("\n", style="white")
+            
+            # Full commit message (multiline)
+            if message_lines:
+                # Remove trailing empty lines from message
+                while message_lines and not message_lines[-1].strip():
+                    message_lines.pop()
+                
+                for msg_line in message_lines:
+                    header_text_obj.append(msg_line, style="white")
+                    header_text_obj.append("\n", style="white")
+            else:
+                # Fallback to summary if message extraction failed
+                header_text_obj.append(commit.summary + "\n", style="white")
+            
+            # Blank line after message
+            header_text_obj.append("\n", style="white")
+            
+            # Diffstat (if present)
+            if diffstat_lines:
+                for diffstat_line in diffstat_lines:
+                    header_text_obj.append(diffstat_line, style="white")
+                    header_text_obj.append("\n", style="white")
+                header_text_obj.append("\n", style="white")
+            
+            # Diff content with manual color formatting (avoiding Group/Syntax for now)
+            if diff_text_parsed:
+                diff_lines = diff_text_parsed.split('\n')
                 diff_text_obj = Text()
-                for line in lines:
+                for line in diff_lines:
                     if line.startswith('+'):
                         diff_text_obj.append(line + '\n', style="green")
                     elif line.startswith('-'):
                         diff_text_obj.append(line + '\n', style="red")
                     elif line.startswith('@@'):
                         diff_text_obj.append(line + '\n', style="blue")
+                    elif line.startswith('diff --git'):
+                        diff_text_obj.append(line + '\n', style="cyan")
+                    elif line.startswith('index '):
+                        diff_text_obj.append(line + '\n', style="dim white")
+                    elif line.startswith('---') or line.startswith('+++'):
+                        diff_text_obj.append(line + '\n', style="yellow")
                     else:
                         diff_text_obj.append(line + '\n', style="white")
-                
-                # Now we can concatenate Text objects
-                full_content = Text(header_text, style="white") + diff_text_obj
-        else:
-            # Both are Text objects, so concatenation works
-            full_content = Text(header_text, style="white") + Text(diff_text or "No diff available", style="white")
-        
-        self.update(full_content)
+                full_content = header_text_obj + diff_text_obj
+            else:
+                # No diff - just show header with message and diffstat
+                full_content = header_text_obj
+            
+            # Always update with content
+            self.update(full_content)
+            
+        except Exception as e:
+            # If anything fails, fallback to basic display
+            # Log error for debugging
+            import sys
+            import traceback
+            print(f"[DEBUG] show_commit_info error: {type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            
+            # Simple fallback that definitely works
+            try:
+                fallback_text = Text()
+                fallback_text.append(f"commit {commit_sha}\n", style="white")
+                fallback_text.append(f"Author: {commit.author}\n", style="white")
+                fallback_text.append(f"\n{commit.summary}\n\n", style="white")
+                if diff_text:
+                    fallback_text.append(diff_text[:500], style="white")  # Limit to avoid huge content
+                    if len(diff_text) > 500:
+                        fallback_text.append("\n... (truncated)", style="dim white")
+                self.update(fallback_text)
+            except Exception as fallback_err:
+                # Last resort - show error message
+                error_text = Text()
+                error_text.append(f"Error displaying commit: {fallback_err}\n", style="red")
+                error_text.append(f"Commit: {commit_sha[:8]}\n", style="white")
+                self.update(error_text)
     
     def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
         """Show stash details and diff in the patch pane."""
@@ -5446,14 +5863,10 @@ class PygitzenApp(App):
             import sys
             diff_start = time.perf_counter()
             ci = self.commits[index]
-            get_diff_start = time.perf_counter()
-            # Normalize SHA before using it
-            normalized_sha = _normalize_commit_sha(ci.sha)
-            diff = self.git.get_commit_diff(normalized_sha)
-            get_diff_elapsed = time.perf_counter() - get_diff_start
-            _log_timing_message(f"[TIMING] get_commit_diff: {get_diff_elapsed:.4f}s (commit: {normalized_sha[:8]})")
+            # Using LazyGit approach: show_commit_info now gets everything from git show --stat -p
+            # No need to call get_commit_diff separately
             show_start = time.perf_counter()
-            self.patch_pane.show_commit_info(ci, diff)
+            self.patch_pane.show_commit_info(ci, "", git_service=self.git)
             show_elapsed = time.perf_counter() - show_start
             _log_timing_message(f"[TIMING] show_commit_info: {show_elapsed:.4f}s")
             diff_total = time.perf_counter() - diff_start
