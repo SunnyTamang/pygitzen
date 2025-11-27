@@ -1057,6 +1057,7 @@ class CommitSearchInput(Input):
         super().__init__(*args, **kwargs)
         self.placeholder = "Search commits... (fuzzy search)"
         self.border_title = "Search"
+        
 
 
 class LogPane(Static):
@@ -2199,9 +2200,27 @@ class PatchPane(Static):
                 elif not isinstance(repo_path, Path):
                     repo_path = Path(str(repo_path))
             else:
-                # Fallback to current directory
+                # Last resort: try to get from app instance via widget tree
                 from pathlib import Path
-                repo_path = Path(".")
+                try:
+                    # Try to access app instance through widget tree
+                    app = self.app
+                    if app and hasattr(app, 'repo_path'):
+                        repo_path_value = app.repo_path
+                        if repo_path_value:
+                            if isinstance(repo_path_value, str):
+                                repo_path = Path(repo_path_value)
+                            elif isinstance(repo_path_value, Path):
+                                repo_path = repo_path_value
+                            else:
+                                repo_path = Path(str(repo_path_value))
+                        else:
+                            repo_path = Path(".")
+                    else:
+                        repo_path = Path(".")
+                except:
+                    # Final fallback to current directory (shouldn't happen in normal usage)
+                    repo_path = Path(".")
             
             # Use git show --stat --decorate -p (LazyGit approach)
             # --stat: shows diffstat
@@ -2630,20 +2649,79 @@ class PatchPane(Static):
 
 class CommandLogPane(Static):
     """Command log pane showing tips and messages."""
-    
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Command log"
+        self.border_subtitle = self._get_version_footer()  # Will be set in on_mount when app is available
+        self._last_message = ""  # Store last message for footer refresh
+        # Initialize with default tips
+        self.update_log("")
+    
+    def on_mount(self) -> None:
+        """Called when widget is mounted - app is now accessible, set border subtitle."""
+        # Now self.app is available, so we can get the version info
+        self.border_subtitle = self._get_version_footer()
+        #--------------------------------
+        # Fuck it! I will set the style here.
+        # One ket point I noticed [] these characters doesnot work for subtitles. Very weird.
+        # If you clone my repo and run the app, you will see the difference.
+        # Welcome in advance!
+        # If returned as return f"\[{version_label}]" then it works
+        # but if returned as return f"[{version_label}"] then it does not show.
+        # I might check the docs later.
+        #--------------------------------
+        # Set style via styles (dimmed and gray color)
+        self.styles.border_subtitle_style = "dim"
+        self.styles.border_subtitle_color = "#888888"
+    
+    def _get_version_footer(self) -> str:
+        """Get the version footer text (Cython/Python)."""
+        try:
+            app = self.app
+            if app and hasattr(app, '_using_cython'):
+                version_label = "Cython" if app._using_cython else "Python"
+                return f"{version_label}"
+        except (AttributeError, TypeError):
+            pass
+        return ""
     
     def update_log(self, message: str) -> None:
         from rich.text import Text
+        self._last_message = message  # Store for potential refresh
         text = Text()
         text.append("You can hide/focus this panel by pressing '@'\n", style="white")
         text.append("Random tip: ", style="white")
         text.append("`git commit`", style="cyan")
         text.append(" is really just the programmer equivalent of saving your game.\n", style="white")
         text.append("Always do it before embarking on an ambitious change!\n", style="white")
-        text.append(message, style="white")
+        if message:
+            text.append(f"\n{message}\n", style="white")
+        
+        # # Add footer with version info (right-aligned, dimmed)
+        # footer_text = self._get_version_footer()
+        # if footer_text:
+        #     # Calculate padding for right-alignment
+        #     # Get pane width (try to get actual width, fallback to reasonable default)
+        #     pane_width = 50  # Conservative default for command log pane
+        #     try:
+        #         if hasattr(self, 'size') and self.size:
+        #             if hasattr(self.size, 'width') and self.size.width > 0:
+        #                 pane_width = self.size.width
+        #     except:
+        #         pass
+            
+        #     # Calculate padding needed (subtract footer length from width)
+        #     footer_len = len(footer_text)
+        #     # Account for border/padding (subtract ~6 chars for border and padding)
+        #     available_width = max(20, pane_width - 6)
+        #     padding = max(10, available_width - footer_len)  # Minimum 10 chars padding
+            
+        #     text.append("\n", style="white")
+        #     # Add spaces for right-alignment, then footer text
+        #     text.append(" " * padding, style="white")
+        #     text.append(footer_text, style="#888888")  # Gray color for dimmed effect
+        
         self.update(text)
 
 
@@ -2834,10 +2912,13 @@ class PygitzenApp(App):
     }
     
     #command-log-pane {
-        height: 6;
+        height: 8;
         border: solid white;
         background: #1e1e1e;
         overflow: auto;
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-size: 1 1;
     }
     
     #command-log-pane:focus {
@@ -3175,11 +3256,13 @@ class PygitzenApp(App):
         self.commits_pane._parent_app = self
         # Initialize view mode - will be set by refresh_data_fast
         self._view_mode = "log"  # Default to log view (branch view)
-        # Show startup message with version info
-        version_info = " (Cython)" if self._using_cython else " (Python)"
-        self.command_log_pane.update_log(f"pygitzen started{version_info}")
         # self.refresh_data()
         self.refresh_data_fast()
+        
+        # Print Cython status to console for debugging (not shown in UI)
+        version_info = " (Cython)" if self._using_cython else " (Python)"
+        git_service_type = type(self.git).__name__
+        print(f"[DEBUG] Cython status: {self._using_cython}, GitService type: {git_service_type}")
         
         # Set up periodic check for virtual scrolling expansion (fallback if scroll events don't fire)
         # This ensures virtual scrolling works even if scroll events aren't being captured
@@ -3933,11 +4016,7 @@ class PygitzenApp(App):
         
         # Stashes are loaded in background (not here to avoid blocking)
         
-        # Update command log
-        # self.command_log_pane.update_log("Repository refreshed successfully!")
-        # Update command log
-        version_info = " (Cython)" if self._using_cython else " (Python)"
-        self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info}")
+        # Command log update removed - no longer showing refresh messages
 
     def _fuzzy_match(self, query: str, text: str) -> float:
         """Simple fuzzy matching algorithm. Returns a score between 0 and 1."""
@@ -4530,10 +4609,7 @@ class PygitzenApp(App):
             version_info = " (Cython)" if self._using_cython else " (Python)"
             file_count = len(files_with_changes)
             display_count = len(files_to_display)
-            if file_count > display_limit:
-                self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info} ({display_count}/{file_count} files shown - ListView virtual scrolling)")
-            else:
-                self.command_log_pane.update_log(f"Repository refreshed successfully!{version_info} ({file_count} files)")
+            # Command log update removed - no longer showing refresh messages
             
             update_elapsed = time.perf_counter() - update_start
             _log_timing_message(f"[TIMING]   _update_file_status_ui (limited to {display_count}): {update_elapsed:.4f}s")
