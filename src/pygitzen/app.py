@@ -336,6 +336,20 @@ class ChangesPane(ListView):
 
 class BranchesPane(ListView):
     """Branches pane showing local branches."""
+
+    ### Setting up the branch pane wise keybindings 
+    BINDINGS = [
+        Binding("c", "checkout", "Checkout"),
+        Binding("space", "select", "Select"),
+        Binding("enter", "select", "Select"),
+        Binding("n", "new_branch", "New"),
+        Binding("d", "delete_branch", "Delete"),
+        Binding("r", "rename_branch", "Rename"),
+        Binding("m", "merge_branch", "Merge"),
+        Binding("p", "push_branch", "Push"),
+        Binding("u", "set_upstream", "Upstream"),
+    ]
+
     
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -3088,18 +3102,18 @@ class PygitzenApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
-        Binding("j", "down", "Down"),
-        Binding("k", "up", "Up"),
-        Binding("h", "left", "Left"),
-        Binding("l", "right", "Right"),
+        Binding("j", "down", "Down", show=False),
+        Binding("k", "up", "Up", show=False),
+        Binding("h", "left", "Left", show=False),
+        Binding("l", "right", "Right", show=False),
         Binding("@", "toggle_command_log", "Toggle Command Log"),
-        Binding("space", "select", "Select"),
-        Binding("enter", "select", "Select"),
-        Binding("c", "checkout", "Checkout"),
-        Binding("b", "branch", "Branch"),
-        Binding("s", "stash", "Stash"),
-        Binding("+", "load_more", "More"),
-        Binding("g", "toggle_graph_style", "Toggle Graph Style"),
+        # Binding("space", "select", "Select"),
+        # Binding("enter", "select", "Select"),
+        # Binding("c", "checkout", "Checkout"),
+        # Binding("b", "branch", "Branch"),
+        # Binding("s", "stash", "Stash"),
+        # Binding("+", "load_more", "More"),
+        # Binding("g", "toggle_graph_style", "Toggle Graph Style"),
     ]
 
     active_branch: reactive[str | None] = reactive(None)
