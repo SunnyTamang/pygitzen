@@ -2607,51 +2607,105 @@ class PatchPane(Static):
                 self.update(error_text)
     
     def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
-        """Show stash details and diff in the patch pane."""
+        """Show stash details and diff in the patch pane with proper color coding."""
         from rich.text import Text
-        from rich.console import Console
-        from rich.syntax import Syntax
-        from rich.console import Group
+        import re
         
-        # Create stash header with newline after message
-        header_text = f"""stash@{stash.index}: On {stash.branch}: {stash.message}
-
-"""
+        # Create stash header (matching commit format)
+        full_content = Text()
+        full_content.append(f"stash@{stash.index}: On {stash.branch}: {stash.message}\n", style="yellow")
+        full_content.append("\n", style="white")
         
-        # Build content with git's native colors preserved
-        full_content = Text(header_text)
+        # Strip ANSI codes from both stat and diff
+        stat_text_clean = re.sub(r'\x1b\[[0-9;]*m', '', stat_text) if stat_text else ""
+        diff_text_clean = re.sub(r'\x1b\[[0-9;]*m', '', diff_text) if diff_text else ""
         
-        # Add stat summary if available (preserve git's native colors)
-        # Ensure all lines start at column 0 (strip leading whitespace from each line)
-        if stat_text:
-            # Split into lines, strip leading whitespace from each, then rejoin
-            # This ensures all stat lines align properly
-            lines = stat_text.split('\n')
-            cleaned_lines = [line.lstrip() for line in lines]
-            stat_text_cleaned = '\n'.join(cleaned_lines)
+        # Note: git stash show --stat returns only stat, git stash show -p returns only diff
+        # They are separate, so no need to strip stat from diff_text
+        
+        # Add stat summary if available (with color coding, matching commit diff format)
+        if stat_text_clean:
+            # Process stat lines with proper coloring
+            stat_lines = stat_text_clean.split('\n')
+            for line in stat_lines:
+                cleaned_line = line.lstrip()
+                if not cleaned_line:
+                    full_content.append("\n", style="white")
+                    continue
+                
+                # Check if this is a diffstat file line with + symbols (e.g., "file.py | 54 +++++")
+                if '|' in cleaned_line and ('+' in cleaned_line or '-' in cleaned_line):
+                    # Parse diffstat file line: file path part is white, + symbols are green, - symbols are red
+                    parts = cleaned_line.split('|')
+                    if len(parts) == 2:
+                        # First part (file path and count) is white
+                        full_content.append(parts[0] + '|', style="white")
+                        # Second part (the visual diffstat) - color + green and - red
+                        for char in parts[1]:
+                            if char == '+':
+                                full_content.append(char, style="green")
+                            elif char == '-':
+                                full_content.append(char, style="red")
+                            else:
+                                full_content.append(char, style="white")
+                        full_content.append("\n")
+                    else:
+                        # Fallback: just append as white
+                        full_content.append(cleaned_line + "\n", style="white")
+                elif 'files changed' in cleaned_line.lower() or 'file changed' in cleaned_line.lower():
+                    # Summary line - color it white
+                    full_content.append(cleaned_line + "\n", style="white")
+                else:
+                    # Regular stat line
+                    full_content.append(cleaned_line + "\n", style="white")
             
-            try:
-                stat_text_obj = Text.from_ansi(stat_text_cleaned)
-            except:
-                stat_text_obj = Text(stat_text_cleaned)
-            full_content += stat_text_obj
-            full_content += Text("\n\n")
+            full_content.append("\n", style="white")
         
-        # Display diff as-is (with native git colors preserved via ANSI codes)
-        if diff_text:
-            # Parse ANSI color codes from git output and convert to Rich Text
-            # Rich can parse ANSI codes using Text.from_ansi()
-            try:
-                diff_text_obj = Text.from_ansi(diff_text)
-            except:
-                # Fallback to plain text if ANSI parsing fails
-                diff_text_obj = Text(diff_text)
-            
-            # Combine header and diff
-            full_content += diff_text_obj
+        # Display diff with manual color coding (same as commit diffs)
+        if diff_text_clean:
+            # Process diff line by line with proper color coding
+            diff_lines = diff_text_clean.split('\n')
+            for line in diff_lines:
+                # Skip empty lines but preserve them
+                if not line.strip():
+                    full_content.append("\n", style="white")
+                    continue
+                
+                # Apply color coding based on line content (matching commit diff logic)
+                # Check for file path markers FIRST (before generic +/- checks)
+                if line.startswith('---') or line.startswith('+++'):
+                    full_content.append(line + '\n', style="yellow")
+                elif line.startswith('@@'):
+                    full_content.append(line + '\n', style="blue")
+                elif line.startswith('+') and not line.startswith('+++'):
+                    # Check if this is a visual diffstat line (only +, -, and spaces)
+                    stripped = line.strip()
+                    if stripped and all(c in '+- ' for c in stripped):
+                        # Visual diffstat line - color character by character
+                        for char in line:
+                            if char == '+':
+                                full_content.append(char, style="green")
+                            elif char == '-':
+                                full_content.append(char, style="red")
+                            else:
+                                full_content.append(char, style="white")
+                        full_content.append('\n')
+                    else:
+                        # Regular added code line
+                        full_content.append(line + '\n', style="green")
+                elif line.startswith('-') and not line.startswith('---'):
+                    # Removed code line
+                    full_content.append(line + '\n', style="red")
+                elif line.startswith('diff --git'):
+                    full_content.append(line + '\n', style="cyan")
+                elif line.startswith('index '):
+                    full_content.append(line + '\n', style="dim white")
+                else:
+                    # Regular text line (including context lines)
+                    full_content.append(line + '\n', style="white")
         else:
             # No diff available
-            full_content += Text("No diff available", style="dim white")
+            full_content.append("No diff available\n", style="dim white")
         
         self.update(full_content)
 

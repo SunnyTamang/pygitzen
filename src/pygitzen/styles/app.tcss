@@ -172,6 +172,10 @@ Input {
 #patch-pane {
     background: #1e1e1e;
     min-height: 100%;
+    color: #cccccc;
+    padding: 1;
+    text-align: left;
+    text-wrap: wrap;
 }
 
 #log-pane {

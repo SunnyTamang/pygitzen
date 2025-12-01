@@ -67,18 +67,18 @@ class StashService:
         repo_path_str = str(repo_path) if repo_path else "."
         
         try:
-            # Get stash diff
+            # Get stash diff (use --no-color for consistent parsing, we'll apply colors manually)
             diff_result = subprocess.run(
-                ["git", "stash", "show", "-p", f"stash@{{{stash_index}}}"],
+                ["git", "stash", "show", "-p", "--no-color", f"stash@{{{stash_index}}}"],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 cwd=repo_path_str,
             )
             
-            # Get stash stat
+            # Get stash stat (use --stat --no-color for consistent parsing, we'll apply colors manually)
             stat_result = subprocess.run(
-                ["git", "stash", "show", f"stash@{{{stash_index}}}"],
+                ["git", "stash", "show", "--stat", "--no-color", f"stash@{{{stash_index}}}"],
                 capture_output=True,
                 text=True,
                 timeout=10,
