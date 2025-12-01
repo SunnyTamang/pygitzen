@@ -1,0 +1,357 @@
+Screen {
+    layout: vertical;
+    background: #1e1e1e;
+}
+
+Header {
+    dock: top;
+    height: 3;
+    background: #2d2d2d;
+    color: white;
+}
+
+Footer {
+    dock: bottom;
+    height: 3;
+    background: #2d2d2d;
+    color: white;
+}
+
+#main-container {
+    height: 1fr;
+    layout: horizontal;
+}
+
+#left-column {
+    width: 50%;
+    height: 1fr;
+    layout: vertical;
+}
+
+#right-column {
+    width: 1fr;
+    height: 1fr;
+    layout: vertical;
+}
+
+#status-pane {
+    height: 3;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+}
+
+#status-pane:focus {
+    border: solid green;
+}
+
+#files-container {
+    height: 5;
+    layout: horizontal;
+}
+
+#staged-pane {
+    height: 5;
+    width: 1fr;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+    scrollbar-size: 1 1;
+}
+
+#staged-pane:focus {
+    border: solid green;
+}
+
+#changes-pane {
+    height: 5;
+    width: 1fr;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+    scrollbar-size: 1 1;
+}
+
+#changes-pane:focus {
+    border: solid green;
+}
+
+#branches-tabbed {
+    height: 9;
+    border: solid white;
+    background: #1e1e1e;
+}
+
+#branches-tabbed:focus,
+#branches-tabbed:focus-within {
+    border: solid green;
+}
+
+#branches-tabbed > TabbedContent > Tab {
+    background: #1e1e1e;
+    color: #cccccc;
+}
+
+#branches-tabbed > TabbedContent > Tab.--active {
+    background: #2d2d2d;
+    color: white;
+}
+
+#branches-pane {
+    height: 1fr;
+    border: none;
+    background: #1e1e1e;
+    overflow: auto;
+}
+
+#remotes-pane {
+    height: 1fr;
+    border: none;
+    background: #1e1e1e;
+    overflow: auto;
+}
+
+#tags-pane {
+    height: 1fr;
+    border: none;
+    background: #1e1e1e;
+    overflow: auto;
+}
+
+#commits-pane {
+    height: 1fr;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+}
+
+#commits-pane:focus {
+    border: solid green;
+}
+
+#commit-search-input {
+    height: 3;
+    border: solid white;
+    background: #1e1e1e;
+    min-height: 3;
+}
+
+#commit-search-input:focus {
+    border: solid green;
+}
+
+Input {
+    color: white;
+}
+
+#stash-pane {
+    height: 8;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+    scrollbar-size: 1 1;
+}
+
+#stash-pane:focus {
+    border: solid green;
+}
+
+#patch-scroll-container {
+    height: 1fr;
+    border: solid white;
+    overflow: auto;
+    overflow-x: auto;
+    overflow-y: auto;
+    scrollbar-size: 1 1;
+}
+
+#patch-scroll-container:focus {
+    border: solid green;
+}
+
+#patch-pane {
+    background: #1e1e1e;
+    min-height: 100%;
+}
+
+#log-pane {
+    background: #1e1e1e;
+    min-height: 100%;
+    width: auto;
+    min-width: 100%;
+    text-wrap: wrap;
+}
+
+#command-log-pane {
+    height: 8;
+    border: solid white;
+    background: #1e1e1e;
+    overflow: auto;
+    overflow-x: auto;
+    overflow-y: auto;
+    scrollbar-size: 1 1;
+}
+
+#command-log-pane:focus {
+    border: solid green;
+}
+
+ListItem.current-branch {
+    background: #404040;
+    color: white;
+}
+
+ListItem.--highlight {
+    background: #404040;
+    color: white;
+}
+
+ListItem:focus {
+    background: #404040;
+    color: white;
+}
+
+ListItem.--highlight:focus {
+    background: #505050;
+    color: white;
+}
+
+ListItem {
+    background: #1e1e1e;
+    color: #cccccc;
+    height: auto;
+    min-height: 1;
+}
+
+/* Selected/highlighted item styling for commits pane */
+#commits-pane ListItem.--highlight {
+    background: #357ABD; /* blue for strong contrast */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#commits-pane ListItem.--highlight:focus {
+    background: #2f6aa3; /* slightly darker when focused */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#commits-pane ListItem.highlighted-commit {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#commits-pane ListItem.highlighted-commit:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+/* Selected/highlighted item styling for branches pane */
+#branches-pane ListItem.--highlight {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#branches-pane ListItem.--highlight:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+/* Selected/highlighted item styling for stash pane */
+#stash-pane ListItem.--highlight {
+    background: #357ABD; /* blue for strong contrast */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#stash-pane ListItem.--highlight:focus {
+    background: #2f6aa3; /* slightly darker when focused */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#stash-pane ListItem.highlighted-stash {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#stash-pane ListItem.highlighted-stash:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#files-pane ListItem {
+    height: 1;
+    min-height: 1;
+}
+
+#files-pane ListItem.--highlight {
+    background: #505050;
+    color: white;
+}
+
+#files-pane ListItem.--highlight:focus {
+    background: #606060;
+    color: white;
+}
+
+Panel {
+    padding: 1;
+    background: #1e1e1e;
+}
+
+Static {
+    background: #1e1e1e;
+    color: #cccccc;
+    text-align: left;
+}
+
+/* Ensure highlighted list items show blue background and readable text */
+#commits-pane ListItem.--highlight > Static {
+    background: transparent;
+    color: #ffffff;
+}
+#commits-pane ListItem.highlighted-commit > Static {
+    background: transparent;
+    color: #ffffff;
+}
+#branches-pane ListItem.--highlight > Static {
+    background: transparent;
+    color: #ffffff;
+}
+#stash-pane ListItem.--highlight > Static {
+    background: transparent;
+    color: #ffffff;
+}
+#stash-pane ListItem.highlighted-stash > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
+ListView {
+    background: #1e1e1e;
+    scrollbar-color: #404040 #1e1e1e;
+    scrollbar-size: 1 1;
+}
+
+/* Custom scrollbar styling for LazyGit-like appearance */
+ScrollBar {
+    background: #1e1e1e;
+    color: #404040;
+    width: 1;
+}
+
+ScrollBar:hover {
+    background: #404040;
+}
+
+ScrollBarCorner {
+    background: #1e1e1e;
+}
+

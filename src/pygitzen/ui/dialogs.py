@@ -13,33 +13,7 @@ from textual.containers import Container
 class MinimalDialog(ModalScreen[str]):
     """Minimal floating dialog with input field and Enter key submission."""
 
-    DEFAULT_CSS = """
-    MinimalDialog {
-        align: center middle;
-    }
-
-    #dialog {
-        width: 60%;
-        min-width: 40;
-        max-width: 80;
-        height: 13;
-        background: $surface;
-        border: solid $primary;
-        grid-rows: auto auto;
-        grid-gaps: 1;
-        padding: 1;
-    }
-
-    #title {
-        text-align: center;
-        text-style: bold;
-        color: $text;
-    }
-
-    #input {
-        width: 100%;
-    }
-    """
+    CSS_PATH = "../styles/dialogs.tcss"
 
     def __init__(self, title: str, placeholder: str = "", initial_value: str = "") -> None:
         """Initialize minimal dialog.
@@ -108,32 +82,7 @@ class RenameBranchDialog(MinimalDialog):
 class DeleteBranchDialog(ModalScreen[bool]):
     """Confirmation dialog for deleting a branch."""
 
-    DEFAULT_CSS = """
-    DeleteBranchDialog {
-        align: center middle;
-    }
-
-    #dialog {
-        width: 50;
-        height: 8;
-        background: $surface;
-        border: solid $error;
-        grid-rows: auto auto auto;
-        grid-gaps: 1;
-        padding: 1;
-    }
-
-    #message {
-        text-align: center;
-        color: $text;
-    }
-
-    #button-container {
-        width: 100%;
-        grid-columns: 1fr 1fr;
-        grid-gaps: 1;
-    }
-    """
+    CSS_PATH = "../styles/dialogs.tcss"
 
     def __init__(self, branch_name: str) -> None:
         """Initialize delete branch dialog.
@@ -177,32 +126,7 @@ class SetUpstreamDialog(MinimalDialog):
 class ConfirmDialog(ModalScreen[bool]):
     """Generic confirmation dialog."""
 
-    DEFAULT_CSS = """
-    ConfirmDialog {
-        align: center middle;
-    }
-
-    #dialog {
-        width: 50;
-        height: 8;
-        background: $surface;
-        border: solid $primary;
-        grid-rows: auto auto auto;
-        grid-gaps: 1;
-        padding: 1;
-    }
-
-    #message {
-        text-align: center;
-        color: $text;
-    }
-
-    #button-container {
-        width: 100%;
-        grid-columns: 1fr 1fr;
-        grid-gaps: 1;
-    }
-    """
+    CSS_PATH = "../styles/dialogs.tcss"
 
     def __init__(self, message: str, confirm_text: str = "Confirm", cancel_text: str = "Cancel") -> None:
         """Initialize confirmation dialog.
