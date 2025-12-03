@@ -73,6 +73,148 @@ The TUI will automatically detect the repository and display your Git status.
 - Click on a panel to focus it
 - Focused panels have green borders
 
+## Customizing Keybindings
+
+pygitzen supports custom keybindings via a configuration file. You can override default keybindings or add new ones.
+
+### Configuration File Location
+
+- **macOS/Linux**: `~/.config/pygitzen/keybindings.toml`
+- **Windows**: `%APPDATA%\pygitzen\keybindings.toml`
+
+### Configuration Format
+
+Create a TOML file with the following structure:
+
+```toml
+[app]
+# App-level keybindings
+s = "refresh"        # Change refresh key from 'r' to 's'
+"@" = "quit"         # Change '@' key to quit (quoted for special chars)
+t = "quit"           # Add 't' as another quit key
+
+[panes.branches]
+# Branches pane keybindings
+x = "delete_branch"  # Change delete key from 'd' to 'x'
+c = "checkout"       # Override checkout key (same as default)
+
+[panes.commits]
+# Commits pane keybindings
+c = "checkout"
+
+[panes.stash]
+# Stash pane keybindings
+# (add bindings here)
+
+[panes.tags]
+# Tags pane keybindings
+# (add bindings here)
+
+[panes.remotes]
+# Remotes pane keybindings
+# (add bindings here)
+```
+
+### How Keybinding Merge Works
+
+pygitzen uses a **hybrid merge approach**:
+
+1. **If your key exists in defaults** (key-based override):
+   - The key's action is changed to your specified action
+   - ⚠️ **Important**: The old action becomes unbound (no key triggers it)
+   - Example: If `'s'` defaults to `'stash'` and you set `'s' = "refresh"`, then `'stash'` becomes unbound
+
+2. **If your key is new** (action-based replace):
+   - The default binding with that action is replaced with your new key
+   - The old key is removed
+   - Example: If `'r'` defaults to `'refresh'` and you set `'t' = "refresh"`, then `'r'` is removed and `'t'` does refresh
+
+3. **If your key and action are both new**:
+   - A new binding is added
+
+### Important Notes
+
+- **Unbound Actions**: When you override an existing key, the original action may become unbound. Make sure to rebind it if you still want to use that action.
+- **Multiple Keys per Action**: You can have multiple keys trigger the same action (e.g., both `'q'` and `'t'` can do `'quit'`).
+- **Special Characters**: Use quotes for special characters like `"@"`, `"+"`, `"space"`, `"enter"`.
+- **Restart Required**: Changes take effect after restarting pygitzen.
+- **No Auto-Creation**: The config file is not created automatically. You must create it manually if you want custom keybindings.
+
+### Example: Replacing Refresh Key
+
+To change the refresh key from `'r'` to `'s'`:
+
+```toml
+[app]
+s = "refresh"
+```
+
+This will:
+- Remove `'r'` → `'refresh'` binding
+- Add `'s'` → `'refresh'` binding
+- Keep all other defaults unchanged
+
+### Example: Overriding Existing Key
+
+To change what `'s'` does (from `'stash'` to `'refresh'`):
+
+```toml
+[app]
+s = "refresh"
+```
+
+This will:
+- Change `'s'` from `'stash'` to `'refresh'`
+- ⚠️ **Warning**: `'stash'` action becomes unbound (no key triggers it)
+- You'll need to bind `'stash'` to another key if you want to use it
+
+### Default Keybindings
+
+#### App-Level
+- `q` → `quit`
+- `r` → `refresh`
+- `j` → `down` (hidden from footer)
+- `k` → `up` (hidden from footer)
+- `h` → `left` (hidden from footer)
+- `l` → `right` (hidden from footer)
+- `@` → `toggle_command_log`
+- `space` → `select`
+- `enter` → `select`
+- `c` → `checkout`
+- `b` → `branch`
+- `s` → `stash`
+- `+` → `load_more`
+- `g` → `toggle_graph_style`
+
+#### Branches Pane
+- `c` → `checkout`
+- `space` → `select`
+- `enter` → `select`
+- `n` → `new_branch`
+- `d` → `delete_branch`
+- `r` → `rename_branch`
+- `m` → `merge_branch`
+- `p` → `push_branch`
+- `u` → `set_upstream`
+
+#### Commits Pane
+- `c` → `checkout`
+- `space` → `select`
+- `enter` → `select`
+
+#### Other Panes
+- `space` → `select`
+- `enter` → `select`
+
+### Troubleshooting
+
+- **Config not loading**: Make sure the file path is correct and TOML syntax is valid
+- **Changes not applying**: Restart pygitzen after editing the config file
+- **Action not working**: Check if the action became unbound (see "Unbound Actions" above)
+- **Invalid key format**: Use quotes for special characters (`"@"`, `"+"`, `"space"`, `"enter"`)
+
+For more details on implementing a UI for keybinding configuration, see `KEYBINDING_UI_DESIGN.md`.
+
 ## Interface Overview
 
 pygitzen displays your Git repository in a multi-panel interface:

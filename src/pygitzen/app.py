@@ -80,11 +80,16 @@ except ImportError:
 # Removed: StatusPane, StagedPane, ChangesPane, BranchesPane, RemotesPane,
 # TagsPane, CommitsPane, StashPane, CommitSearchInput, LogPane, PatchPane, CommandLogPane
 
+# Load app-level bindings at module level (before class definition)
+# This ensures Textual reads the correct bindings when the class is defined
+_keybinding_config = KeybindingConfig()
+_APP_BINDINGS = _keybinding_config.get_bindings("app")
+
 class PygitzenApp(App):
     CSS_PATH = "styles/app.tcss"
 
-    # BINDINGS will be loaded from KeybindingConfig in __init__
-    BINDINGS = []  # Will be populated from config
+    # BINDINGS loaded from config at module level
+    BINDINGS = _APP_BINDINGS
 
     active_branch: reactive[str | None] = reactive(None)
     selected_commit_index: reactive[int] = reactive(0)
@@ -94,16 +99,13 @@ class PygitzenApp(App):
         init_start = time.perf_counter()
         _log_timing_message(f"[TIMING] ===== PygitzenApp.__init__ START =====")
         
-        super().__init__()
-        from dulwich.errors import NotGitRepository
-        
-        # Initialize keybinding config (before try block so it's always available)
+        # Initialize keybinding config for use in on_mount (for pane bindings)
+        # Note: App-level bindings are already loaded at module level
         self.keybinding_config = KeybindingConfig()
         
-        # Load app-level bindings from config
-        app_bindings = self.keybinding_config.get_bindings("app")
-        # Update BINDINGS class attribute dynamically
-        PygitzenApp.BINDINGS = app_bindings
+        # Call super().__init__() - BINDINGS already set at class definition time
+        super().__init__()
+        from dulwich.errors import NotGitRepository
         
         try:
             # self.git = GitService(repo_dir)
@@ -255,11 +257,8 @@ class PygitzenApp(App):
         # Set parent app reference for commits pane
         self.commits_pane._parent_app = self
         
-        # Set pane-specific bindings from config
-        branches_bindings = self.keybinding_config.get_bindings("branches")
-        if branches_bindings:
-            # Update BranchesPane bindings dynamically
-            self.branches_pane.BINDINGS = branches_bindings
+        # Note: Pane-specific bindings are now loaded at module level in panes.py
+        # No need to set them here anymore
         
         # Initialize view mode - will be set by refresh_data_fast
         self._view_mode = "log"  # Default to log view (branch view)

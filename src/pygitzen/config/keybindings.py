@@ -128,7 +128,12 @@ class KeybindingConfig:
     def _merge_bindings(
         self, defaults: list[Binding], user_overrides: dict[str, str]
     ) -> list[Binding]:
-        """Merge user overrides with default bindings.
+        """Merge user overrides with default bindings using hybrid approach.
+        
+        Hybrid Logic:
+        - If user's key exists in defaults → Override that key's action (key-based)
+        - If user's key is new → Replace default binding with same action (action-based)
+        - If user's key and action are both new → Add as new binding
         
         Args:
             defaults: List of default Binding objects.
@@ -137,39 +142,71 @@ class KeybindingConfig:
         Returns:
             Merged list of Binding objects.
         """
-        # Create a map of existing keys for quick lookup
+        # Create maps for lookup
+        action_to_bindings = {}  # action -> list of bindings (multiple can have same action)
         key_to_binding = {binding.key: binding for binding in defaults}
-        key_to_index = {binding.key: i for i, binding in enumerate(defaults)}
-
-        # Apply user overrides
-        for key, action in user_overrides.items():
-            if key in key_to_binding:
-                # Replace existing binding
-                old_binding = key_to_binding[key]
-                # Try to get description from old binding, or use action
-                description = getattr(old_binding, "description", action)
-                show = getattr(old_binding, "show", True)
-                key_to_binding[key] = Binding(key, action, description, show=show)
-            else:
-                # New binding (not in defaults)
-                key_to_binding[key] = Binding(key, action, action)
-
-        # Return merged bindings, preserving order where possible
-        result = []
-        seen_keys = set()
-
-        # First, add defaults in original order (if not overridden)
+        
+        # Build action map (list of bindings per action)
         for binding in defaults:
-            if binding.key not in user_overrides:
+            if binding.action not in action_to_bindings:
+                action_to_bindings[binding.action] = []
+            action_to_bindings[binding.action].append(binding)
+        
+        result = []
+        replaced_keys = set()
+        
+        # Process user overrides
+        for user_key, user_action in user_overrides.items():
+            # CASE 1: User's key EXISTS in defaults → Override that key's action (key-based)
+            if user_key in key_to_binding:
+                old_binding = key_to_binding[user_key]
+                old_action = old_binding.action
+                
+                # Create new binding with user's action
+                new_binding = Binding(
+                    user_key,
+                    user_action,
+                    user_action.replace("_", " ").title(),  # Format description
+                    show=getattr(old_binding, "show", True)
+                )
+                result.append(new_binding)
+                replaced_keys.add(user_key)
+                
+                # IMPORTANT: If the new action already has a default binding, mark it as replaced too
+                # This prevents duplicate bindings for the same action
+                # Example: User sets 's' = 'refresh', default has 'r' = 'refresh'
+                # We override 's' to 'refresh', but should also remove 'r'
+                if user_action in action_to_bindings:
+                    # Find all default bindings with this action and mark their keys as replaced
+                    for old_binding_with_action in action_to_bindings[user_action]:
+                        replaced_keys.add(old_binding_with_action.key)
+            
+            # CASE 2: User's key is NEW → Find default binding with this action and replace (action-based)
+            elif user_action in action_to_bindings:
+                # Find the first default binding with this action
+                old_binding = action_to_bindings[user_action][0]
+                old_key = old_binding.key
+                
+                # Replace: Create new binding with user's key but same action
+                new_binding = Binding(
+                    user_key,
+                    user_action,
+                    getattr(old_binding, "description", user_action),
+                    show=getattr(old_binding, "show", True)
+                )
+                
+                result.append(new_binding)
+                replaced_keys.add(old_key)
+            
+            # CASE 3: New key AND new action → Just add it
+            else:
+                result.append(Binding(user_key, user_action, user_action.replace("_", " ").title()))
+        
+        # Add defaults that weren't replaced
+        for binding in defaults:
+            if binding.key not in replaced_keys:
                 result.append(binding)
-                seen_keys.add(binding.key)
-
-        # Then add overrides and new bindings
-        for key, action in user_overrides.items():
-            if key not in seen_keys:
-                result.append(key_to_binding[key])
-                seen_keys.add(key)
-
+        
         return result
 
     def get_bindings(self, pane: str = "app") -> list[Binding]:
@@ -193,8 +230,8 @@ class KeybindingConfig:
                 else:
                     panes_config = config_data.get("panes", {})
                     user_overrides = panes_config.get(pane, {})
-
                 if user_overrides:
+                    # print("after_merging", self._merge_bindings(defaults, user_overrides))
                     return self._merge_bindings(defaults, user_overrides)
 
         # No config file or no overrides for this pane - return defaults

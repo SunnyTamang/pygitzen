@@ -18,6 +18,7 @@ from rich.console import Group
 from rich.syntax import Syntax
 
 from ..git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
+from ..config import KeybindingConfig
 
 # Import git_graph utilities if available
 try:
@@ -28,6 +29,10 @@ except ImportError:
     def strip_ansi_codes(text): return text
     def convert_graph_prefix_to_rich(text): return Text(text)
 
+# This will help load the custom/default keybindings on module level 
+_keybinding_config = KeybindingConfig()
+_BRANCHES_BINDINGS = _keybinding_config.get_bindings("branches")
+_COMMITS_BINDINGS = _keybinding_config.get_bindings("commits")
 
 # Helper functions
 # Helper function to format time recency (e.g., "18h", "1d", "1w")
@@ -312,18 +317,18 @@ class BranchesPane(ListView):
     """Branches pane showing local branches."""
 
     ### Setting up the branch pane wise keybindings 
-    BINDINGS = [
-        Binding("c", "checkout", "Checkout"),
-        Binding("space", "select", "Select"),
-        Binding("enter", "select", "Select"),
-        Binding("n", "new_branch", "New"),
-        Binding("d", "delete_branch", "Delete"),
-        Binding("r", "rename_branch", "Rename"),
-        Binding("m", "merge_branch", "Merge"),
-        Binding("p", "push_branch", "Push"),
-        Binding("u", "set_upstream", "Upstream"),
-    ]
-
+    # BINDINGS = [
+    #     Binding("c", "checkout", "Checkout"),
+    #     Binding("space", "select", "Select"),
+    #     Binding("enter", "select", "Select"),
+    #     Binding("n", "new_branch", "New"),
+    #     Binding("d", "delete_branch", "Delete"),
+    #     Binding("r", "rename_branch", "Rename"),
+    #     Binding("m", "merge_branch", "Merge"),
+    #     Binding("p", "push_branch", "Push"),
+    #     Binding("u", "set_upstream", "Upstream"),
+    # ]
+    BINDINGS=_BRANCHES_BINDINGS
     
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
