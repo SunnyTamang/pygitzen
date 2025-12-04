@@ -260,6 +260,15 @@ class PygitzenApp(App):
         # Note: Pane-specific bindings are now loaded at module level in panes.py
         # No need to set them here anymore
         
+        # Check for unbound actions
+        #unbound = self.keybinding_config.get_unbound_actions("app")
+        # if unbound:
+        #     print(f"\n[UNBOUND KEYBINDINGS] Found {len(unbound)} unbound action(s):")
+        #     for action_info in unbound:
+        #         print(f"  - {action_info['action']} (was bound to '{action_info['was_key']}') - {action_info['description']}")
+        # else:
+        #     print("[UNBOUND KEYBINDINGS] No unbound actions found")
+        
         # Initialize view mode - will be set by refresh_data_fast
         self._view_mode = "log"  # Default to log view (branch view)
         # self.refresh_data()
@@ -332,6 +341,11 @@ class PygitzenApp(App):
         if self._git_watcher:
             self._git_watcher.stop()
             _log_timing_message("[GITWATCHER] Stopped")
+
+        # unbound = self.keybinding_config.get_unbound_actions("app")
+        # print(f"\n[UNBOUND KEYBINDINGS] Found {len(unbound)} unbound action(s):")
+        # for action_info in unbound:
+        #     print(f"  - {action_info['action']} (was bound to '{action_info['was_key']}') - {action_info['description']}")
     
     def _process_ui_update_queue(self) -> None:
         """Process UI updates from background threads (called periodically from main thread)."""

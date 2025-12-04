@@ -30,7 +30,7 @@ class KeybindingConfig:
 
     def _get_config_path(self) -> Optional[Path]:
         """Get platform-specific config file path.
-        
+
         Returns:
             Path to config file, or None if path cannot be determined.
         """
@@ -48,7 +48,7 @@ class KeybindingConfig:
 
     def _get_default_bindings(self, pane: str) -> list[Binding]:
         """Get hardcoded default bindings for a pane.
-        
+
         Args:
             pane: Pane name ("app", "branches", "commits", etc.)
         
@@ -107,7 +107,7 @@ class KeybindingConfig:
 
     def _load_config_file(self, path: Path) -> dict:
         """Load TOML config file.
-        
+
         Args:
             path: Path to config file.
         
@@ -129,7 +129,7 @@ class KeybindingConfig:
         self, defaults: list[Binding], user_overrides: dict[str, str]
     ) -> list[Binding]:
         """Merge user overrides with default bindings using hybrid approach.
-        
+
         Hybrid Logic:
         - If user's key exists in defaults → Override that key's action (key-based)
         - If user's key is new → Replace default binding with same action (action-based)
@@ -143,35 +143,37 @@ class KeybindingConfig:
             Merged list of Binding objects.
         """
         # Create maps for lookup
-        action_to_bindings = {}  # action -> list of bindings (multiple can have same action)
+        action_to_bindings = (
+            {}
+        )  # action -> list of bindings (multiple can have same action)
         key_to_binding = {binding.key: binding for binding in defaults}
-        
+
         # Build action map (list of bindings per action)
         for binding in defaults:
             if binding.action not in action_to_bindings:
                 action_to_bindings[binding.action] = []
             action_to_bindings[binding.action].append(binding)
-        
+
         result = []
         replaced_keys = set()
-        
+
         # Process user overrides
         for user_key, user_action in user_overrides.items():
             # CASE 1: User's key EXISTS in defaults → Override that key's action (key-based)
             if user_key in key_to_binding:
                 old_binding = key_to_binding[user_key]
                 old_action = old_binding.action
-                
+
                 # Create new binding with user's action
                 new_binding = Binding(
                     user_key,
                     user_action,
                     user_action.replace("_", " ").title(),  # Format description
-                    show=getattr(old_binding, "show", True)
+                    show=getattr(old_binding, "show", True),
                 )
                 result.append(new_binding)
                 replaced_keys.add(user_key)
-                
+
                 # IMPORTANT: If the new action already has a default binding, mark it as replaced too
                 # This prevents duplicate bindings for the same action
                 # Example: User sets 's' = 'refresh', default has 'r' = 'refresh'
@@ -180,41 +182,45 @@ class KeybindingConfig:
                     # Find all default bindings with this action and mark their keys as replaced
                     for old_binding_with_action in action_to_bindings[user_action]:
                         replaced_keys.add(old_binding_with_action.key)
-            
+
             # CASE 2: User's key is NEW → Find default binding with this action and replace (action-based)
             elif user_action in action_to_bindings:
                 # Find the first default binding with this action
                 old_binding = action_to_bindings[user_action][0]
                 old_key = old_binding.key
-                
+
                 # Replace: Create new binding with user's key but same action
                 new_binding = Binding(
                     user_key,
                     user_action,
                     getattr(old_binding, "description", user_action),
-                    show=getattr(old_binding, "show", True)
+                    show=getattr(old_binding, "show", True),
                 )
-                
+
                 result.append(new_binding)
                 replaced_keys.add(old_key)
-            
+
             # CASE 3: New key AND new action → Just add it
             else:
-                result.append(Binding(user_key, user_action, user_action.replace("_", " ").title()))
-        
+                result.append(
+                    Binding(
+                        user_key, user_action, user_action.replace("_", " ").title()
+                    )
+                )
+
         # Add defaults that weren't replaced
         for binding in defaults:
             if binding.key not in replaced_keys:
                 result.append(binding)
-        
+
         return result
 
     def get_bindings(self, pane: str = "app") -> list[Binding]:
         """Get bindings for a pane, merging user config with defaults.
-        
+
         Args:
             pane: Pane name ("app", "branches", "commits", etc.)
-        
+
         Returns:
             List of Binding objects for the pane.
         """
@@ -237,3 +243,58 @@ class KeybindingConfig:
         # No config file or no overrides for this pane - return defaults
         return defaults
 
+    def get_unbound_actions(self, pane: str = "app") -> list[dict]:
+        """Detect actions that became unbound after merging user config.
+
+        An action is considered "unbound" if:
+        - It existed in defaults with a key binding
+        - After merging user config, that action no longer has any key binding
+
+        Args:
+            pane: Pane name ("app", "branches", "commits", etc.)
+
+        Returns:
+            List of dicts with keys:
+            - 'action': str - Action name that is unbound
+            - 'was_key': str - Key that was originally bound to this action
+            - 'pane': str - Pane name
+            - 'description': str - Human-readable description
+        """
+        defaults = self._get_default_bindings(pane)
+        merged = self.get_bindings(pane)
+
+        # Build maps for comparison
+        default_actions = {}  # action -> list of bindings (for tracking all keys)
+        merged_actions = set()  # set of actions in merged bindings
+
+        # Track all actions from defaults
+        for binding in defaults:
+            if binding.action not in default_actions:
+                default_actions[binding.action] = []
+            default_actions[binding.action].append(binding)
+
+        # Track all actions from merged bindings
+        for binding in merged:
+            merged_actions.add(binding.action)
+
+        # Find unbound actions: actions in defaults but not in merged
+        unbound = []
+        for action, default_bindings in default_actions.items():
+            if action not in merged_actions:
+                # This action became unbound
+                # Use the first default binding for metadata (usually there's only one)
+                first_binding = default_bindings[0]
+                unbound.append(
+                    {
+                        "action": action,
+                        "was_key": first_binding.key,
+                        "pane": pane,
+                        "description": getattr(
+                            first_binding,
+                            "description",
+                            action.replace("_", " ").title(),
+                        ),
+                    }
+                )
+
+        return unbound
