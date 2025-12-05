@@ -1,0 +1,99 @@
+/* MinimalDialog styles */
+MinimalDialog {
+    align: center middle;
+}
+
+#dialog {
+    width: 60%;
+    min-width: 40;
+    max-width: 80;
+    height: 13;
+    background: $surface;
+    border: solid $primary;
+    grid-rows: auto auto;
+    grid-gaps: 1;
+    padding: 1;
+}
+
+#title {
+    text-align: center;
+    text-style: bold;
+    color: $text;
+}
+
+#input {
+    width: 100%;
+}
+
+/* DeleteBranchDialog styles */
+DeleteBranchDialog {
+    align: center middle;
+}
+
+DeleteBranchDialog #dialog {
+    width: 50;
+    height: 8;
+    background: $surface;
+    border: solid $error;
+    grid-rows: auto auto auto;
+    grid-gaps: 1;
+    padding: 1;
+}
+
+DeleteBranchDialog #message {
+    text-align: center;
+    color: $text;
+}
+
+DeleteBranchDialog #button-container {
+    width: 100%;
+    grid-columns: 1fr 1fr;
+    grid-gaps: 1;
+}
+
+/* ConfirmDialog styles */
+ConfirmDialog {
+    align: center middle;
+}
+
+ConfirmDialog #dialog {
+    width: 50;
+    height: 8;
+    background: $surface;
+    border: solid $primary;
+    grid-rows: auto auto auto;
+    grid-gaps: 1;
+    padding: 1;
+}
+
+ConfirmDialog #message {
+    text-align: center;
+    color: $text;
+}
+
+ConfirmDialog #button-container {
+    width: 100%;
+    grid-columns: 1fr 1fr;
+    grid-gaps: 1;
+}
+
+/* UnboundActionsModal styles - COMMENTED OUT: Modal uses DEFAULT_CSS, not CSS_PATH */
+/* UnboundActionsModal {
+    align: center middle;
+}
+
+UnboundActionsModal #dialog {
+    width: 70%;
+    min-width: 50;
+    max-width: 90;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    border: thick $accent 60%;
+    background: $surface-lighten-1;
+}
+
+UnboundActionsModal #unbound-content {
+    width: 100%;
+} */
+
