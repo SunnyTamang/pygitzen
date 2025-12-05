@@ -25,7 +25,7 @@ from .ui import (
     RemotesPane, TagsPane, CommitsPane, StashPane,
     LogPane, PatchPane, CommandLogPane, CommitSearchInput,
     NewBranchDialog, RenameBranchDialog, DeleteBranchDialog,
-    SetUpstreamDialog, ConfirmDialog
+    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal
 )
 
 # Helper functions moved to ui/panes.py
@@ -260,14 +260,16 @@ class PygitzenApp(App):
         # Note: Pane-specific bindings are now loaded at module level in panes.py
         # No need to set them here anymore
         
-        # Check for unbound actions
-        #unbound = self.keybinding_config.get_unbound_actions("app")
-        # if unbound:
-        #     print(f"\n[UNBOUND KEYBINDINGS] Found {len(unbound)} unbound action(s):")
-        #     for action_info in unbound:
-        #         print(f"  - {action_info['action']} (was bound to '{action_info['was_key']}') - {action_info['description']}")
-        # else:
-        #     print("[UNBOUND KEYBINDINGS] No unbound actions found")
+        # Check for unbound actions and show notification if any exist
+        unbound = self.keybinding_config.get_unbound_actions("app")
+        if unbound:
+            # Show notification at top of screen
+            self.notify(
+                f"{len(unbound)} action(s) are unbound. Press 'u' for details.",
+                title="Unbound Actions Detected",
+                severity="warning",
+                timeout=5.0  # Show for 5 seconds
+            )
         
         # Initialize view mode - will be set by refresh_data_fast
         self._view_mode = "log"  # Default to log view (branch view)
@@ -659,6 +661,35 @@ class PygitzenApp(App):
             # Re-render the log with the new style
             self.log_pane._last_render_time = 0  # Force immediate render
             self._update_branch_info_ui(self.active_branch, self.log_pane._cached_branch_info)
+    
+    def action_show_unbound(self) -> None:
+        """Show unbound actions in a floating modal window."""
+        # Get unbound actions for all panes
+        unbound_app = self.keybinding_config.get_unbound_actions("app")
+        unbound_branches = self.keybinding_config.get_unbound_actions("branches")
+        unbound_commits = self.keybinding_config.get_unbound_actions("commits")
+        unbound_stash = self.keybinding_config.get_unbound_actions("stash")
+        unbound_tags = self.keybinding_config.get_unbound_actions("tags")
+        unbound_remotes = self.keybinding_config.get_unbound_actions("remotes")
+        
+        # Combine all unbound actions
+        all_unbound = (
+            unbound_app + unbound_branches + unbound_commits +
+            unbound_stash + unbound_tags + unbound_remotes
+        )
+        
+        # Only proceed if there are unbound actions
+        if not all_unbound:
+            return
+        
+        # Create and push the modal screen
+        modal = UnboundActionsModal(
+            all_unbound,
+            self.keybinding_config.config_path
+        )
+        
+        # Push the modal screen (non-blocking, callback-based)
+        self.push_screen(modal)
     
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.

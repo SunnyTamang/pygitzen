@@ -215,14 +215,16 @@ class KeybindingConfig:
 
         return result
 
-    def get_bindings(self, pane: str = "app") -> list[Binding]:
-        """Get bindings for a pane, merging user config with defaults.
-
+    def _get_merged_bindings(self, pane: str = "app") -> list[Binding]:
+        """Get merged bindings without conditional 'u' binding.
+        
+        Internal method used to avoid recursion when checking for unbound actions.
+        
         Args:
             pane: Pane name ("app", "branches", "commits", etc.)
 
         Returns:
-            List of Binding objects for the pane.
+            List of Binding objects for the pane (without conditional bindings).
         """
         defaults = self._get_default_bindings(pane)
 
@@ -243,6 +245,27 @@ class KeybindingConfig:
         # No config file or no overrides for this pane - return defaults
         return defaults
 
+    def get_bindings(self, pane: str = "app") -> list[Binding]:
+        """Get bindings for a pane, merging user config with defaults.
+
+        Args:
+            pane: Pane name ("app", "branches", "commits", etc.)
+
+        Returns:
+            List of Binding objects for the pane.
+        """
+        merged = self._get_merged_bindings(pane)
+
+        # For app pane, conditionally add 'u Show Unbound' binding if unbound actions exist
+        if pane == "app":
+            unbound = self.get_unbound_actions("app")
+            if unbound:
+                # Prepend "show_unbound" binding at the very beginning
+                show_unbound_binding = Binding("u", "show_unbound", "Show Unbound")
+                return [show_unbound_binding] + merged
+
+        return merged
+
     def get_unbound_actions(self, pane: str = "app") -> list[dict]:
         """Detect actions that became unbound after merging user config.
 
@@ -261,7 +284,7 @@ class KeybindingConfig:
             - 'description': str - Human-readable description
         """
         defaults = self._get_default_bindings(pane)
-        merged = self.get_bindings(pane)
+        merged = self._get_merged_bindings(pane)
 
         # Build maps for comparison
         default_actions = {}  # action -> list of bindings (for tracking all keys)

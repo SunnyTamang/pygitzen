@@ -1,6 +1,6 @@
 Screen {
     layout: vertical;
-    background: #1e1e1e;
+    /*background: #1e1e1e;*/
 }
 
 Header {
@@ -20,18 +20,21 @@ Footer {
 #main-container {
     height: 1fr;
     layout: horizontal;
+    background: #1e1e1e;
 }
 
 #left-column {
     width: 50%;
     height: 1fr;
     layout: vertical;
+    background: #1e1e1e;
 }
 
 #right-column {
     width: 1fr;
     height: 1fr;
     layout: vertical;
+    background: #1e1e1e;
 }
 
 #status-pane {
@@ -163,6 +166,7 @@ Input {
     overflow-x: auto;
     overflow-y: auto;
     scrollbar-size: 1 1;
+    background: #1e1e1e;
 }
 
 #patch-scroll-container:focus {

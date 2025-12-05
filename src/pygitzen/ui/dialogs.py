@@ -5,9 +5,14 @@ Contains modal dialogs for user input (create branch, rename, etc.).
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Optional
+
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Button
+from textual.widgets import Input, Label, Button, Static
 from textual.containers import Container
+from textual.binding import Binding
+from rich.text import Text
 
 
 class MinimalDialog(ModalScreen[str]):
@@ -155,4 +160,112 @@ class ConfirmDialog(ModalScreen[bool]):
             self.dismiss(True)
         else:
             self.dismiss(False)
+
+
+class UnboundActionsModal(ModalScreen[None]):
+    """Floating modal window for displaying unbound actions details."""
+
+    DEFAULT_CSS = """
+    UnboundActionsModal {
+        align: center middle;
+    }
+    
+    #dialog {
+        width: 70%;
+        min-width: 50;
+        max-width: 90;
+        height: auto;
+        max-height: 80%;
+        padding: 0;
+        border: thick $accent 60%;
+        background: #1e1e1e;
+    }
+    
+    #unbound-content {
+        width: 100%;
+        padding: 1 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+    ]
+
+    def __init__(self, unbound_actions: list[dict], config_path: Optional[Path] = None) -> None:
+        """Initialize the modal with unbound actions data.
+
+        Args:
+            unbound_actions: List of dicts with keys:
+                - 'action': str - Action name that is unbound
+                - 'was_key': str - Key that was originally bound to this action
+                - 'pane': str - Pane name
+                - 'description': str - Human-readable description
+            config_path: Optional path to config file for display
+        """
+        super().__init__()
+        self._unbound_actions = unbound_actions
+        self._config_path = config_path
+
+    def compose(self):
+        """Compose the modal dialog."""
+        with Container(id="dialog"):
+            content_widget = Static(self._build_content(), id="unbound-content")
+            yield content_widget
+
+    def _build_content(self) -> Text:
+        """Build the content text for the modal."""
+        text = Text()
+
+        if not self._unbound_actions:
+            text.append("No unbound actions found.\n\n", style="green bold")
+            text.append("All keybindings are properly configured.", style="white")
+            return text
+
+        text.append("Unbound Actions Detected\n", style="yellow bold")
+        text.append("=" * 60 + "\n", style="dim")
+        text.append(
+            f"\nFound {len(self._unbound_actions)} action(s) that lost their keybindings:\n\n",
+            style="white"
+        )
+
+        for i, action_info in enumerate(self._unbound_actions, 1):
+            action = action_info.get("action", "unknown")
+            was_key = action_info.get("was_key", "?")
+            description = action_info.get("description", action.replace("_", " ").title())
+            pane = action_info.get("pane", "app")
+
+            text.append(f"{i}. ", style="cyan")
+            text.append(f"{description}", style="yellow")
+            text.append(f" ({action})", style="dim")
+            text.append("\n   ", style="white")
+            text.append("Was bound to: ", style="dim")
+            text.append(f"'{was_key}'", style="cyan")
+            if pane != "app":
+                text.append(f" (in {pane} pane)", style="dim")
+            text.append("\n\n", style="white")
+
+        text.append("To fix this, edit your keybindings config file:\n", style="white")
+        if self._config_path:
+            text.append(f"  ", style="white")
+            text.append(str(self._config_path), style="cyan")
+        else:
+            text.append("  ~/.config/pygitzen/keybindings.toml", style="cyan")
+            text.append(
+                " (or %APPDATA%\\pygitzen\\keybindings.toml on Windows)", style="dim"
+            )
+        text.append("\n\n", style="white")
+        text.append("Example configuration:\n", style="white")
+        text.append("  [app]\n", style="dim")
+        text.append(
+            f"  \"{self._unbound_actions[0].get('was_key', 'x')}\" = \"{self._unbound_actions[0].get('action', 'example_action')}\"\n",
+            style="cyan"
+        )
+        text.append("\n", style="white")
+        text.append("Press ESC to close this window.", style="dim")
+
+        return text
+
+    def action_dismiss(self) -> None:
+        """Dismiss the modal."""
+        self.dismiss(None)
 
