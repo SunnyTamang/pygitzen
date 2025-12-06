@@ -25,7 +25,7 @@ from .ui import (
     RemotesPane, TagsPane, CommitsPane, StashPane,
     LogPane, PatchPane, CommandLogPane, CommitSearchInput,
     NewBranchDialog, RenameBranchDialog, DeleteBranchDialog,
-    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal
+    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal, AboutModal
 )
 
 # Helper functions moved to ui/panes.py
@@ -689,6 +689,11 @@ class PygitzenApp(App):
         )
         
         # Push the modal screen (non-blocking, callback-based)
+        self.push_screen(modal)
+
+    def action_show_about(self) -> None:
+        """Show About information in a floating modal window."""
+        modal = AboutModal()
         self.push_screen(modal)
     
     def _get_current_branch_name(self) -> str | None:

@@ -7,7 +7,7 @@ from .panes import (
 )
 from .dialogs import (
     NewBranchDialog, RenameBranchDialog, DeleteBranchDialog,
-    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal
+    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal, AboutModal
 )
 
 __all__ = [
@@ -15,6 +15,6 @@ __all__ = [
     "RemotesPane", "TagsPane", "CommitsPane", "StashPane",
     "LogPane", "PatchPane", "CommandLogPane", "CommitSearchInput",
     "NewBranchDialog", "RenameBranchDialog", "DeleteBranchDialog",
-    "SetUpstreamDialog", "ConfirmDialog", "UnboundActionsModal",
+    "SetUpstreamDialog", "ConfirmDialog", "UnboundActionsModal", "AboutModal",
 ]
 

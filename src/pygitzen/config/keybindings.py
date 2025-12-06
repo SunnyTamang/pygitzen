@@ -71,6 +71,7 @@ class KeybindingConfig:
                 Binding("s", "stash", "Stash"),
                 Binding("+", "load_more", "More"),
                 Binding("g", "toggle_graph_style", "Toggle Graph Style"),
+                Binding("?", "show_about", "About"),
             ],
             "branches": [
                 Binding("c", "checkout", "Checkout"),

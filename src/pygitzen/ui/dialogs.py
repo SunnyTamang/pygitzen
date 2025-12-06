@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Optional
 
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Button, Static
-from textual.containers import Container
+from textual.widgets import Input, Label, Button, Static, Link
+from textual.containers import Container, Horizontal
 from textual.binding import Binding
 from rich.text import Text
 
@@ -264,6 +264,230 @@ class UnboundActionsModal(ModalScreen[None]):
         text.append("Press ESC to close this window.", style="dim")
 
         return text
+
+    def action_dismiss(self) -> None:
+        """Dismiss the modal."""
+        self.dismiss(None)
+
+
+class AboutModal(ModalScreen[None]):
+    """Floating modal window for displaying About information."""
+
+    DEFAULT_CSS = """
+    AboutModal {
+        align: center middle;
+    }
+    
+    #dialog {
+        width: 90%;
+        min-width: 80;
+        max-width: 95;
+        height: auto;
+        max-height: 90%;
+        padding: 0;
+        border: thick $accent 60%;
+        background: #1e1e1e;
+    }
+    
+    #about-content {
+        width: 100%;
+        padding: 1 2;
+        layout: vertical;
+        text-align: center;
+        content-align: center middle;
+        overflow-x: auto;
+    }
+    
+    #art-display {
+        width: 100%;
+        height: auto;
+        padding: 1;
+        text-align: center;
+        content-align: center middle;
+        align: center middle;
+        margin-bottom: 1;
+    }
+    
+    #about-header {
+        width: 100%;
+        height: auto;
+        padding: 1;
+        /*margin-top: 1;*/
+        text-align: center;
+        content-align: center middle;
+        align: center middle;
+    }
+    #copyright-text{
+
+        width: 100%;
+        height: auto;
+        padding: 1 0 0 0;
+        margin-top: 1;
+        text-align: center;
+        content-align: center middle;
+        align: center middle;
+    }
+    #app-name{
+        width:100%;
+        height: auto;
+        padding: 1 0 0 0;
+        text-align: center;
+        content-align: center middle;
+        align: center middle;
+    }
+    #urls-container {
+        width: 100%;
+        height: auto;
+        padding: 1 2;
+        margin-top: 1;
+        align: center middle;
+        content-align: center middle;
+        text-align: center;
+        layout: vertical;
+    }
+
+    .url-row {
+        width: auto;
+        height: auto;
+        layout: horizontal;
+        align: center middle;
+        padding: 0 1;
+    }
+
+    .label {
+        width: auto;
+        color: white;
+        text-align: right;
+        margin-right: 1;
+    }
+
+    Link {
+        text-align: left;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+    ]
+
+    def compose(self):
+        """Compose the modal dialog."""
+ 
+        with Container(id="dialog"):
+            with Container(id="about-content"):
+                yield Static("", id="art-display")
+                yield Static("", id="copyright-text")
+                yield Static("", id="app-name")
+                yield Static("", id="about-header")
+                yield Container(id="urls-container")
+
+    def on_mount(self) -> None:
+        """Build and display the about content when the modal is mounted."""
+        # Create styled About Us text with colors
+        art = """
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠿⠿⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⣩⣶⣿⣿⣿⣦⡹⣿⣿⣿⣿⣿⡿⣫⣵⣶⣭⣝⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏⣼⣿⣿⣿⣿⣿⣿⣷⡸⣿⣿⣿⠏⣼⣿⣿⣿⣿⣿⣷⡹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠏⠸⠿⢿⣿⣿⣿⣿⣿⣿⡇⢻⣿⡏⣼⣿⣿⣿⣿⣿⣿⣿⣷⠹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡟⣸⣿⣏⢳⣶⣶⣶⡶⢲⣲⣶⢸⡽⢠⣭⣭⢝⣛⣛⣛⣛⡫⣭⣅⢹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⢃⣿⡟⢛⢤⣿⣿⣶⣂⡻⢿⣿⢠⡇⣼⣿⠿⢎⠿⠿⣿⡏⡼⣿⣿⡌⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⢸⣿⠗⠂⠀⢐⣀⣐⠲⠒⢤⣿⡆⠀⣿⣧⠼⢉⣍⡃⠤⣄⠠⢼⣿⡇⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⣿⣿⠖⠢⢤⣿⣛⡻⠇⠲⣄⣹⠀⠀⣿⣇⠬⢀⡒⠒⠓⢀⠠⢨⣿⣿⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇⣿⡧⠂⢬⣭⣭⣛⡻⢅⠢⢨⣏⠀⠀⣿⢅⡬⣰⡞⢛⣛⠣⠈⢄⣻⣿⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣛⠻⠿⠛⣩⠴⣶⡚⠫⢍⡒⢧⣤⣀⠈⡇⠀⠀⢻⠋⡀⢐⣚⣛⣛⣿⣆⡄⠙⠛⢾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇⡀⠀⠀⠙⠛⠷⠀⠈⠑⠀⠉⠀⠀⠀⠀⣾⠀⠊⠑⣋⠩⠉⠁⢀⠀⢀⠀⠄⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣟⢿⣿⣿⣿⣿⠿⠿⠃⣡⠶⠿⠒⠶⢂⠀⠀⠐⡆⠀⠀⠀⠋⠈⠀⣀⣶⣾⣿⣿⣿⣿⡈⡎⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠉⡛⢿⣿⠨⠎⠀⠀⠀⠀⠀⠀⠀⠈⠂⠀⠀⠀⠀⠀⢀⡜⢸⠿⠛⠉⠉⠉⠉⠁⠂⠐⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡷⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡀⠀⠀⠰⡿⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠠⠄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⡿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠛⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⡿⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⢠⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠹⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⡿⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣾⣿⣷⡀⢶⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣿⣿⣿
+⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⢰⣿⣿⣿⣿⣷⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠿⣿⣿⣿⣿⣿⣿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣸⡏⠛⠀⢸⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢿⣿⣿⣿⣿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣦⡀⣼⣿⣿⣿⣿⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢿
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+
+        """
+
+        art_centered = art.strip()
+        art_display = self.query_one("#art-display", Static)
+        art_display.update(art_centered)
+
+        copyright_text = Text()
+        copyright_text.append("Copyright 2025 ", style="white")
+        copyright_text.append("Sunny Tamang", style="bold cyan")
+        #copyright_text.append("\n\n")
+#         copyright_text.append("""
+#                   o               
+#                o  |               
+# o-o  o  o o--o   -o- o-o o-o o-o  
+# |  | |  | |  | |  |   /  |-' |  | 
+# O-o  o--O o--O |  o  o-o o-o o  o 
+# |       |    |                    
+# o    o--o o--o                    
+#         """)
+        app_name_text = Text()
+        app_name_text.append("pygitzen", style="bold green underline")
+
+        copyright_texts = self.query_one("#copyright-text", Static)
+        copyright_texts.update(copyright_text)
+
+        app_name = self.query_one("#app-name", Static)
+        app_name.update(app_name_text)
+
+        about_us_text = Text()
+        # about_us_text.append("Copyright 2025 ", style="white")
+        # about_us_text.append("Sunny Tamang", style="bold cyan")
+        # about_us_text.append("\n\n")
+#         about_us_text.append(
+#             """
+#                   o               
+#                o  |               
+# o-o  o  o o--o   -o- o-o o-o o-o  
+# ||  | |  | |  | |  |   /  |-' |  | 
+# O-o  o--O o--O |  o  o-o o-o o  o 
+# ||       |    |                    
+# o    o--o o--o                    
+#
+# """
+#         )
+        about_us_text.append("This is inspired by ", style="white")
+        about_us_text.append("lazygit", style="bold")
+        about_us_text.append(" but with ", style="white")
+        about_us_text.append("Python", style="bold")
+        about_us_text.append(" implementation.\n", style="white")
+        about_us_text.append(
+            "A modern, fast, and intuitive terminal UI for Git operations.",
+            style="dim white"
+        )
+
+        # Update About Us header
+        about_header = self.query_one("#about-header", Static)
+        about_header.update(about_us_text)
+
+        # Create clickable Link widgets with labels
+        urls = [
+            ("Raise an Issue: ", "https://github.com/SunnyTamang/pygitzen/issues"),
+            ("Release Notes: ", "https://github.com/SunnyTamang/pygitzen/releases"),
+            ("Become a sponsor: ", "https://github.com/sponsors/SunnyTamang"),
+        ]
+
+        url_container = self.query_one("#urls-container")
+        url_container.remove_children()
+
+        for label, url in urls:
+            url_row = Horizontal(
+                Static(f"{label}:", classes="label"),
+                Link(url, url=url),
+                classes="url-row",
+            )
+            url_container.mount(url_row)
 
     def action_dismiss(self) -> None:
         """Dismiss the modal."""
