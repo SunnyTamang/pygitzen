@@ -334,6 +334,28 @@ class BranchesPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Local branches"
     
+    def action_new_branch(self) -> None:
+        """Delegate new_branch action to the app.
+        
+        This allows the action to be found when the branches pane has focus.
+        Textual will look for actions on the widget first, then walk up to the app.
+        """
+        # Get the app instance and call its action
+        app = self.app
+        if app and hasattr(app, 'action_new_branch'):
+            app.action_new_branch()
+    
+    def action_delete_branch(self) -> None:
+        """Delegate delete_branch action to the app.
+        
+        This allows the action to be found when the branches pane has focus.
+        Textual will look for actions on the widget first, then walk up to the app.
+        """
+        # Get the app instance and call its action
+        app = self.app
+        if app and hasattr(app, 'action_delete_branch'):
+            app.action_delete_branch()
+    
     def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
         """Set branches with optional sync status indicators.
         

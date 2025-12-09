@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Optional
 
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Button, Static, Link
-from textual.containers import Container, Horizontal
+from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem
+from textual.containers import Container, Horizontal, Vertical
 from textual.binding import Binding
 from rich.text import Text
 
@@ -18,7 +18,37 @@ from rich.text import Text
 class MinimalDialog(ModalScreen[str]):
     """Minimal floating dialog with input field and Enter key submission."""
 
-    CSS_PATH = "../styles/dialogs.tcss"
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    MinimalDialog {
+        align: center middle;
+    }
+
+    #dialog {
+        width: 60%;
+        min-width: 40;
+        max-width: 80;
+        height: 13;
+        background: $surface;
+        border: solid $primary;
+        layout: vertical;
+        padding: 1;
+    }
+
+    #title {
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 1;
+    }
+
+    #input {
+        width: 100%;
+    }
+    """
 
     def __init__(self, title: str, placeholder: str = "", initial_value: str = "") -> None:
         """Initialize minimal dialog.
@@ -54,6 +84,10 @@ class MinimalDialog(ModalScreen[str]):
             self.dismiss(value)
         else:
             self.dismiss(None)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
 
 
 class NewBranchDialog(MinimalDialog):
@@ -84,34 +118,264 @@ class RenameBranchDialog(MinimalDialog):
         super().__init__(title=title, placeholder=placeholder, initial_value=current_name)
 
 
-class DeleteBranchDialog(ModalScreen[bool]):
-    """Confirmation dialog for deleting a branch."""
+class DeleteBranchDialog(ModalScreen[str | None]):
+    """Confirmation dialog for deleting a branch with multiple options (like lazygit)."""
 
-    CSS_PATH = "../styles/dialogs.tcss"
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        # Binding("c", "delete_local", "Delete Local", show=False),
+        # Binding("r", "delete_remote", "Delete Remote", show=False),
+        # Binding("b", "delete_both", "Delete Both", show=False),
+        # Binding("enter", "confirm_selection", "Confirm", show=False),
+    ]
 
-    def __init__(self, branch_name: str) -> None:
+    DEFAULT_CSS = """
+    DeleteBranchDialog {
+        align: center middle;
+    }
+
+    DeleteBranchDialog #dialog {
+        width: 60;
+        min-width: 50;
+        max-width: 70;
+        height: auto;
+        min-height: 12;
+        background: $surface;
+        border: solid $error;
+        layout: vertical;
+        padding: 1;
+    }
+
+    DeleteBranchDialog #title {
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 1;
+    }
+
+    DeleteBranchDialog #options-list {
+        width: 100%;
+        height: auto;
+        min-height: 6;
+        border: none;
+        background: $surface;
+    }
+
+    DeleteBranchDialog ListItem {
+        padding: 0 1;
+        height: 1;
+    }
+
+    DeleteBranchDialog ListItem.--highlight {
+        background: $primary 30%;
+    }
+
+    DeleteBranchDialog .option-disabled {
+        color: $text-muted;
+        opacity: 0.5;
+    }
+
+    DeleteBranchDialog ListItem.option-disabled.--highlight {
+        background: $error 10%;
+        border: dashed $error;
+    }
+
+    DeleteBranchDialog #disabled-message {
+        width: 100%;
+        margin-top: 1;
+        padding: 1;
+        border: solid $warning;
+        background: $surface-lighten-1;
+        color: $error;
+        text-align: center;
+        display: none;
+    }
+
+    DeleteBranchDialog #disabled-message.--visible {
+        display: block;
+    }
+    """
+
+    def __init__(self, branch_name: str, has_remote: bool = False, remote_name: str | None = None) -> None:
         """Initialize delete branch dialog.
         
         Args:
             branch_name: Name of branch to delete.
+            has_remote: Whether the branch has a remote tracking branch.
+            remote_name: Remote branch name (e.g., "origin/branch-name") if exists.
         """
         super().__init__()
         self.branch_name = branch_name
+        self.has_remote = has_remote
+        self.remote_name = remote_name
+        self.selected_option: str | None = None
 
     def compose(self):
         """Compose dialog widgets."""
+        from rich.text import Text as RichText
+        
         with Container(id="dialog"):
-            yield Label(f"Delete branch '{self.branch_name}'?", id="message")
-            with Container(id="button-container"):
-                yield Button("Cancel", id="cancel", variant="default")
-                yield Button("Delete", id="delete", variant="error")
+            yield Label(f"Delete branch '{self.branch_name}'?", id="title")
+            
+            # Options list - yield ListView with ListItems directly
+            with ListView(id="options-list") as options_list:
+                options_list.can_focus = True
+                
+                # Option 1: Delete local branch (always available)
+                local_text = RichText()
+                # local_text.append("c ", style="cyan bold")
+                local_text.append("Delete local branch", style="white")
+                yield ListItem(Static(local_text), id="local")
+                
+                # Option 2: Delete remote branch (only if has remote)
+                remote_text = RichText()
+                if self.has_remote:
+                    # remote_text.append("r ", style="cyan bold")
+                    remote_text.append("Delete remote branch", style="white")
+                    yield ListItem(Static(remote_text), id="remote")
+                else:
+                    # remote_text.append("r ", style="dim")
+                    remote_text.append("[Disabled] ", style="red bold")
+                    remote_text.append("Delete remote branch", style="red dim")
+                    remote_item = ListItem(Static(remote_text), id="remote")
+                    remote_item.add_class("option-disabled")
+                    yield remote_item
+                
+                # Option 3: Delete both (only if has remote)
+                both_text = RichText()
+                if self.has_remote:
+                    # both_text.append("b ", style="cyan bold")
+                    both_text.append("Delete local and remote branch", style="white")
+                    yield ListItem(Static(both_text), id="both")
+                else:
+                    # both_text.append("b ", style="dim")
+                    both_text.append("[Disabled] ", style="red bold")
+                    both_text.append("Delete local and remote branch", style="red dim")
+                    both_item = ListItem(Static(both_text), id="both")
+                    both_item.add_class("option-disabled")
+                    yield both_item
+                
+                # Option 4: Cancel
+                cancel_text = RichText()
+                cancel_text.append("Cancel", style="white")
+                yield ListItem(Static(cancel_text), id="cancel")
+            
+            # Show disabled message if no remote
+            if not self.has_remote:
+                yield Static(
+                    "Disabled: The selected branch has no upstream (or the upstream is not stored locally)",
+                    id="disabled-message"
+                )
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button press."""
-        if event.button.id == "delete":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
+    def on_mount(self) -> None:
+        """Focus the options list when dialog is mounted."""
+        options_list = self.query_one("#options-list", ListView)
+        options_list.focus()
+        options_list.index = 0
+        # Watch for highlighted changes to show/hide disabled message
+        self.watch(options_list, "highlighted", self._on_highlight_changed)
+    
+    def _on_highlight_changed(self, highlighted: int | None) -> None:
+        """Show/hide disabled message based on highlighted option."""
+        # Check if disabled message exists (it only exists if has_remote is False)
+        try:
+            disabled_message = self.query_one("#disabled-message", Static)
+        except Exception:
+            # Widget doesn't exist, which is fine
+            return
+        
+        if highlighted is None:
+            disabled_message.remove_class("--visible")
+            return
+        
+        options_list = self.query_one("#options-list", ListView)
+        try:
+            if highlighted < len(options_list.children):
+                item = options_list.children[highlighted]
+                if isinstance(item, ListItem) and "option-disabled" in item.classes:
+                    # Highlighted item is disabled - show message
+                    disabled_message.add_class("--visible")
+                else:
+                    # Highlighted item is not disabled - hide message
+                    disabled_message.remove_class("--visible")
+        except (IndexError, AttributeError):
+            disabled_message.remove_class("--visible")
+
+    def on_list_view_selected(self, event) -> None:
+        """Handle selection in the options list when Enter is pressed."""
+        if event.list_view.id == "options-list":
+            selected_item = event.item
+            if selected_item:
+                # Check if the selected item is disabled
+                if "option-disabled" in selected_item.classes:
+                    self.app.notify(
+                        "This option is disabled: The selected branch has no upstream (or the upstream is not stored locally)",
+                        severity="warning",
+                        timeout=3.0
+                    )
+                    return
+                
+                item_id = selected_item.id
+                if item_id == "local":
+                    self.action_delete_local()
+                elif item_id == "remote" and self.has_remote:
+                    self.action_delete_remote()
+                elif item_id == "both" and self.has_remote:
+                    self.action_delete_both()
+                elif item_id == "cancel":
+                    self.action_cancel()
+    
+    def action_confirm_selection(self) -> None:
+        """Confirm the currently selected option when Enter is pressed."""
+        options_list = self.query_one("#options-list", ListView)
+        current_index = options_list.index
+        if current_index is not None:
+            # Get the item at current index
+            try:
+                item = options_list.children[current_index]
+                if isinstance(item, ListItem):
+                    # Check if the selected item is disabled
+                    if "option-disabled" in item.classes:
+                        self.app.notify(
+                            "This option is disabled: The selected branch has no upstream (or the upstream is not stored locally)",
+                            severity="warning",
+                            timeout=3.0
+                        )
+                        return
+                    
+                    item_id = item.id
+                    if item_id == "local":
+                        self.action_delete_local()
+                    elif item_id == "remote" and self.has_remote:
+                        self.action_delete_remote()
+                    elif item_id == "both" and self.has_remote:
+                        self.action_delete_both()
+                    elif item_id == "cancel":
+                        self.action_cancel()
+            except (IndexError, AttributeError):
+                pass
+    
+    def action_delete_local(self) -> None:
+        """Delete local branch only."""
+        self.dismiss("local")
+    
+    def action_delete_remote(self) -> None:
+        """Delete remote branch only."""
+        if not self.has_remote:
+            # Option is disabled, don't do anything
+            return
+        self.dismiss("remote")
+    
+    def action_delete_both(self) -> None:
+        """Delete both local and remote branch."""
+        if not self.has_remote:
+            # Option is disabled, don't do anything
+            return
+        self.dismiss("both")
+    
+    def action_cancel(self) -> None:
+        """Cancel deletion when Escape is pressed."""
+        self.dismiss(None)
 
 
 class SetUpstreamDialog(MinimalDialog):
@@ -131,7 +395,32 @@ class SetUpstreamDialog(MinimalDialog):
 class ConfirmDialog(ModalScreen[bool]):
     """Generic confirmation dialog."""
 
-    CSS_PATH = "../styles/dialogs.tcss"
+    DEFAULT_CSS = """
+    ConfirmDialog {
+        align: center middle;
+    }
+
+    ConfirmDialog #dialog {
+        width: 50;
+        height: 8;
+        background: $surface;
+        border: solid $primary;
+        layout: vertical;
+        padding: 1;
+    }
+
+    ConfirmDialog #message {
+        text-align: center;
+        color: $text;
+        margin-bottom: 1;
+    }
+
+    ConfirmDialog #button-container {
+        width: 100%;
+        layout: horizontal;
+        margin-top: 1;
+    }
+    """
 
     def __init__(self, message: str, confirm_text: str = "Confirm", cancel_text: str = "Cancel") -> None:
         """Initialize confirmation dialog.

@@ -20,6 +20,7 @@ from rich.panel import Panel
 from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
 from .config import KeybindingConfig
 from .services import BranchService, CommitService, TagService, StashService
+from .handlers import BranchActionHandler
 from .ui import (
     StatusPane, StagedPane, ChangesPane, BranchesPane,
     RemotesPane, TagsPane, CommitsPane, StashPane,
@@ -149,6 +150,9 @@ class PygitzenApp(App):
             self.commit_service = CommitService(self.git)
             self.tag_service = TagService(self.git)
             self.stash_service = StashService(self.git)
+            
+            # Initialize action handlers
+            self.branch_actions = BranchActionHandler(self)
             
             self.branches: list[BranchInfo] = []
             self.remotes: list[BranchInfo] = []
@@ -695,6 +699,30 @@ class PygitzenApp(App):
         """Show About information in a floating modal window."""
         modal = AboutModal()
         self.push_screen(modal)
+    
+    def action_checkout(self) -> None:
+        """Checkout a branch from the branches pane.
+        
+        This action is triggered when 'c' is pressed while the branches pane has focus.
+        Delegates to BranchActionHandler for the actual implementation.
+        """
+        self.branch_actions.checkout()
+    
+    def action_new_branch(self) -> None:
+        """Create a new branch.
+        
+        This action is triggered when 'n' is pressed while the branches pane has focus.
+        Delegates to BranchActionHandler for the actual implementation.
+        """
+        self.branch_actions.create()
+    
+    def action_delete_branch(self) -> None:
+        """Delete a branch.
+        
+        This action is triggered when 'd' is pressed while the branches pane has focus.
+        Delegates to BranchActionHandler for the actual implementation.
+        """
+        self.branch_actions.delete()
     
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.
