@@ -342,6 +342,41 @@ Static {
     color: #ffffff;
 }
 
+/* Selected/highlighted item styling for delete branch dialog */
+#delete-branch-dialog #options-list ListItem.--highlight {
+    background: #357ABD; /* blue for strong contrast */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#delete-branch-dialog #options-list ListItem.--highlight:focus {
+    background: #2f6aa3; /* slightly darker when focused */
+    color: #ffffff;
+    text-style: bold;
+}
+
+#delete-branch-dialog #options-list ListItem.highlighted-option {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#delete-branch-dialog #options-list ListItem.highlighted-option:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#delete-branch-dialog #options-list ListItem.--highlight > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
+#delete-branch-dialog #options-list ListItem.highlighted-option > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
 ListView {
     background: #1e1e1e;
     scrollbar-color: #404040 #1e1e1e;

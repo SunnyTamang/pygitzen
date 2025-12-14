@@ -146,7 +146,7 @@ class BranchService:
     def delete_branch(
         self, name: str, force: bool = False, git_service: Optional[GitService] = None
     ) -> dict:
-        """Delete a branch.
+        """Delete a local branch.
         
         Args:
             name: Branch name to delete.
@@ -178,6 +178,80 @@ class BranchService:
                 return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    def delete_remote_branch(
+        self, name: str, remote: str = "origin", git_service: Optional[GitService] = None
+    ) -> dict:
+        """Delete a remote branch.
+        
+        Args:
+            name: Branch name to delete.
+            remote: Remote name (default: "origin").
+            git_service: GitService instance (optional).
+        
+        Returns:
+            Dict with 'success', 'error' keys.
+        """
+        git = git_service or self.git
+        repo_path_str = str(self.repo_path)
+
+        try:
+            cmd = ["git", "push", remote, "--delete", name]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, cwd=repo_path_str
+            )
+
+            if result.returncode == 0:
+                return {"success": True, "error": None}
+            else:
+                error_msg = result.stderr.strip() or "Unknown error"
+                return {"success": False, "error": error_msg}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def has_remote_tracking(self, branch_name: str) -> tuple[bool, str | None]:
+        """Check if a branch has a remote tracking branch.
+        
+        Args:
+            branch_name: Local branch name.
+        
+        Returns:
+            Tuple of (has_remote: bool, remote_name: str | None).
+            remote_name is in format "origin/branch-name" if exists.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            # Check for upstream tracking branch
+            upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{branch_name}@{{u}}"]
+            upstream_result = subprocess.run(
+                upstream_cmd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_path_str,
+            )
+            
+            if upstream_result.returncode == 0:
+                upstream = upstream_result.stdout.strip()
+                return (True, upstream)
+            
+            # Fallback: Check if remote ref exists
+            remote_ref_cmd = ["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch_name}"]
+            remote_ref_result = subprocess.run(
+                remote_ref_cmd,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_path_str,
+            )
+            
+            if remote_ref_result.returncode == 0:
+                return (True, f"origin/{branch_name}")
+            
+            return (False, None)
+        except Exception:
+            return (False, None)
 
     def rename_branch(
         self, old: str, new: str, git_service: Optional[GitService] = None
