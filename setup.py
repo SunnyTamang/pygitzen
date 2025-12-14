@@ -92,6 +92,9 @@ setup(
         "version-control", "git-client", "terminal-ui", "cli", "git-manager"
     ],
     include_package_data=True,
+    package_data={
+        "pygitzen": ["styles/*.tcss"],
+    },
     zip_safe=False,
     setup_requires=[
         "Cython>=3.0.0",  # Required for building from source (fallback for older pip)

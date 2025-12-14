@@ -4,3 +4,4 @@ include LICENSE
 include pyproject.toml
 include git_service_cython.pyx
 recursive-include src/pygitzen *.py
+recursive-include src/pygitzen *.tcss
