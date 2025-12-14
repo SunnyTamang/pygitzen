@@ -724,6 +724,14 @@ class PygitzenApp(App):
         """
         self.branch_actions.delete()
     
+    def action_rename_branch(self) -> None:
+        """Rename a branch.
+        
+        This action is triggered when 'r' is pressed while the branches pane has focus.
+        Delegates to BranchActionHandler for the actual implementation.
+        """
+        self.branch_actions.rename()
+    
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.
         

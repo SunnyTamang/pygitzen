@@ -134,12 +134,22 @@ class DeleteBranchDialog(ModalScreen[str | None]):
         align: center middle;
     }
 
+    /*width: 60;
+        min-width: 50;
+        max-width: 70;
+        height: auto;
+        min-height: 30;
+        background: $surface;
+        border: solid $error;
+        layout: vertical;
+        padding: 1;*/
+
     DeleteBranchDialog #dialog {
         width: 60;
         min-width: 50;
         max-width: 70;
         height: auto;
-        min-height: 12;
+        /*min-height: 12;*/
         background: $surface;
         border: solid $error;
         layout: vertical;
@@ -156,31 +166,84 @@ class DeleteBranchDialog(ModalScreen[str | None]):
     DeleteBranchDialog #options-list {
         width: 100%;
         height: auto;
-        min-height: 6;
+        min-height: 5;
         border: none;
         background: $surface;
     }
 
-    DeleteBranchDialog ListItem {
+    #delete-branch-dialog ListItem {
         padding: 0 1;
         height: 1;
     }
 
-    DeleteBranchDialog ListItem.--highlight {
-        background: $primary 30%;
+    #delete-branch-dialog #options-list ListItem.--highlight {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
     }
 
-    DeleteBranchDialog .option-disabled {
+    #delete-branch-dialog #options-list ListItem.--highlight:focus {
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+    }
+
+    #delete-branch-dialog #options-list ListItem.highlighted-option {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
+    }
+
+    #delete-branch-dialog #options-list ListItem.highlighted-option:focus {
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+    }
+
+    #delete-branch-dialog .option-disabled {
         color: $text-muted;
         opacity: 0.5;
     }
 
-    DeleteBranchDialog ListItem.option-disabled.--highlight {
-        background: $error 10%;
+    #delete-branch-dialog ListItem.option-disabled.--highlight {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
         border: dashed $error;
     }
 
-    DeleteBranchDialog #disabled-message {
+    #delete-branch-dialog ListItem.option-disabled.--highlight:focus {
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+        border: dashed $error;
+    }
+
+    #delete-branch-dialog #options-list ListItem.option-disabled.highlighted-option {
+        background: #357ABD;
+        color: #ffffff;
+        text-style: bold;
+        border: dashed $error;
+    }
+
+    #delete-branch-dialog #options-list ListItem.option-disabled.highlighted-option:focus {
+        background: #2f6aa3;
+        color: #ffffff;
+        text-style: bold;
+        border: dashed $error;
+    }
+
+    #delete-branch-dialog #options-list ListItem.--highlight > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+
+    #delete-branch-dialog #options-list ListItem.highlighted-option > Static {
+        background: transparent;
+        color: #ffffff;
+    }
+
+    #delete-branch-dialog #disabled-message {
         width: 100%;
         margin-top: 1;
         padding: 1;
@@ -191,7 +254,7 @@ class DeleteBranchDialog(ModalScreen[str | None]):
         display: none;
     }
 
-    DeleteBranchDialog #disabled-message.--visible {
+    #delete-branch-dialog #disabled-message.visible {
         display: block;
     }
     """
@@ -204,11 +267,12 @@ class DeleteBranchDialog(ModalScreen[str | None]):
             has_remote: Whether the branch has a remote tracking branch.
             remote_name: Remote branch name (e.g., "origin/branch-name") if exists.
         """
-        super().__init__()
+        super().__init__(id="delete-branch-dialog")
         self.branch_name = branch_name
         self.has_remote = has_remote
         self.remote_name = remote_name
         self.selected_option: str | None = None
+        self._last_highlighted: int | None = None
 
     def compose(self):
         """Compose dialog widgets."""
@@ -260,7 +324,15 @@ class DeleteBranchDialog(ModalScreen[str | None]):
                 cancel_text.append("Cancel", style="white")
                 yield ListItem(Static(cancel_text), id="cancel")
             
-            # Show disabled message if no remote
+            # Show disabled message only if no remote (will be shown/hidden reactively)
+            # Always create it so we can show it when a disabled option is highlighted
+            # yield Static(
+            #     "Disabled: The selected branch has no upstream (or the upstream is not stored locally)",
+            #     id="disabled-message"
+            # )
+
+            # the above static is not working, so we need to use the below static as the above Static will be creaeted all the time
+            # and the below static will be created only when the has_remote is False
             if not self.has_remote:
                 yield Static(
                     "Disabled: The selected branch has no upstream (or the upstream is not stored locally)",
@@ -272,11 +344,48 @@ class DeleteBranchDialog(ModalScreen[str | None]):
         options_list = self.query_one("#options-list", ListView)
         options_list.focus()
         options_list.index = 0
-        # Watch for highlighted changes to show/hide disabled message
+        options_list.highlighted = 0
+        # Watch for both index and highlighted changes
+        self.watch(options_list, "index", self._on_index_changed)
         self.watch(options_list, "highlighted", self._on_highlight_changed)
+        # Initial highlight - use a timer to ensure ListView is fully mounted
+        self.set_timer(0.05, lambda: self._update_highlighting(0))
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        try:
+            options_list = self.query_one("#options-list", ListView)
+        except:
+            return
+        
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(options_list.children):
+            try:
+                item = options_list.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-option")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(options_list.children):
+            try:
+                item = options_list.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-option")
+                    self._last_highlighted = index
+            except:
+                pass
+    
+    def _on_index_changed(self, index: int | None) -> None:
+        """Handle index changes (mouse clicks, etc.)."""
+        self._update_highlighting(index)
     
     def _on_highlight_changed(self, highlighted: int | None) -> None:
-        """Show/hide disabled message based on highlighted option."""
+        """Show/hide disabled message based on highlighted option and update highlighting."""
+        # Update visual highlighting
+        self._update_highlighting(highlighted)
+        
         # Check if disabled message exists (it only exists if has_remote is False)
         try:
             disabled_message = self.query_one("#disabled-message", Static)
@@ -285,7 +394,7 @@ class DeleteBranchDialog(ModalScreen[str | None]):
             return
         
         if highlighted is None:
-            disabled_message.remove_class("--visible")
+            disabled_message.remove_class("visible")
             return
         
         options_list = self.query_one("#options-list", ListView)
@@ -294,12 +403,12 @@ class DeleteBranchDialog(ModalScreen[str | None]):
                 item = options_list.children[highlighted]
                 if isinstance(item, ListItem) and "option-disabled" in item.classes:
                     # Highlighted item is disabled - show message
-                    disabled_message.add_class("--visible")
+                    disabled_message.add_class("visible")
                 else:
                     # Highlighted item is not disabled - hide message
-                    disabled_message.remove_class("--visible")
+                    disabled_message.remove_class("visible")
         except (IndexError, AttributeError):
-            disabled_message.remove_class("--visible")
+            disabled_message.remove_class("visible")
 
     def on_list_view_selected(self, event) -> None:
         """Handle selection in the options list when Enter is pressed."""
