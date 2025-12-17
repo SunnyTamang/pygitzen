@@ -646,6 +646,34 @@ class PygitzenApp(App):
                     self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
 
+    def action_select(self) -> None:
+        """
+        This handles select action (Enter) for branch selection.
+
+        When branches pane has focus, selects the currently highlighted branch and loads its commits 
+        """
+        if self.branches_pane.has_focus:
+            # get current selection 
+            current_index = self.branches_pane.index
+            if current_index is not None and current_index >= 0 and current_index < len(self.branches):
+                selected_branch = self.branches[current_index].name
+                # set the active branch 
+                self.active_branch = selected_branch
+                # lets switch to log view when branch is selected
+                self._view_mode = "log"
+                self.patch_pane.styles.display = "none"
+                self.log_pane.styles.display = "block"
+
+                # lets load the commits with full history for feature branches 
+                self.load_commits_for_log(self.active_branch)
+
+                # now update status pane immediately 
+                if self.active_branch:
+                    self.status_pane.update_status(self.active_branch, self.repo_path)
+                # load the heavy operations in background 
+                self.load_commits_count_background(self.active_branch)
+                self.load_file_status_background()
+
     def action_toggle_command_log(self) -> None:
         """Toggle command log pane visibility."""
         if self.command_log_pane.styles.display == "none":

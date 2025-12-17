@@ -5,24 +5,26 @@ Contains all pane widgets extracted from app.py for separation of concerns.
 
 from __future__ import annotations
 
-import time
-import subprocess
 import re
+import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
-from textual.widgets import ListView, Static, Input, ListItem
-from textual.binding import Binding
-from rich.text import Text
 from rich.console import Group
 from rich.syntax import Syntax
+from rich.text import Text
+from textual.binding import Binding
+from textual.widgets import Input, ListItem, ListView, Static
 
-from ..git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
 from ..config import KeybindingConfig
+from ..git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
+                           StashInfo, TagInfo)
 
 # Import git_graph utilities if available
 try:
-    from ..git_graph import parse_ansi_to_rich_text, strip_ansi_codes, convert_graph_prefix_to_rich
+    from ..git_graph import (convert_graph_prefix_to_rich,
+                             parse_ansi_to_rich_text, strip_ansi_codes)
 except ImportError:
     # Fallback if git_graph not available
     def parse_ansi_to_rich_text(line): return Text(line)
@@ -168,9 +170,10 @@ class StatusPane(Static):
             repo_path: Repository path (str or Path object)
             sync_status: Optional dict with 'behind', 'ahead', 'synced', 'upstream' keys
         """
-        from rich.text import Text
         from pathlib import Path
-        
+
+        from rich.text import Text
+
         # Handle both str and Path objects
         if isinstance(repo_path, Path):
             repo_name = repo_path.name
@@ -366,6 +369,17 @@ class BranchesPane(ListView):
         app = self.app
         if app and hasattr(app, 'action_rename_branch'):
             app.action_rename_branch()
+
+    def action_select(self) -> None:
+        """Handle select action (Enter/Space) for branch selection.
+    
+        This allows the action to be found when the branches pane has focus.
+        Textual will look for actions on the widget first, then walk up to the app.
+        """
+        # Get the app instance and call its action
+        app = self.app
+        if app and hasattr(app, 'action_select'):
+            app.action_select()
     
     def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
         """Set branches with optional sync status indicators.
@@ -743,7 +757,7 @@ class CommitsPane(ListView):
         
         for commit in commits_to_render:
             from rich.text import Text
-            
+
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
             commit_sha = _normalize_commit_sha(commit.sha)
             short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -803,7 +817,7 @@ class CommitsPane(ListView):
         
         for commit in commits:
             from rich.text import Text
-            
+
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
             commit_sha = _normalize_commit_sha(commit.sha)
             short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -1140,9 +1154,10 @@ class LogPane(Static):
         Display native git log --graph --color=always output for a branch.
         Only loads when user clicks on a branch.
         """
-        from rich.text import Text
         from pathlib import Path
-        
+
+        from rich.text import Text
+
         # Only show native git log if we have git_service with repo_path
         if git_service is not None:
             # Check if git_service has repo_path attribute
@@ -1238,12 +1253,14 @@ class LogPane(Static):
         This shows exactly what git outputs, preserving all colors and formatting.
         Supports virtual scrolling - loads more commits as user scrolls.
         """
-        from rich.text import Text
-        from rich.console import Group
-        from pathlib import Path
         import subprocess
+        from pathlib import Path
+
+        from rich.console import Group
+        from rich.text import Text
+
         from pygitzen.git_graph import parse_ansi_to_rich_text
-        
+
         # Prevent concurrent loads
         if self._native_git_log_loading:
             return
@@ -1588,8 +1605,9 @@ class LogPane(Static):
     
     def _build_log_lines(self, commits: list[CommitInfo], branch_info: dict, git_service, branch: str, total_commits_count: int = None) -> list:
         """Build log lines with virtual scrolling - only render visible commits."""
-        from rich.text import Text
         import time
+
+        from rich.text import Text
         
         build_start = time.perf_counter()
         log_lines = []
@@ -1683,8 +1701,8 @@ class LogPane(Static):
         Returns:
             Relative date string like "11 days ago", "3 weeks ago", "2 months ago", etc.
         """
-        from datetime import datetime, timezone
         import time
+        from datetime import datetime, timezone
         
         now = datetime.now(timezone.utc)
         commit_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -1789,7 +1807,9 @@ class LogPane(Static):
         If git colored graph is available, use it directly for accurate visualization.
         """
         from rich.text import Text
-        from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+
+        from pygitzen.git_graph import (convert_graph_prefix_to_rich,
+                                        strip_ansi_codes)
         
         commit_sha = _normalize_commit_sha(commit.sha)
         info = graph_structure.get(commit.sha, {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'diverges': False, 'merges': False, 'active_columns': set()})
@@ -1981,10 +2001,11 @@ class LogPane(Static):
         Args:
             git_graph_prefix_colored: Colored graph prefix from git (with ANSI codes) if available
         """
-        from rich.text import Text
         from datetime import datetime
         from time import timezone
-        
+
+        from rich.text import Text
+
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -2088,7 +2109,8 @@ class LogPane(Static):
         
         if git_prefix_colored and isinstance(git_prefix_colored, list) and len(git_prefix_colored) > 1:
             # Check continuation lines for merge (|\) or divergence (|/)
-            from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+            from pygitzen.git_graph import (convert_graph_prefix_to_rich,
+                                            strip_ansi_codes)
             for cont_line in git_prefix_colored[1:]:
                 plain_cont = strip_ansi_codes(cont_line)
                 if '\\' in plain_cont:
@@ -2182,12 +2204,13 @@ class PatchPane(Static):
         Show commit info in patch pane using LazyGit approach: git show --stat -p <hash>
         This single command provides: commit header, full message, diffstat, and diff.
         """
-        from rich.text import Text
-        from rich.syntax import Syntax
-        from rich.console import Group
         import subprocess
         import sys
-        
+
+        from rich.console import Group
+        from rich.syntax import Syntax
+        from rich.text import Text
+
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         
@@ -2341,7 +2364,7 @@ class PatchPane(Static):
                     # Format: "commit <hash> (HEAD -> branch, tag: v0.2.2, origin/main, main)"
                     # Colors: commit/hash/tag → yellow, HEAD -> → cyan, branch → green, origin/ → red
                     import re
-                    
+
                     # Match: "commit <hash> (refs...)" or "commit <hash>" (no refs)
                     # Hash can be any length hex characters (case insensitive)
                     match = re.match(r'^(commit\s+[a-fA-F0-9]+)(\s*\((.*)\))?$', line)
@@ -2646,9 +2669,10 @@ class PatchPane(Static):
     
     def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
         """Show stash details and diff in the patch pane with proper color coding."""
-        from rich.text import Text
         import re
-        
+
+        from rich.text import Text
+
         # Create stash header (matching commit format)
         full_content = Text()
         full_content.append(f"stash@{stash.index}: On {stash.branch}: {stash.message}\n", style="yellow")
@@ -2801,4 +2825,3 @@ class CommandLogPane(Static):
         text.append("Always do it before embarking on an ambitious change!\n", style="white")
         if message:
             text.append(f"\n{message}\n", style="white")
-
