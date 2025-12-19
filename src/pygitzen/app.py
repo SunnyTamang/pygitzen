@@ -1,38 +1,40 @@
 from __future__ import annotations
 
-import time
 import queue
+import time
+from asyncio import current_task
 from functools import wraps
 from pathlib import Path
 
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, Container, ScrollableContainer
-from textual.widgets import Footer, Header, ListItem, ListView, Static, DataTable, Input, TabbedContent, TabPane
-from textual.reactive import reactive
-from textual import events
-from textual.binding import Binding
-from textual.message import Message
-from rich.text import Text
 from rich.console import Console
-from rich.syntax import Syntax
 from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.text import Text
+from textual import events
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import (Container, Horizontal, ScrollableContainer,
+                                Vertical)
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widgets import (DataTable, Footer, Header, Input, ListItem,
+                             ListView, Static, TabbedContent, TabPane)
 
-from .git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
 from .config import KeybindingConfig
-from .services import BranchService, CommitService, TagService, StashService
+from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
+                          StashInfo, TagInfo)
 from .handlers import BranchActionHandler
-from .ui import (
-    StatusPane, StagedPane, ChangesPane, BranchesPane,
-    RemotesPane, TagsPane, CommitsPane, StashPane,
-    LogPane, PatchPane, CommandLogPane, CommitSearchInput,
-    NewBranchDialog, RenameBranchDialog, DeleteBranchDialog,
-    SetUpstreamDialog, ConfirmDialog, UnboundActionsModal, AboutModal
-)
-
+from .services import BranchService, CommitService, StashService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
 # Note: These are used internally in app.py, imported directly from panes module
-from .ui import panes
+from .ui import (AboutModal, BranchesPane, ChangesPane, CommandLogPane,
+                 CommitSearchInput, CommitsPane, ConfirmDialog,
+                 DeleteBranchDialog, LogPane, NewBranchDialog, PatchPane,
+                 RemotesPane, RenameBranchDialog, SetUpstreamDialog,
+                 StagedPane, StashPane, StatusPane, TagsPane,
+                 UnboundActionsModal, panes)
+
 # Re-export for backward compatibility
 format_recency = panes.format_recency
 _normalize_commit_sha = panes._normalize_commit_sha
@@ -303,7 +305,8 @@ class PygitzenApp(App):
     def _start_git_watcher(self) -> None:
         """Start GitWatcher for real-time change detection"""
         try:
-            from pygitzen.git_watcher import GitWatcher, ChangeEvent, ChangeType
+            from pygitzen.git_watcher import (ChangeEvent, ChangeType,
+                                              GitWatcher)
 
             def handle_change(event: ChangeEvent) -> None:
                 """Handle Git Repo chnange events"""
@@ -608,9 +611,11 @@ class PygitzenApp(App):
                     self.log_pane.styles.display = "block"
                     # Load commits with full history for feature branches
                     self.load_commits_for_log(self.active_branch)
-                    # Update status pane immediately
-                    if self.active_branch:
-                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                    # Update status pane immediately - use checked-out branch, not selected branch
+                    checked_out_branch = self._get_current_branch_name()
+                    if checked_out_branch:
+                        current_sync = self._branch_sync_status_cache.get(checked_out_branch) if checked_out_branch else None
+                        self.status_pane.update_status(checked_out_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
                     self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
@@ -639,9 +644,11 @@ class PygitzenApp(App):
                     self.log_pane.styles.display = "block"
                     # Load commits with full history for feature branches
                     self.load_commits_for_log(self.active_branch)
-                    # Update status pane immediately
-                    if self.active_branch:
-                        self.status_pane.update_status(self.active_branch, self.repo_path)
+                    # Update status pane immediately - use checked-out branch, not selected branch
+                    checked_out_branch = self._get_current_branch_name()
+                    if checked_out_branch:
+                        current_sync = self._branch_sync_status_cache.get(checked_out_branch) if checked_out_branch else None
+                        self.status_pane.update_status(checked_out_branch, self.repo_path, current_sync)
                     # Load heavy operations in background
                     self.load_commits_count_background(self.active_branch)
                     self.load_file_status_background()
@@ -652,27 +659,156 @@ class PygitzenApp(App):
 
         When branches pane has focus, selects the currently highlighted branch and loads its commits 
         """
+        # if self.branches_pane.has_focus:
+        #     # get current selection 
+        #     current_index = self.branches_pane.index
+        #     if current_index is not None and current_index >= 0 and current_index < len(self.branches):
+        #         selected_branch = self.branches[current_index].name
+        #         # set the active branch 
+        #         self.active_branch = selected_branch
+        #         # lets switch to log view when branch is selected
+        #         self._view_mode = "log"
+        #         self.patch_pane.styles.display = "none"
+        #         self.log_pane.styles.display = "block"
+        #
+        #         # # load commits for the commits pane (list view)
+        #         # self.load_commits(self.active_branch)
+        #         #
+        #         # # lets load the commits with full history for feature branches 
+        #         # self.load_commits_for_log(self.active_branch)
+        #         #
+        #         # # now update status pane immediately 
+        #         # if self.active_branch:
+        #         #     self.status_pane.update_status(self.active_branch, self.repo_path)
+        #         # # load the heavy operations in background 
+        #         # self.load_commits_count_background(self.active_branch)
+        #         # self.load_file_status_background()
+        #         #
+        #         # Load commits for the selected branch
+        #     self.load_commits(self.active_branch)
+        #     # Load commits with full history for feature branches (for log pane)
+        #     self.load_commits_for_log(self.active_branch)
+        #     # Refresh sync status for the selected branch
+        #     self._refresh_branch_sync_status(self.active_branch)
+        #     self.update_status_info()
+        
         if self.branches_pane.has_focus:
             # get current selection 
             current_index = self.branches_pane.index
             if current_index is not None and current_index >= 0 and current_index < len(self.branches):
                 selected_branch = self.branches[current_index].name
-                # set the active branch 
-                self.active_branch = selected_branch
-                # lets switch to log view when branch is selected
+                should_reload = False
+
+                import subprocess
+                repo_path_str = str(self.repo_path) if hasattr(self, 'repo_path') else "."
+
+                if selected_branch != self.active_branch:
+                    # different branch selected will always reload everything hence true 
+                    should_reload = True
+                    cache_key = f"{selected_branch}_unpushed"
+                    self._remote_commits_cache.pop(cache_key, None)
+
+                    # Clear sync status cache for the new branch(will be recalcualted)
+                    self._branch_sync_status_cache.pop(selected_branch, None)
+                    self.active_branch = selected_branch
+                else:
+                    # Same branch - well we will first check if HEAD has changed (new commits were made) or remote HEAD changed(pushed)
+                    should_reload = False
+                    try:
+                        # check local HEAD SHA 
+                        head_sha_cmd = ["git", "rev-parse", selected_branch]
+                        head_sha_result = subprocess.run(
+                            head_sha_cmd, 
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                            cwd=repo_path_str
+                        )
+                        current_head_sha = None
+                        if head_sha_result.returncode == 0:
+                            current_head_sha = head_sha_result.stdout.strip()
+                            # check if local HEAD changed (new commits)
+                            if selected_branch in self._last_head_sha:
+                                if self._last_head_sha[selected_branch] != current_head_sha:
+                                    # Local HEAD changed - new commits were made, reload 
+                                    should_reload = True
+                                    _log_timing_message(f"[Branch] Local HEAD changed for {selected_branch}: {self._last_head_sha[selected_branch][:8]} → {current_head_sha[:8]}, reloading commits")
+                                    # Clear sync status cache (will be recalculated)
+                                    self._branch_sync_status_cache.pop(selected_branch, None)
+                            else:
+                                # First time loading this branch, reload 
+                                should_reload= True
+                        # Also check if remote HEAD changed (commits were pushed)
+                        if not should_reload and current_head_sha:
+                            # Get upstream tracking branch
+                            upstream_cmd = ["git", "rev-parse", "--abbrev-ref", f"{selected_branch}@{{u}}"]
+                            upstream_result = subprocess.run(
+                                upstream_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=2,
+                                cwd=repo_path_str
+                            )
+                            if upstream_result.returncode == 0:
+                                upstream = upstream_result.stdout.strip()
+                                # Get remote HEAD SHA
+                                remote_head_cmd = ["git", "rev-parse", upstream]
+                                remote_head_result = subprocess.run(
+                                    remote_head_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=2,
+                                    cwd=repo_path_str
+                                )
+                                if remote_head_result.returncode == 0:
+                                    current_remote_head_sha = remote_head_result.stdout.strip()
+                                    # Check if remote HEAD changed (commits were pushed)
+                                    cache_key_remote = f"{selected_branch}_remote_head"
+                                    if cache_key_remote in self._last_remote_head_sha:
+                                        if self._last_remote_head_sha[cache_key_remote] != current_remote_head_sha:
+                                            # Remote HEAD changed - commits were pushed, reload
+                                            should_reload = True
+                                            _log_timing_message(f"[BRANCH] Remote HEAD changed for {selected_branch}: {self._last_remote_head_sha[cache_key_remote][:8]} → {current_remote_head_sha[:8]}, reloading commits")
+                                            # Clear cache for this branch
+                                            cache_key = f"{selected_branch}_unpushed"
+                                            self._remote_commits_cache.pop(cache_key, None)
+                                            # Clear sync status cache (will be recalculated)
+                                            self._branch_sync_status_cache.pop(selected_branch, None)
+                                    else:
+                                        # First time checking remote HEAD, reload to be safe
+                                        should_reload = True
+
+
+                    except Exception:
+                        should_reload = True
+
+                # Always switch to log view when a branch is explicitly selected,
+                # even if it's the same branch as before (e.g., user has just
+                # viewed a tag and now wants the branch log back).
                 self._view_mode = "log"
                 self.patch_pane.styles.display = "none"
                 self.log_pane.styles.display = "block"
 
-                # lets load the commits with full history for feature branches 
-                self.load_commits_for_log(self.active_branch)
+                if should_reload:
+                    # Load commits for the selected branch (matching lazygit - shows branch-specific commits)
+                    self.load_commits(self.active_branch)
+                    # Load commits with full history for feature branches (for log pane)
+                    self.load_commits_for_log(self.active_branch)
+                    # Refresh sync status for the selected branch
+                    # self._refresh_branch_sync_status(self.active_branch)
+                    # self.update_status_info()
+                else:
+                    # Same branch, no new commits - still ensure branch log is visible
+                    # (e.g., after viewing a tag or switching tabs), and refresh sync
+                    # status and status pane.
+                    self.load_commits_for_log(self.active_branch)
+                    # self._refresh_branch_sync_status(self.active_branch)
+                    # self.update_status_info()
 
-                # now update status pane immediately 
-                if self.active_branch:
-                    self.status_pane.update_status(self.active_branch, self.repo_path)
-                # load the heavy operations in background 
-                self.load_commits_count_background(self.active_branch)
-                self.load_file_status_background()
+
+
+
+
 
     def action_toggle_command_log(self) -> None:
         """Toggle command log pane visibility."""
@@ -890,9 +1026,11 @@ class PygitzenApp(App):
             log_load_elapsed = time.perf_counter() - log_load_start
             _log_timing_message(f"load_commits_for_log: {log_load_elapsed:.4f}s")
             
-            # Update status pane immediately (fast)
-            if self.active_branch:
-                self.status_pane.update_status(self.active_branch, self.repo_path)
+            # Update status pane immediately (fast) - use checked-out branch, not selected branch
+            checked_out_branch = self._get_current_branch_name()
+            if checked_out_branch:
+                current_sync = self._branch_sync_status_cache.get(checked_out_branch) if checked_out_branch else None
+                self.status_pane.update_status(checked_out_branch, self.repo_path, current_sync)
             
             # Show loading placeholders for file status
             self.staged_pane.update_files([])
@@ -1013,13 +1151,18 @@ class PygitzenApp(App):
                             self._branch_sync_status_cache
                         )
                     )
-                    # Also update status pane
-                    if self.active_branch == branch:
+                    # Also update status pane - use checked-out branch, not selected branch
+                    checked_out_branch = self._get_current_branch_name()
+                    if checked_out_branch == branch:
+                        # Capture values for lambda closure
+                        branch_for_status = checked_out_branch
+                        repo_path_for_status = self.repo_path
+                        sync_status_for_status = sync_status
                         self.call_from_thread(
                             lambda: self.status_pane.update_status(
-                                self.active_branch, 
-                                self.repo_path, 
-                                sync_status
+                                branch_for_status, 
+                                repo_path_for_status, 
+                                sync_status_for_status
                             )
                         )
             except Exception:
@@ -1063,10 +1206,12 @@ class PygitzenApp(App):
         thread.start()
     
     def update_status_info(self) -> None:
-        """Update status pane with current branch info."""
-        if self.active_branch:
-            current_sync = self._branch_sync_status_cache.get(self.active_branch) if self.active_branch else None
-            self.status_pane.update_status(self.active_branch, str(self.repo_path), current_sync)
+        """Update status pane with checked-out branch info (not selected branch)."""
+        # Always use checked-out branch for status pane, not selected branch
+        checked_out_branch = self._get_current_branch_name()
+        if checked_out_branch:
+            current_sync = self._branch_sync_status_cache.get(checked_out_branch) if checked_out_branch else None
+            self.status_pane.update_status(checked_out_branch, str(self.repo_path), current_sync)
         
         # Update staged and changes panes with actual file status
         try:
@@ -1484,7 +1629,7 @@ class PygitzenApp(App):
             except Exception as e:
                 # If stash fetching fails, show empty
                 import traceback
-                
+
                 # Update UI from main thread on error (use queue which is thread-safe)
                 self._ui_update_queue.put(lambda: self._update_stashes_ui([]))
         
@@ -1952,7 +2097,7 @@ class PygitzenApp(App):
         """Load all commits from all branches (not branch-specific)."""
         import subprocess
         from datetime import datetime
-        
+
         # Update Commits pane title to show current branch (matching lazygit)
         self.commits_pane.border_title = f"Commits ({branch})" if branch else "Commits (HEAD)"
         
@@ -2592,7 +2737,7 @@ class PygitzenApp(App):
     def load_more_commits(self) -> None:
         """Load more commits for the current branch (matching lazygit behavior)."""
         import subprocess
-        
+
         # If searching, don't load more - we're filtering existing commits
         if self._search_query:
             return
@@ -3015,8 +3160,8 @@ class PygitzenApp(App):
     
     def show_tag_info(self, tag: TagInfo) -> None:
         """Show tag info and git log graph (matching Lazygit behavior)."""
-        import threading
         import subprocess
+        import threading
         from pathlib import Path
         
         tag_start = time.perf_counter()
@@ -3121,9 +3266,10 @@ class PygitzenApp(App):
                     git_log_output = f"Error loading git log: {error_msg}"
                 
                 # Parse ANSI colors from git log output
-                from pygitzen.git_graph import parse_ansi_to_rich_text
                 from rich.text import Text
-                
+
+                from pygitzen.git_graph import parse_ansi_to_rich_text
+
                 # Create Text object with tag info and git log
                 display_text = Text()
                 display_text.append('\n'.join(tag_info_lines), style="white")
@@ -3268,14 +3414,14 @@ class PygitzenApp(App):
                     self.load_commits_for_log(self.active_branch)
                     # Refresh sync status for the selected branch
                     self._refresh_branch_sync_status(self.active_branch)
-                    self.update_status_info()
+                    # self.update_status_info()
                 else:
                     # Same branch, no new commits - still ensure branch log is visible
                     # (e.g., after viewing a tag or switching tabs), and refresh sync
                     # status and status pane.
                     self.load_commits_for_log(self.active_branch)
                     self._refresh_branch_sync_status(self.active_branch)
-                    self.update_status_info()
+                    # self.update_status_info()
         elif event.list_view is self.commits_pane:
             # Switch to patch view when commit is selected
             self._view_mode = "patch"
@@ -3561,10 +3707,10 @@ class PygitzenApp(App):
 
 
 def run_textual(repo_dir: str = ".", use_cython: bool = True) -> None:
+    from dulwich.errors import NotGitRepository
     from rich.console import Console
     from rich.panel import Panel
     from rich.text import Text
-    from dulwich.errors import NotGitRepository
     
     try:
         app = PygitzenApp(repo_dir, use_cython=use_cython)
@@ -3588,5 +3734,3 @@ def run_textual(repo_dir: str = ".", use_cython: bool = True) -> None:
         )
         console.print(panel)
         raise SystemExit(1)
-
-
