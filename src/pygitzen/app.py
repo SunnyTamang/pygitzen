@@ -23,7 +23,7 @@ from textual.widgets import (DataTable, Footer, Header, Input, ListItem,
 from .config import KeybindingConfig
 from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
                           StashInfo, TagInfo)
-from .handlers import BranchActionHandler, FileActionHandler
+from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler
 from .services import BranchService, CommitService, StashService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
@@ -149,12 +149,13 @@ class PygitzenApp(App):
             # Initialize services
             self.repo_path = Path(repo_dir) if isinstance(repo_dir, str) else repo_dir
             self.branch_service = BranchService(self.git, self.repo_path)
-            self.commit_service = CommitService(self.git)
+            self.commit_service = CommitService(self.git, self.repo_path)
             self.tag_service = TagService(self.git)
             self.stash_service = StashService(self.git)
             
             # Initialize action handlers
             self.branch_actions = BranchActionHandler(self)
+            self.commit_actions = CommitActionHandler(self)
             self.file_actions = FileActionHandler(self)
             
             self.branches: list[BranchInfo] = []
@@ -897,6 +898,14 @@ class PygitzenApp(App):
         Delegates to BranchActionHandler for the actual implementation.
         """
         self.branch_actions.rename()
+    
+    def action_commit(self) -> None:
+        """Create a commit.
+        
+        This action is triggered when 'c' is pressed (when not in branches pane).
+        Delegates to CommitActionHandler for the actual implementation.
+        """
+        self.commit_actions.create()
     
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.

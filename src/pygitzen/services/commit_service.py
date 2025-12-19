@@ -3,6 +3,8 @@
 Pure business logic - no UI dependencies.
 """
 
+import subprocess
+from pathlib import Path
 from typing import Optional
 
 from ..git_service import CommitInfo, GitService
@@ -11,13 +13,18 @@ from ..git_service import CommitInfo, GitService
 class CommitService:
     """Service for commit-related operations."""
 
-    def __init__(self, git_service: GitService) -> None:
+    def __init__(self, git_service: GitService, repo_path: Path | str | None = None) -> None:
         """Initialize commit service.
         
         Args:
             git_service: GitService instance for git operations.
+            repo_path: Repository root path (for subprocess calls). If None, uses git_service.repo_path.
         """
         self.git = git_service
+        if repo_path:
+            self.repo_path = Path(repo_path) if isinstance(repo_path, str) else repo_path
+        else:
+            self.repo_path = Path(getattr(git_service, 'repo_path', '.'))
 
     def load_commits(
         self, branch: str, max_count: int = 200, skip: int = 0
@@ -141,4 +148,56 @@ class CommitService:
             Diff text as string.
         """
         return self.git.get_commit_diff(sha)
+
+    def create_commit(
+        self, summary: str, description: str = "", no_verify: bool = False
+    ) -> dict:
+        """Create a commit with the given message.
+        
+        Args:
+            summary: Commit message summary (first line).
+            description: Optional commit message description (body).
+            no_verify: If True, skip git hooks (--no-verify flag).
+        
+        Returns:
+            Dict with 'success', 'error', 'sha' keys.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            # Build command: git commit -m "summary" -m "description"
+            cmd = ["git", "commit"]
+            
+            if no_verify:
+                cmd.append("--no-verify")
+            
+            cmd.extend(["-m", summary])
+            
+            if description:
+                cmd.extend(["-m", description])
+            
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30, cwd=repo_path_str
+            )
+            
+            if result.returncode == 0:
+                # Extract commit SHA from output if available
+                sha = None
+                output_lines = result.stdout.strip().split('\n')
+                for line in output_lines:
+                    if '[' in line and ']' in line:
+                        # Try to extract SHA from output like "[main abc1234] message"
+                        parts = line.split(']')
+                        if len(parts) > 0:
+                            sha_part = parts[0].split('[')[-1].strip().split()[0] if '[' in parts[0] else None
+                            if sha_part and len(sha_part) >= 7:
+                                sha = sha_part
+                                break
+                
+                return {"success": True, "error": None, "sha": sha}
+            else:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": error_msg, "sha": None}
+        except Exception as e:
+            return {"success": False, "error": str(e), "sha": None}
 

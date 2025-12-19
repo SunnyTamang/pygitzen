@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem
+from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem, TextArea
 from textual.containers import Container, Horizontal, Vertical
 from textual.binding import Binding
 from rich.text import Text
@@ -499,6 +499,77 @@ class SetUpstreamDialog(MinimalDialog):
         title = f"Set upstream for '{branch_name}'"
         placeholder = "Upstream branch (e.g., origin/main)"
         super().__init__(title=title, placeholder=placeholder)
+
+
+class CommitDialog(ModalScreen[tuple[str, str] | None]):
+    """Dialog for creating a commit with summary and description."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+        Binding("ctrl+j", "submit", "Commit", show=False),
+    ]
+
+    CSS_PATH = "../styles/dialogs.tcss"
+
+    def __init__(self, initial_summary: str = "", initial_description: str = "") -> None:
+        """Initialize commit dialog.
+        
+        Args:
+            initial_summary: Initial commit summary text.
+            initial_description: Initial commit description text.
+        """
+        super().__init__()
+        self.initial_summary = initial_summary
+        self.initial_description = initial_description
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="commit-dialog"):
+            yield Label("Commit Changes", id="commit-title")
+            yield Label("Summary:", id="summary-label")
+            yield Input(
+                value=self.initial_summary,
+                placeholder="Commit message (required)",
+                id="summary-input"
+            )
+            yield Label("Description (optional):", id="description-label")
+            yield TextArea(
+                text=self.initial_description,
+                placeholder="Additional commit message details...",
+                id="description-input"
+            )
+            with Container(id="button-container"):
+                yield Button("Cancel", id="cancel", variant="default")
+                yield Button("Commit", id="commit", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus summary input when dialog is mounted."""
+        self.query_one("#summary-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "commit":
+            self.action_submit()
+        else:
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        """Submit commit when Ctrl+J is pressed or Commit button is clicked."""
+        summary_input = self.query_one("#summary-input", Input)
+        description_input = self.query_one("#description-input", TextArea)
+        
+        summary = summary_input.value.strip()
+        description = description_input.text.strip()
+        
+        if not summary:
+            # Don't dismiss, just show warning
+            return
+        
+        self.dismiss((summary, description))
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
 
 
 class ConfirmDialog(ModalScreen[bool]):

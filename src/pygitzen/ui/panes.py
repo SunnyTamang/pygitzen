@@ -284,6 +284,15 @@ class StagedPane(ListView):
         app = self.app
         if app and hasattr(app, 'file_actions'):
             app.file_actions.unstage_file(file_path)
+    
+    def action_commit(self) -> None:
+        """Create a commit.
+        
+        Delegates to CommitActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'commit_actions'):
+            app.commit_actions.create()
 
 
 
@@ -362,6 +371,15 @@ class ChangesPane(ListView):
         app = self.app
         if app and hasattr(app, 'file_actions'):
             app.file_actions.stage_file(file_path)
+    
+    def action_commit(self) -> None:
+        """Create a commit.
+        
+        Delegates to CommitActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'commit_actions'):
+            app.commit_actions.create()
 
 
 

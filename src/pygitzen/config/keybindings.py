@@ -104,9 +104,11 @@ class KeybindingConfig:
             ],
             "staged": [
                 Binding("space", "toggle_stage", "Unstage"),
+                Binding("c", "commit", "Commit"),
             ],
             "changes": [
                 Binding("space", "toggle_stage", "Stage"),
+                Binding("c", "commit", "Commit"),
             ],
         }
 
