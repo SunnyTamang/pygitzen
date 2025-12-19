@@ -110,13 +110,14 @@ class BranchService:
         return sync_status_map
 
     def create_branch(
-        self, name: str, base: str | None = None, git_service: Optional[GitService] = None
+        self, name: str, base: str | None = None, no_track: bool = False, git_service: Optional[GitService] = None
     ) -> dict:
         """Create a new branch.
         
         Args:
             name: Name of the new branch.
             base: Base branch to create from (None = current branch).
+            no_track: If True, create branch without tracking upstream (--no-track flag).
             git_service: GitService instance (optional, uses self.git if not provided).
         
         Returns:
@@ -126,10 +127,18 @@ class BranchService:
         repo_path_str = str(self.repo_path)
 
         try:
+            cmd = ["git", "checkout", "-b", name]
+            
             if base:
-                cmd = ["git", "checkout", "-b", name, base]
-            else:
-                cmd = ["git", "checkout", "-b", name]
+                # Format base branch as refs/heads/<base> if not already in refs/ format
+                if not base.startswith("refs/"):
+                    base_ref = f"refs/heads/{base}"
+                else:
+                    base_ref = base
+                cmd.append(base_ref)
+            
+            if no_track:
+                cmd.append("--no-track")
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=10, cwd=repo_path_str

@@ -57,11 +57,13 @@ class BranchActionHandler:
             self.app.active_branch = branch_to_checkout
             
             # Show success notification
+            message = f"Switched to branch '{branch_to_checkout}'"
             self.app.notify(
-                f"Switched to branch '{branch_to_checkout}'",
+                message,
                 severity="success",
                 timeout=2.0
             )
+            self.app.command_log_pane.update_log(message)
             
             # Refresh UI to reflect the checkout
             # This will update branches, status, commits, etc.
@@ -69,11 +71,13 @@ class BranchActionHandler:
         else:
             # Show error notification
             error_msg = result.get("error", "Unknown error")
+            error_message = f"Failed to checkout '{branch_to_checkout}': {error_msg}"
             self.app.notify(
-                f"Failed to checkout '{branch_to_checkout}': {error_msg}",
+                error_message,
                 severity="error",
                 timeout=5.0
             )
+            self.app.command_log_pane.update_log(error_message)
     
     def create(self) -> None:
         """Create a new branch.
@@ -120,17 +124,21 @@ class BranchActionHandler:
                 
                 # Show success notification
                 if base_branch:
+                    message = f"Created branch '{created_branch}' from '{base_branch}'"
                     self.app.notify(
-                        f"Created branch '{created_branch}' from '{base_branch}'",
+                        message,
                         severity="success",
                         timeout=2.0
                     )
+                    self.app.command_log_pane.update_log(message)
                 else:
+                    message = f"Created and switched to branch '{created_branch}'"
                     self.app.notify(
-                        f"Created and switched to branch '{created_branch}'",
+                        message,
                         severity="success",
                         timeout=2.0
                     )
+                    self.app.command_log_pane.update_log(message)
                 
                 # Refresh UI to show the new branch
                 self.app.refresh_data_fast()
@@ -155,11 +163,13 @@ class BranchActionHandler:
             else:
                 # Show error notification
                 error_msg = result.get("error", "Unknown error")
+                error_message = f"Failed to create branch '{branch_name}': {error_msg}"
                 self.app.notify(
-                    f"Failed to create branch '{branch_name}': {error_msg}",
+                    error_message,
                     severity="error",
                     timeout=5.0
                 )
+                self.app.command_log_pane.update_log(error_message)
         
         # Show the dialog
         dialog = NewBranchDialog(base_branch=base_branch)
@@ -256,11 +266,13 @@ class BranchActionHandler:
             if errors:
                 # Some operations failed
                 error_msg = "; ".join(errors)
+                error_message = f"Failed to delete branch '{branch_to_delete}': {error_msg}"
                 self.app.notify(
-                    f"Failed to delete branch '{branch_to_delete}': {error_msg}",
+                    error_message,
                     severity="error",
                     timeout=5.0
                 )
+                self.app.command_log_pane.update_log(error_message)
             elif success_messages:
                 # All operations succeeded
                 if action == "both":
@@ -275,6 +287,7 @@ class BranchActionHandler:
                     severity="success",
                     timeout=2.0
                 )
+                self.app.command_log_pane.update_log(message)
                 
                 # Refresh UI to remove the deleted branch
                 self.app.refresh_data_fast()
@@ -363,11 +376,13 @@ class BranchActionHandler:
                     self.app.active_branch = renamed_branch
                 
                 # Show success notification
+                message = f"Renamed branch '{branch_to_rename}' to '{renamed_branch}'"
                 self.app.notify(
-                    f"Renamed branch '{branch_to_rename}' to '{renamed_branch}'",
+                    message,
                     severity="success",
                     timeout=2.0
                 )
+                self.app.command_log_pane.update_log(message)
                 
                 # Refresh UI to show the renamed branch
                 self.app.refresh_data_fast()
@@ -390,11 +405,13 @@ class BranchActionHandler:
             else:
                 # Show error notification
                 error_msg = result.get("error", "Unknown error")
+                error_message = f"Failed to rename branch '{branch_to_rename}': {error_msg}"
                 self.app.notify(
-                    f"Failed to rename branch '{branch_to_rename}': {error_msg}",
+                    error_message,
                     severity="error",
                     timeout=5.0
                 )
+                self.app.command_log_pane.update_log(error_message)
         
         # Show the dialog with current branch name as initial value
         dialog = RenameBranchDialog(current_name=branch_to_rename)

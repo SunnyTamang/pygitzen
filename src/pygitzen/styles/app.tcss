@@ -190,7 +190,7 @@ Input {
     text-wrap: wrap;
 }
 
-#command-log-pane {
+#command-log-scroll-container {
     height: 8;
     border: solid white;
     background: #1e1e1e;
@@ -200,8 +200,13 @@ Input {
     scrollbar-size: 1 1;
 }
 
-#command-log-pane:focus {
+#command-log-scroll-container:focus {
     border: solid green;
+}
+
+#command-log-pane {
+    background: #1e1e1e;
+    padding: 1;
 }
 
 ListItem.current-branch {

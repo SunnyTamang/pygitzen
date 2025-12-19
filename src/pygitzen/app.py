@@ -251,8 +251,9 @@ class PygitzenApp(App):
                     self.log_pane.can_focus = False  # Don't need focus, just need scroll events
                     yield self.patch_pane
                     yield self.log_pane
-                self.command_log_pane = CommandLogPane(id="command-log-pane")
-                yield self.command_log_pane
+                with ScrollableContainer(id="command-log-scroll-container"):
+                    self.command_log_pane = CommandLogPane(id="command-log-pane")
+                    yield self.command_log_pane
         
         yield Footer()
 

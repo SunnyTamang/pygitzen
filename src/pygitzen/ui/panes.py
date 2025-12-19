@@ -2834,6 +2834,8 @@ class CommandLogPane(Static):
         self.border_title = "Command log"
         self.border_subtitle = self._get_version_footer()  # Will be set in on_mount when app is available
         self._last_message = ""  # Store last message for footer refresh
+        self._messages: list[str] = []  # Store message history for appending
+        self._max_messages = 100  # Limit message history to prevent memory issues
         # Initialize with default tips
         self.update_log("")
     
@@ -2866,13 +2868,81 @@ class CommandLogPane(Static):
         return ""
     
     def update_log(self, message: str) -> None:
+        """Update command log, appending new messages to history.
+        
+        Args:
+            message: New message to append (empty string to just refresh).
+        """
         from rich.text import Text
-        self._last_message = message  # Store for potential refresh
+        import time
+        
+        # Append message to history if provided
+        if message:
+            # Add timestamp to message for differentiation
+            timestamp = time.strftime("%H:%M:%S")
+            formatted_message = f"[{timestamp}] {message}"
+            self._messages.append(formatted_message)
+            self._last_message = message
+            
+            # Limit message history to prevent memory issues
+            if len(self._messages) > self._max_messages:
+                # Keep only the most recent messages
+                self._messages = self._messages[-self._max_messages:]
+        
+        # Build text with default tips and all messages
         text = Text()
         text.append("You can hide/focus this panel by pressing '@'\n", style="white")
         text.append("Random tip: ", style="white")
         text.append("`git commit`", style="cyan")
         text.append(" is really just the programmer equivalent of saving your game.\n", style="white")
         text.append("Always do it before embarking on an ambitious change!\n", style="white")
-        if message:
-            text.append(f"\n{message}\n", style="white")
+        
+        # Append all messages from history with separators
+        if self._messages:
+            text.append("\n", style="white")
+            text.append("─" * 50, style="dim white")
+            text.append("\n", style="white")
+            for i, msg in enumerate(self._messages):
+                # Add separator between messages (except before first)
+                if i > 0:
+                    text.append("─" * 50, style="dim white")
+                    text.append("\n", style="white")
+                # Style the message differently for better visibility
+                # Use different colors for staged vs unstaged
+                if "Staged:" in msg:
+                    text.append(msg, style="green")
+                elif "Unstaged:" in msg:
+                    text.append(msg, style="yellow")
+                elif "Failed" in msg or "Error" in msg:
+                    text.append(msg, style="red")
+                else:
+                    text.append(msg, style="cyan")
+                text.append("\n", style="white")
+        
+        # Update the widget with the text
+        self.update(text)
+        
+        # Auto-scroll to bottom to show latest message
+        # Find the ScrollableContainer parent and scroll it
+        try:
+            def scroll_to_bottom():
+                try:
+                    # Find the scroll container parent
+                    parent = self.parent
+                    # Look for ScrollableContainer (might be parent or grandparent)
+                    while parent:
+                        if hasattr(parent, 'scroll_end'):
+                            parent.scroll_end(animate=False)
+                            break
+                        elif hasattr(parent, 'scroll_y') and hasattr(parent, 'max_scroll_y'):
+                            max_y = parent.max_scroll_y
+                            if max_y > 0:
+                                parent.scroll_y = max_y
+                            break
+                        parent = getattr(parent, 'parent', None)
+                except Exception:
+                    pass  # Silently fail if scrolling doesn't work
+            # Use a small delay to ensure content is rendered
+            self.set_timer(0.1, scroll_to_bottom)
+        except Exception:
+            pass  # Silently fail if timer doesn't work
