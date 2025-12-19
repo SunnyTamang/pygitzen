@@ -102,6 +102,12 @@ class KeybindingConfig:
                 Binding("space", "select", "Select"),
                 Binding("enter", "select", "Select"),
             ],
+            "staged": [
+                Binding("space", "toggle_stage", "Unstage"),
+            ],
+            "changes": [
+                Binding("space", "toggle_stage", "Stage"),
+            ],
         }
 
         return defaults.get(pane, [])

@@ -35,6 +35,8 @@ except ImportError:
 _keybinding_config = KeybindingConfig()
 _BRANCHES_BINDINGS = _keybinding_config.get_bindings("branches")
 _COMMITS_BINDINGS = _keybinding_config.get_bindings("commits")
+_STAGED_BINDINGS = _keybinding_config.get_bindings("staged")
+_CHANGES_BINDINGS = _keybinding_config.get_bindings("changes")
 
 # Helper functions
 # Helper function to format time recency (e.g., "18h", "1d", "1w")
@@ -212,10 +214,13 @@ class StatusPane(Static):
 class StagedPane(ListView):
     """Staged Changes pane showing files with staged changes."""
     
+    BINDINGS = _STAGED_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Staged Changes"
         self.show_cursor = False
+        self._files: list[FileStatus] = []  # Store files for access by index
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the staged files list."""
@@ -226,6 +231,9 @@ class StagedPane(ListView):
             f for f in files
             if f.staged and f.status in ["modified", "staged", "deleted", "renamed", "copied", "submodule"]
         ]
+        
+        # Store filtered files for access by index
+        self._files = staged_files
         
         if not staged_files:
             from rich.text import Text
@@ -257,6 +265,25 @@ class StagedPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def action_toggle_stage(self) -> None:
+        """Unstage the selected file (for StagedPane).
+        
+        Delegates to FileActionHandler for the actual implementation.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to unstage
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # Get app instance and delegate to handler
+        app = self.app
+        if app and hasattr(app, 'file_actions'):
+            app.file_actions.unstage_file(file_path)
 
 
 
@@ -265,10 +292,13 @@ class StagedPane(ListView):
 class ChangesPane(ListView):
     """Changes pane showing files with unstaged changes."""
     
+    BINDINGS = _CHANGES_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Changes"
         self.show_cursor = False
+        self._files: list[FileStatus] = []  # Store files for access by index
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the unstaged files list."""
@@ -284,6 +314,8 @@ class ChangesPane(ListView):
             elif not f.staged and f.status in ["modified", "untracked", "deleted"]:
                 unstaged_files.append(f)
         
+        # Store filtered files for access by index
+        self._files = unstaged_files
         
         if not unstaged_files:
             from rich.text import Text
@@ -311,6 +343,25 @@ class ChangesPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def action_toggle_stage(self) -> None:
+        """Stage the selected file (for ChangesPane).
+        
+        Delegates to FileActionHandler for the actual implementation.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to stage
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # Get app instance and delegate to handler
+        app = self.app
+        if app and hasattr(app, 'file_actions'):
+            app.file_actions.stage_file(file_path)
 
 
 

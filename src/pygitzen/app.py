@@ -23,7 +23,7 @@ from textual.widgets import (DataTable, Footer, Header, Input, ListItem,
 from .config import KeybindingConfig
 from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
                           StashInfo, TagInfo)
-from .handlers import BranchActionHandler
+from .handlers import BranchActionHandler, FileActionHandler
 from .services import BranchService, CommitService, StashService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
@@ -155,6 +155,7 @@ class PygitzenApp(App):
             
             # Initialize action handlers
             self.branch_actions = BranchActionHandler(self)
+            self.file_actions = FileActionHandler(self)
             
             self.branches: list[BranchInfo] = []
             self.remotes: list[BranchInfo] = []

@@ -11,8 +11,10 @@ Unlike services, handlers have UI dependencies and are aware of the app context.
 """
 
 from .branch_actions import BranchActionHandler
+from .file_actions import FileActionHandler
 
 __all__ = [
     "BranchActionHandler",
+    "FileActionHandler",
 ]
 
