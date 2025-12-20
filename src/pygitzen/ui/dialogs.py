@@ -507,40 +507,203 @@ class CommitDialog(ModalScreen[tuple[str, str] | None]):
     BINDINGS = [
         Binding("escape", "dismiss", "Cancel", show=False),
         Binding("ctrl+j", "submit", "Commit", show=False),
+        Binding("ctrl+enter", "submit", "Commit", show=False),
     ]
 
-    CSS_PATH = "../styles/dialogs.tcss"
+    DEFAULT_CSS = """
+    CommitDialog {
+        align: center middle;
+    }
+    
+    CommitDialog #new-commit-dialog {
+        width: 75%;
+        min-width: 60;
+        max-width: 85;
+        height: auto;
+        min-height: 20;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+    
+    CommitDialog #new-commit-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+    
+    CommitDialog #new-commit-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #summary-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #summary-label-container {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        margin-bottom: 1;
+    }
+    
+    CommitDialog #summary-label {
+        color: $text;
+        text-style: bold;
+    }
+    
+    CommitDialog #summary-required {
+        color: $error;
+        margin-left: 1;
+    }
+    
+    CommitDialog #summary-input {
+        width: 100%;
+        height: 3;
+        border: solid $primary;
+        background: $surface;
+    }
+    
+    CommitDialog #summary-input:focus {
+        border: solid $accent;
+    }
+    
+    CommitDialog #description-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #description-label-container {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        margin-bottom: 1;
+    }
+    
+    CommitDialog #description-label {
+        color: $text;
+        text-style: bold;
+    }
+    
+    CommitDialog #description-optional {
+        color: $text-muted;
+        margin-left: 1;
+    }
+    
+    CommitDialog #description-input {
+        width: 100%;
+        height: 10;
+        border: solid $primary;
+        background: $surface;
+    }
+    
+    CommitDialog #description-input:focus {
+        border: solid $accent;
+    }
+    
+    CommitDialog #info-bar {
+        width: 100%;
+        height: auto;
+        padding: 1;
+        margin-bottom: 2;
+        border: solid $primary 30%;
+        background: $surface-lighten-1;
+        text-align: center;
+        color: $text-muted;
+    }
+    
+    CommitDialog #button-container {
+        width: 100%;
+        layout: horizontal;
+        align: right middle;
+        height: auto;
+    }
+    
+    CommitDialog #cancel-button {
+        margin-right: 1;
+    }
+    
+    CommitDialog #commit-button {
+        min-width: 15;
+    }
+    """
 
-    def __init__(self, initial_summary: str = "", initial_description: str = "") -> None:
+    def __init__(self, initial_summary: str = "", initial_description: str = "", staged_files_count: int = 0) -> None:
         """Initialize commit dialog.
         
         Args:
             initial_summary: Initial commit summary text.
             initial_description: Initial commit description text.
+            staged_files_count: Number of staged files to display.
         """
         super().__init__()
         self.initial_summary = initial_summary
         self.initial_description = initial_description
+        self.staged_files_count = staged_files_count
 
     def compose(self):
         """Compose dialog widgets."""
-        with Container(id="commit-dialog"):
-            yield Label("Commit Changes", id="commit-title")
-            yield Label("Summary:", id="summary-label")
-            yield Input(
-                value=self.initial_summary,
-                placeholder="Commit message (required)",
-                id="summary-input"
-            )
-            yield Label("Description (optional):", id="description-label")
-            yield TextArea(
-                text=self.initial_description,
-                placeholder="Additional commit message details...",
-                id="description-input"
-            )
+        from rich.text import Text
+        
+        with Container(id="new-commit-dialog"):
+            # Header
+            yield Label("Commit Changes", id="new-commit-header")
+            yield Label("Create a new commit with staged files", id="new-commit-subtitle")
+            
+            # Summary section
+            with Container(id="summary-section"):
+                with Container(id="summary-label-container"):
+                    yield Label("Summary", id="summary-label")
+                    yield Label("*", id="summary-required")
+                yield Input(
+                    value=self.initial_summary,
+                    placeholder="Enter commit message (e.g., Add feature: user authentication)",
+                    id="summary-input"
+                )
+            
+            # Description section
+            with Container(id="description-section"):
+                with Container(id="description-label-container"):
+                    yield Label("Description", id="description-label")
+                    yield Label("(optional)", id="description-optional")
+                yield TextArea(
+                    text=self.initial_description,
+                    placeholder="Provide additional details about this commit...\n\nExample:\n- Implemented login/logout functionality\n- Added password validation\n- Updated user model",
+                    id="description-input"
+                )
+            
+            # Info bar
+            info_text = Text()
+            # info_text.append("ℹ️  ", style="cyan")
+            info_text.append(f"{self.staged_files_count} file", style="white")
+            if self.staged_files_count != 1:
+                info_text.append("s", style="white")
+            info_text.append(" staged", style="white")
+            info_text.append(" • Press ", style="dim")
+            info_text.append("Ctrl+Enter", style="cyan bold")
+            info_text.append(" to commit", style="dim")
+            
+            yield Static(info_text, id="info-bar")
+            
+            # Buttons
             with Container(id="button-container"):
-                yield Button("Cancel", id="cancel", variant="default")
-                yield Button("Commit", id="commit", variant="primary")
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Commit ✓", id="commit-button", variant="primary")
 
     def on_mount(self) -> None:
         """Focus summary input when dialog is mounted."""
@@ -548,13 +711,13 @@ class CommitDialog(ModalScreen[tuple[str, str] | None]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press."""
-        if event.button.id == "commit":
+        if event.button.id == "commit-button":
             self.action_submit()
         else:
             self.dismiss(None)
 
     def action_submit(self) -> None:
-        """Submit commit when Ctrl+J is pressed or Commit button is clicked."""
+        """Submit commit when Ctrl+J or Ctrl+Enter is pressed or Commit button is clicked."""
         summary_input = self.query_one("#summary-input", Input)
         description_input = self.query_one("#description-input", TextArea)
         
@@ -562,7 +725,12 @@ class CommitDialog(ModalScreen[tuple[str, str] | None]):
         description = description_input.text.strip()
         
         if not summary:
-            # Don't dismiss, just show warning
+            # Show warning but don't dismiss
+            self.app.notify(
+                "Commit message cannot be empty",
+                severity="warning",
+                timeout=2.0
+            )
             return
         
         self.dismiss((summary, description))

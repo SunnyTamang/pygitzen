@@ -105,7 +105,10 @@ class CommitActionHandler:
                 )
                 self.app.command_log_pane.update_log(error_message)
         
+        # Get staged files count
+        staged_count = len([f for f in self.app.git.get_file_status() if f.staged])
+        
         # Show the dialog
-        dialog = CommitDialog()
+        dialog = CommitDialog(staged_files_count=staged_count)
         self.app.push_screen(dialog, callback=on_dialog_result)
 

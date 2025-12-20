@@ -3,7 +3,7 @@ MinimalDialog {
     align: center middle;
 }
 
-#dialog {
+MinimalDialog #dialog {
     width: 60%;
     min-width: 40;
     max-width: 80;
