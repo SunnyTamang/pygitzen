@@ -356,6 +356,34 @@ cdef class GitServiceCython:
                     branch_name = ref_name[len(refs_prefix):].decode(errors="replace")
                     result.append(BranchInfo(name=branch_name, head_sha=sha.hex(), timestamp=0))
         
+        # Handle empty repositories where git init has created a branch but
+        # no commits exist yet. In this case, for-each-ref returns nothing,
+        # but we can still detect the current branch using symbolic-ref
+        if not result:
+            try:
+                symbolic_ref_cmd = ['git', 'symbolic-ref', '--short', 'HEAD']
+                symbolic_ref_result = subprocess.run(
+                    symbolic_ref_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    cwd=str(self.repo_path)
+                )
+                if symbolic_ref_result.returncode == 0:
+                    branch_name = symbolic_ref_result.stdout.strip()
+                    # Only include actual branch names, skip detached HEAD states
+                    if branch_name and branch_name != "HEAD":
+                        result.append(BranchInfo(
+                            name=branch_name,
+                            head_sha="",  # No commits exist in empty repo
+                            timestamp=0   # No commit history available
+                        ))
+            except Exception:
+                # If we can't determine the branch, that's fine - just return
+                # the empty list. This might happen in edge cases like corrupted
+                # git state, but we don't want to crash the application
+                pass
+        
         # Sort by recency (most recent first), then alphabetically
         # Branches with no timestamp (0) go to the end
         def get_sort_key(branch):

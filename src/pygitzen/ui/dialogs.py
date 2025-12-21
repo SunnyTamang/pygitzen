@@ -488,17 +488,22 @@ class DeleteBranchDialog(ModalScreen[str | None]):
 
 
 class SetUpstreamDialog(MinimalDialog):
-    """Dialog for setting upstream branch."""
+    """Dialog for setting upstream branch.
+    
+    Format: "remote branch-name" (e.g., "origin main")
+    Matches Lazygit's upstream prompt format.
+    """
 
-    def __init__(self, branch_name: str) -> None:
+    def __init__(self, branch_name: str, initial_value: str = "") -> None:
         """Initialize set upstream dialog.
         
         Args:
             branch_name: Local branch name.
+            initial_value: Initial upstream value (e.g., "origin branch-name").
         """
-        title = f"Set upstream for '{branch_name}'"
-        placeholder = "Upstream branch (e.g., origin/main)"
-        super().__init__(title=title, placeholder=placeholder)
+        title = "Enter upstream"
+        placeholder = "Upstream (e.g., origin main)"
+        super().__init__(title=title, placeholder=placeholder, initial_value=initial_value)
 
 
 class CommitDialog(ModalScreen[tuple[str, str] | None]):

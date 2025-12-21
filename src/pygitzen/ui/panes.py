@@ -1426,12 +1426,29 @@ class LogPane(Static):
             result = DecodedResult(result.returncode, output_text, error_text)
             
             if result.returncode != 0:
-                # Show error message
-                error_text = Text()
-                error_text.append(f"Error running git log: {result.stderr}\n", style="red")
-                self.update(error_text)
-                self._native_git_log_loading = False
-                return
+                # Check if this is an expected error from an empty repository
+                # where no commits exist yet. In this case, we should show an
+                # empty log rather than an error message, which matches how
+                # other git tools handle this situation
+                error_stderr = result.stderr.strip() if result.stderr else ""
+                is_empty_repo_error = (
+                    "unknown revision" in error_stderr.lower() or
+                    "ambiguous argument" in error_stderr.lower() or
+                    "does not have any commits yet" in error_stderr.lower()
+                )
+                
+                if is_empty_repo_error:
+                    # Empty repository - display empty log pane rather than error
+                    self.update(Text())
+                    self._native_git_log_loading = False
+                    return
+                else:
+                    # Actual error occurred - display it to the user
+                    error_text = Text()
+                    error_text.append(f"Error running git log: {error_stderr}\n", style="red")
+                    self.update(error_text)
+                    self._native_git_log_loading = False
+                    return
         
             # Parse ANSI-colored output and convert to Rich Text
             # Process the entire output at once for better performance

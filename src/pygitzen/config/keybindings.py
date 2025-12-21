@@ -72,6 +72,10 @@ class KeybindingConfig:
                 Binding("+", "load_more", "More"),
                 Binding("g", "toggle_graph_style", "Toggle Graph Style"),
                 Binding("?", "show_about", "About"),
+                Binding("p", "pull", "Pull"),
+                Binding("P", "push", "Push"),
+                Binding("f", "fetch", "Fetch"),
+                Binding("shift+p", "force_push", "Force Push"),
             ],
             "branches": [
                 Binding("c", "checkout", "Checkout"),

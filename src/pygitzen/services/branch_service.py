@@ -422,7 +422,17 @@ class BranchService:
             if result.returncode == 0:
                 return {"success": True, "error": None}
             else:
-                error_msg = result.stderr.strip() or "Unknown error"
+                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                # Extract just the fatal error line (remove git hints)
+                # Git outputs: "fatal: ..." followed by multiple "hint: ..." lines
+                error_lines = error_output.split('\n')
+                fatal_lines = [line for line in error_lines if line.startswith('fatal:')]
+                if fatal_lines:
+                    # Use the first fatal line (main error)
+                    error_msg = fatal_lines[0]
+                else:
+                    # Fallback: use first line if no fatal line found
+                    error_msg = error_lines[0] if error_lines else error_output
                 return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": str(e)}

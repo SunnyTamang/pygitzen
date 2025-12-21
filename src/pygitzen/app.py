@@ -23,8 +23,8 @@ from textual.widgets import (DataTable, Footer, Header, Input, ListItem,
 from .config import KeybindingConfig
 from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
                           StashInfo, TagInfo)
-from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler
-from .services import BranchService, CommitService, StashService, TagService
+from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler, SyncActionHandler
+from .services import BranchService, CommitService, StashService, SyncService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
 # Note: These are used internally in app.py, imported directly from panes module
@@ -150,6 +150,7 @@ class PygitzenApp(App):
             self.repo_path = Path(repo_dir) if isinstance(repo_dir, str) else repo_dir
             self.branch_service = BranchService(self.git, self.repo_path)
             self.commit_service = CommitService(self.git, self.repo_path)
+            self.sync_service = SyncService(self.git, self.repo_path)
             self.tag_service = TagService(self.git)
             self.stash_service = StashService(self.git)
             
@@ -157,6 +158,7 @@ class PygitzenApp(App):
             self.branch_actions = BranchActionHandler(self)
             self.commit_actions = CommitActionHandler(self)
             self.file_actions = FileActionHandler(self)
+            self.sync_actions = SyncActionHandler(self)
             
             self.branches: list[BranchInfo] = []
             self.remotes: list[BranchInfo] = []
@@ -907,18 +909,57 @@ class PygitzenApp(App):
         """
         self.commit_actions.create()
     
+    def action_pull(self) -> None:
+        """Pull changes from remote.
+        
+        This action is triggered when 'p' is pressed.
+        Delegates to SyncActionHandler for the actual implementation.
+        """
+        self.sync_actions.pull()
+    
+    def action_push(self) -> None:
+        """Push current branch to remote.
+        
+        This action is triggered when 'P' is pressed.
+        Delegates to SyncActionHandler for the actual implementation.
+        """
+        self.sync_actions.push()
+    
+    def action_fetch(self) -> None:
+        """Fetch changes from remote.
+        
+        This action is triggered when 'f' is pressed.
+        Delegates to SyncActionHandler for the actual implementation.
+        """
+        self.sync_actions.fetch()
+    
+    def action_force_push(self) -> None:
+        """Force push current branch to remote.
+        
+        This action is triggered when 'shift+P' is pressed.
+        Delegates to SyncActionHandler for the actual implementation.
+        """
+        self.sync_actions.force_push()
+    
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.
         
-        Uses `git rev-parse --abbrev-ref HEAD` so that we always respect the real
-        repository HEAD, even if branches are ordered by recency elsewhere.
+        This method determines the current branch by querying git directly. It uses
+        symbolic-ref first as it works reliably even in empty repositories where no
+        commits exist yet. If that fails, we fall back to branch --show-current.
+        
+        Returns None if the repository is in a detached HEAD state or if the branch
+        name cannot be determined for any reason.
         """
         import subprocess
         
         repo_path_str = str(self.repo_path) if hasattr(self, "repo_path") else "."
+        
+        # Try symbolic-ref first - this works even in empty repositories where
+        # git init has created a branch but no commits exist yet
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                ["git", "symbolic-ref", "--short", "HEAD"],
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -926,11 +967,30 @@ class PygitzenApp(App):
             )
             if result.returncode == 0:
                 branch = result.stdout.strip()
-                # Detached HEAD will return "HEAD" – treat that as no named branch
+                # In detached HEAD state, symbolic-ref will return "HEAD" or empty
+                # We only want actual branch names, so filter those out
                 if branch and branch != "HEAD":
                     return branch
         except Exception:
             pass
+        
+        # Fallback method - also works in empty repos and handles edge cases
+        # where symbolic-ref might fail
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=repo_path_str,
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip()
+                if branch:
+                    return branch
+        except Exception:
+            pass
+        
         return None
     
 
@@ -2246,10 +2306,25 @@ class PygitzenApp(App):
                                 )
                             )
             else:
-                # Log error for debugging
-                error_msg = f"git log failed: {result.stderr}"
-                _log_timing_message(f"[ERROR] load_commits: {error_msg}")
-                print(f"[ERROR] load_commits: {error_msg}")
+                # Check if this error is expected when working with an empty repository
+                # where no commits exist yet. In such cases, we should gracefully
+                # show an empty commits list rather than displaying an error
+                error_stderr = result.stderr.strip() if result.stderr else ""
+                is_empty_repo_error = (
+                    "unknown revision" in error_stderr.lower() or
+                    "ambiguous argument" in error_stderr.lower() or
+                    "does not have any commits yet" in error_stderr.lower()
+                )
+                
+                if is_empty_repo_error:
+                    # Empty repository - this is expected, so just show empty list
+                    commits = []
+                    _log_timing_message(f"[INFO] load_commits: Empty repo detected, showing empty commits list")
+                else:
+                    # Actual error occurred - log it for debugging purposes
+                    error_msg = f"git log failed: {error_stderr}"
+                    _log_timing_message(f"[ERROR] load_commits: {error_msg}")
+                    print(f"[ERROR] load_commits: {error_msg}")
             
             # Use approximate count initially (will be updated in background)
             self.total_commits = len(commits) if commits else 0
