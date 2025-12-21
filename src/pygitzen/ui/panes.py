@@ -293,6 +293,24 @@ class StagedPane(ListView):
         app = self.app
         if app and hasattr(app, 'commit_actions'):
             app.commit_actions.create()
+    
+    def action_stash(self) -> None:
+        """Stash all changes.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash()
+    
+    def action_stash_options(self) -> None:
+        """Show stash options menu.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash_options()
 
 
 
@@ -380,6 +398,24 @@ class ChangesPane(ListView):
         app = self.app
         if app and hasattr(app, 'commit_actions'):
             app.commit_actions.create()
+    
+    def action_stash(self) -> None:
+        """Stash all changes.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash()
+    
+    def action_stash_options(self) -> None:
+        """Show stash options menu.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash_options()
 
 
 
@@ -1169,6 +1205,42 @@ class StashPane(ListView):
             self._last_index = index
             if 0 <= index < len(self._stashes):
                 self._parent_app.show_stash_diff(index)
+    
+    def action_apply_stash(self) -> None:
+        """Apply the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.apply()
+    
+    def action_pop_stash(self) -> None:
+        """Pop the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.pop()
+    
+    def action_drop_stash(self) -> None:
+        """Drop the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.drop()
+    
+    def action_rename_stash(self) -> None:
+        """Rename the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.rename()
 
 
 

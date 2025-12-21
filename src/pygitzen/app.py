@@ -23,7 +23,7 @@ from textual.widgets import (DataTable, Footer, Header, Input, ListItem,
 from .config import KeybindingConfig
 from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
                           StashInfo, TagInfo)
-from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler, SyncActionHandler
+from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler, StashActionHandler, SyncActionHandler
 from .services import BranchService, CommitService, StashService, SyncService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
@@ -158,6 +158,7 @@ class PygitzenApp(App):
             self.branch_actions = BranchActionHandler(self)
             self.commit_actions = CommitActionHandler(self)
             self.file_actions = FileActionHandler(self)
+            self.stash_actions = StashActionHandler(self)
             self.sync_actions = SyncActionHandler(self)
             
             self.branches: list[BranchInfo] = []
@@ -940,6 +941,22 @@ class PygitzenApp(App):
         Delegates to SyncActionHandler for the actual implementation.
         """
         self.sync_actions.force_push()
+    
+    def action_stash(self) -> None:
+        """Stash all changes.
+        
+        This action is triggered when 's' is pressed while Files/Staged/Changes panes have focus.
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        self.stash_actions.stash()
+    
+    def action_stash_options(self) -> None:
+        """Show stash options menu.
+        
+        This action is triggered when 'S' is pressed while Files/Staged/Changes panes have focus.
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        self.stash_actions.stash_options()
     
     def _get_current_branch_name(self) -> str | None:
         """Return the currently checked-out branch name, or None if it can't be determined.
