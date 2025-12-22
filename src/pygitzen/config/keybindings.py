@@ -72,6 +72,9 @@ class KeybindingConfig:
                 Binding("+", "load_more", "More"),
                 Binding("g", "toggle_graph_style", "Toggle Graph Style"),
                 Binding("?", "show_about", "About"),
+                Binding("p", "pull", "Pull"),
+                Binding("P", "push", "Push"),
+                Binding("f", "fetch", "Fetch"),
             ],
             "branches": [
                 Binding("c", "checkout", "Checkout"),
@@ -91,8 +94,11 @@ class KeybindingConfig:
                 Binding("enter", "select", "Select"),
             ],
             "stash": [
-                Binding("space", "select", "Select"),
+                Binding("space", "apply_stash", "Apply"),
                 Binding("enter", "select", "Select"),
+                Binding("g", "pop_stash", "Pop"),
+                Binding("d", "drop_stash", "Drop"),
+                Binding("r", "rename_stash", "Rename"),
             ],
             "tags": [
                 Binding("space", "select", "Select"),
@@ -101,6 +107,18 @@ class KeybindingConfig:
             "remotes": [
                 Binding("space", "select", "Select"),
                 Binding("enter", "select", "Select"),
+            ],
+            "staged": [
+                Binding("space", "toggle_stage", "Unstage"),
+                Binding("c", "commit", "Commit"),
+                Binding("s", "stash", "Stash"),
+                Binding("S", "stash_options", "Stash Options"),
+            ],
+            "changes": [
+                Binding("space", "toggle_stage", "Stage"),
+                Binding("c", "commit", "Commit"),
+                Binding("s", "stash", "Stash"),
+                Binding("S", "stash_options", "Stash Options"),
             ],
         }
 

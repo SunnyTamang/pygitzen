@@ -5,24 +5,26 @@ Contains all pane widgets extracted from app.py for separation of concerns.
 
 from __future__ import annotations
 
-import time
-import subprocess
 import re
+import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
-from textual.widgets import ListView, Static, Input, ListItem
-from textual.binding import Binding
-from rich.text import Text
 from rich.console import Group
 from rich.syntax import Syntax
+from rich.text import Text
+from textual.binding import Binding
+from textual.widgets import Input, ListItem, ListView, Static
 
-from ..git_service import GitService, BranchInfo, CommitInfo, FileStatus, StashInfo, TagInfo
 from ..config import KeybindingConfig
+from ..git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
+                           StashInfo, TagInfo)
 
 # Import git_graph utilities if available
 try:
-    from ..git_graph import parse_ansi_to_rich_text, strip_ansi_codes, convert_graph_prefix_to_rich
+    from ..git_graph import (convert_graph_prefix_to_rich,
+                             parse_ansi_to_rich_text, strip_ansi_codes)
 except ImportError:
     # Fallback if git_graph not available
     def parse_ansi_to_rich_text(line): return Text(line)
@@ -33,6 +35,9 @@ except ImportError:
 _keybinding_config = KeybindingConfig()
 _BRANCHES_BINDINGS = _keybinding_config.get_bindings("branches")
 _COMMITS_BINDINGS = _keybinding_config.get_bindings("commits")
+_STAGED_BINDINGS = _keybinding_config.get_bindings("staged")
+_CHANGES_BINDINGS = _keybinding_config.get_bindings("changes")
+_STASH_BINDINGS = _keybinding_config.get_bindings("stash")
 
 # Helper functions
 # Helper function to format time recency (e.g., "18h", "1d", "1w")
@@ -168,9 +173,10 @@ class StatusPane(Static):
             repo_path: Repository path (str or Path object)
             sync_status: Optional dict with 'behind', 'ahead', 'synced', 'upstream' keys
         """
-        from rich.text import Text
         from pathlib import Path
-        
+
+        from rich.text import Text
+
         # Handle both str and Path objects
         if isinstance(repo_path, Path):
             repo_name = repo_path.name
@@ -209,10 +215,13 @@ class StatusPane(Static):
 class StagedPane(ListView):
     """Staged Changes pane showing files with staged changes."""
     
+    BINDINGS = _STAGED_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Staged Changes"
         self.show_cursor = False
+        self._files: list[FileStatus] = []  # Store files for access by index
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the staged files list."""
@@ -223,6 +232,9 @@ class StagedPane(ListView):
             f for f in files
             if f.staged and f.status in ["modified", "staged", "deleted", "renamed", "copied", "submodule"]
         ]
+        
+        # Store filtered files for access by index
+        self._files = staged_files
         
         if not staged_files:
             from rich.text import Text
@@ -254,6 +266,52 @@ class StagedPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def action_toggle_stage(self) -> None:
+        """Unstage the selected file (for StagedPane).
+        
+        Delegates to FileActionHandler for the actual implementation.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to unstage
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # Get app instance and delegate to handler
+        app = self.app
+        if app and hasattr(app, 'file_actions'):
+            app.file_actions.unstage_file(file_path)
+    
+    def action_commit(self) -> None:
+        """Create a commit.
+        
+        Delegates to CommitActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'commit_actions'):
+            app.commit_actions.create()
+    
+    def action_stash(self) -> None:
+        """Stash all changes.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash()
+    
+    def action_stash_options(self) -> None:
+        """Show stash options menu.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash_options()
 
 
 
@@ -262,10 +320,13 @@ class StagedPane(ListView):
 class ChangesPane(ListView):
     """Changes pane showing files with unstaged changes."""
     
+    BINDINGS = _CHANGES_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Changes"
         self.show_cursor = False
+        self._files: list[FileStatus] = []  # Store files for access by index
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the unstaged files list."""
@@ -281,6 +342,8 @@ class ChangesPane(ListView):
             elif not f.staged and f.status in ["modified", "untracked", "deleted"]:
                 unstaged_files.append(f)
         
+        # Store filtered files for access by index
+        self._files = unstaged_files
         
         if not unstaged_files:
             from rich.text import Text
@@ -308,6 +371,52 @@ class ChangesPane(ListView):
             # Add file path
             text.append(file_status.path, style="white")
             self.append(ListItem(Static(text)))
+    
+    def action_toggle_stage(self) -> None:
+        """Stage the selected file (for ChangesPane).
+        
+        Delegates to FileActionHandler for the actual implementation.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to stage
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # Get app instance and delegate to handler
+        app = self.app
+        if app and hasattr(app, 'file_actions'):
+            app.file_actions.stage_file(file_path)
+    
+    def action_commit(self) -> None:
+        """Create a commit.
+        
+        Delegates to CommitActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'commit_actions'):
+            app.commit_actions.create()
+    
+    def action_stash(self) -> None:
+        """Stash all changes.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash()
+    
+    def action_stash_options(self) -> None:
+        """Show stash options menu.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.stash_options()
 
 
 
@@ -366,6 +475,17 @@ class BranchesPane(ListView):
         app = self.app
         if app and hasattr(app, 'action_rename_branch'):
             app.action_rename_branch()
+
+    def action_select(self) -> None:
+        """Handle select action (Enter/Space) for branch selection.
+    
+        This allows the action to be found when the branches pane has focus.
+        Textual will look for actions on the widget first, then walk up to the app.
+        """
+        # Get the app instance and call its action
+        app = self.app
+        if app and hasattr(app, 'action_select'):
+            app.action_select()
     
     def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
         """Set branches with optional sync status indicators.
@@ -743,7 +863,7 @@ class CommitsPane(ListView):
         
         for commit in commits_to_render:
             from rich.text import Text
-            
+
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
             commit_sha = _normalize_commit_sha(commit.sha)
             short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -803,7 +923,7 @@ class CommitsPane(ListView):
         
         for commit in commits:
             from rich.text import Text
-            
+
             # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
             commit_sha = _normalize_commit_sha(commit.sha)
             short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -971,6 +1091,8 @@ class CommitsPane(ListView):
 class StashPane(ListView):
     """Stash pane showing stashed changes."""
     
+    BINDINGS = _STASH_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Stash"
@@ -1009,22 +1131,20 @@ class StashPane(ListView):
             if recency:
                 text.append(f"{recency} ", style="dim white")
             
-            # Format: stash@{index}: branch: message
+            # Format: stash@{index}: name (matching lazygit format)
             text.append(f"stash@{{{stash.index}}}", style="cyan")
             text.append(": ", style="white")
-            text.append(f"{stash.branch}", style="yellow")
-            text.append(": ", style="white")
             
-            # Show full message, wrap if too long
-            message = stash.message
+            # Show full stash name (preserves original format from git stash list)
+            stash_name = stash.name
             max_line_length = 50  # Maximum characters per line (adjusted for recency)
             
-            if len(message) <= max_line_length:
-                # Short message, show on one line
-                text.append(message, style="white")
+            if len(stash_name) <= max_line_length:
+                # Short name, show on one line
+                text.append(stash_name, style="white")
             else:
-                # Long message, wrap to multiple lines
-                words = message.split()
+                # Long name, wrap to multiple lines
+                words = stash_name.split()
                 current_line = ""
                 lines = []
                 
@@ -1086,6 +1206,42 @@ class StashPane(ListView):
             self._last_index = index
             if 0 <= index < len(self._stashes):
                 self._parent_app.show_stash_diff(index)
+    
+    def action_apply_stash(self) -> None:
+        """Apply the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.apply()
+    
+    def action_pop_stash(self) -> None:
+        """Pop the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.pop()
+    
+    def action_drop_stash(self) -> None:
+        """Drop the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.drop()
+    
+    def action_rename_stash(self) -> None:
+        """Rename the selected stash entry.
+        
+        Delegates to StashActionHandler for the actual implementation.
+        """
+        app = self.app
+        if app and hasattr(app, 'stash_actions'):
+            app.stash_actions.rename()
 
 
 
@@ -1140,9 +1296,10 @@ class LogPane(Static):
         Display native git log --graph --color=always output for a branch.
         Only loads when user clicks on a branch.
         """
-        from rich.text import Text
         from pathlib import Path
-        
+
+        from rich.text import Text
+
         # Only show native git log if we have git_service with repo_path
         if git_service is not None:
             # Check if git_service has repo_path attribute
@@ -1238,12 +1395,14 @@ class LogPane(Static):
         This shows exactly what git outputs, preserving all colors and formatting.
         Supports virtual scrolling - loads more commits as user scrolls.
         """
-        from rich.text import Text
-        from rich.console import Group
-        from pathlib import Path
         import subprocess
+        from pathlib import Path
+
+        from rich.console import Group
+        from rich.text import Text
+
         from pygitzen.git_graph import parse_ansi_to_rich_text
-        
+
         # Prevent concurrent loads
         if self._native_git_log_loading:
             return
@@ -1340,12 +1499,29 @@ class LogPane(Static):
             result = DecodedResult(result.returncode, output_text, error_text)
             
             if result.returncode != 0:
-                # Show error message
-                error_text = Text()
-                error_text.append(f"Error running git log: {result.stderr}\n", style="red")
-                self.update(error_text)
-                self._native_git_log_loading = False
-                return
+                # Check if this is an expected error from an empty repository
+                # where no commits exist yet. In this case, we should show an
+                # empty log rather than an error message, which matches how
+                # other git tools handle this situation
+                error_stderr = result.stderr.strip() if result.stderr else ""
+                is_empty_repo_error = (
+                    "unknown revision" in error_stderr.lower() or
+                    "ambiguous argument" in error_stderr.lower() or
+                    "does not have any commits yet" in error_stderr.lower()
+                )
+                
+                if is_empty_repo_error:
+                    # Empty repository - display empty log pane rather than error
+                    self.update(Text())
+                    self._native_git_log_loading = False
+                    return
+                else:
+                    # Actual error occurred - display it to the user
+                    error_text = Text()
+                    error_text.append(f"Error running git log: {error_stderr}\n", style="red")
+                    self.update(error_text)
+                    self._native_git_log_loading = False
+                    return
         
             # Parse ANSI-colored output and convert to Rich Text
             # Process the entire output at once for better performance
@@ -1588,8 +1764,9 @@ class LogPane(Static):
     
     def _build_log_lines(self, commits: list[CommitInfo], branch_info: dict, git_service, branch: str, total_commits_count: int = None) -> list:
         """Build log lines with virtual scrolling - only render visible commits."""
-        from rich.text import Text
         import time
+
+        from rich.text import Text
         
         build_start = time.perf_counter()
         log_lines = []
@@ -1683,8 +1860,8 @@ class LogPane(Static):
         Returns:
             Relative date string like "11 days ago", "3 weeks ago", "2 months ago", etc.
         """
-        from datetime import datetime, timezone
         import time
+        from datetime import datetime, timezone
         
         now = datetime.now(timezone.utc)
         commit_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
@@ -1789,7 +1966,9 @@ class LogPane(Static):
         If git colored graph is available, use it directly for accurate visualization.
         """
         from rich.text import Text
-        from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+
+        from pygitzen.git_graph import (convert_graph_prefix_to_rich,
+                                        strip_ansi_codes)
         
         commit_sha = _normalize_commit_sha(commit.sha)
         info = graph_structure.get(commit.sha, {'parents': [], 'children': [], 'is_merge': False, 'column': 0, 'diverges': False, 'merges': False, 'active_columns': set()})
@@ -1981,10 +2160,11 @@ class LogPane(Static):
         Args:
             git_graph_prefix_colored: Colored graph prefix from git (with ANSI codes) if available
         """
-        from rich.text import Text
         from datetime import datetime
         from time import timezone
-        
+
+        from rich.text import Text
+
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         short_sha = commit_sha[:8] if len(commit_sha) >= 8 else commit_sha
@@ -2088,7 +2268,8 @@ class LogPane(Static):
         
         if git_prefix_colored and isinstance(git_prefix_colored, list) and len(git_prefix_colored) > 1:
             # Check continuation lines for merge (|\) or divergence (|/)
-            from pygitzen.git_graph import strip_ansi_codes, convert_graph_prefix_to_rich
+            from pygitzen.git_graph import (convert_graph_prefix_to_rich,
+                                            strip_ansi_codes)
             for cont_line in git_prefix_colored[1:]:
                 plain_cont = strip_ansi_codes(cont_line)
                 if '\\' in plain_cont:
@@ -2182,12 +2363,13 @@ class PatchPane(Static):
         Show commit info in patch pane using LazyGit approach: git show --stat -p <hash>
         This single command provides: commit header, full message, diffstat, and diff.
         """
-        from rich.text import Text
-        from rich.syntax import Syntax
-        from rich.console import Group
         import subprocess
         import sys
-        
+
+        from rich.console import Group
+        from rich.syntax import Syntax
+        from rich.text import Text
+
         # Normalize SHA format (fix for Cython version hex-encoded ASCII issue)
         commit_sha = _normalize_commit_sha(commit.sha)
         
@@ -2341,7 +2523,7 @@ class PatchPane(Static):
                     # Format: "commit <hash> (HEAD -> branch, tag: v0.2.2, origin/main, main)"
                     # Colors: commit/hash/tag → yellow, HEAD -> → cyan, branch → green, origin/ → red
                     import re
-                    
+
                     # Match: "commit <hash> (refs...)" or "commit <hash>" (no refs)
                     # Hash can be any length hex characters (case insensitive)
                     match = re.match(r'^(commit\s+[a-fA-F0-9]+)(\s*\((.*)\))?$', line)
@@ -2646,12 +2828,14 @@ class PatchPane(Static):
     
     def show_stash_info(self, stash: StashInfo, diff_text: str, stat_text: str = "") -> None:
         """Show stash details and diff in the patch pane with proper color coding."""
-        from rich.text import Text
         import re
-        
-        # Create stash header (matching commit format)
+
+        from rich.text import Text
+
+        # Create stash header (matching lazygit format: stash@{index}: name)
+        # Use the exact name from git stash list to preserve original format
         full_content = Text()
-        full_content.append(f"stash@{stash.index}: On {stash.branch}: {stash.message}\n", style="yellow")
+        full_content.append(f"stash@{{{stash.index}}}: {stash.name}\n", style="yellow")
         full_content.append("\n", style="white")
         
         # Strip ANSI codes from both stat and diff
@@ -2759,6 +2943,8 @@ class CommandLogPane(Static):
         self.border_title = "Command log"
         self.border_subtitle = self._get_version_footer()  # Will be set in on_mount when app is available
         self._last_message = ""  # Store last message for footer refresh
+        self._messages: list[str] = []  # Store message history for appending
+        self._max_messages = 100  # Limit message history to prevent memory issues
         # Initialize with default tips
         self.update_log("")
     
@@ -2791,14 +2977,81 @@ class CommandLogPane(Static):
         return ""
     
     def update_log(self, message: str) -> None:
+        """Update command log, appending new messages to history.
+        
+        Args:
+            message: New message to append (empty string to just refresh).
+        """
         from rich.text import Text
-        self._last_message = message  # Store for potential refresh
+        import time
+        
+        # Append message to history if provided
+        if message:
+            # Add timestamp to message for differentiation
+            timestamp = time.strftime("%H:%M:%S")
+            formatted_message = f"[{timestamp}] {message}"
+            self._messages.append(formatted_message)
+            self._last_message = message
+            
+            # Limit message history to prevent memory issues
+            if len(self._messages) > self._max_messages:
+                # Keep only the most recent messages
+                self._messages = self._messages[-self._max_messages:]
+        
+        # Build text with default tips and all messages
         text = Text()
         text.append("You can hide/focus this panel by pressing '@'\n", style="white")
         text.append("Random tip: ", style="white")
         text.append("`git commit`", style="cyan")
         text.append(" is really just the programmer equivalent of saving your game.\n", style="white")
         text.append("Always do it before embarking on an ambitious change!\n", style="white")
-        if message:
-            text.append(f"\n{message}\n", style="white")
-
+        
+        # Append all messages from history with separators
+        if self._messages:
+            text.append("\n", style="white")
+            text.append("─" * 50, style="dim white")
+            text.append("\n", style="white")
+            for i, msg in enumerate(self._messages):
+                # Add separator between messages (except before first)
+                if i > 0:
+                    text.append("─" * 50, style="dim white")
+                    text.append("\n", style="white")
+                # Style the message differently for better visibility
+                # Use different colors for staged vs unstaged
+                if "Staged:" in msg:
+                    text.append(msg, style="green")
+                elif "Unstaged:" in msg:
+                    text.append(msg, style="yellow")
+                elif "Failed" in msg or "Error" in msg:
+                    text.append(msg, style="red")
+                else:
+                    text.append(msg, style="cyan")
+                text.append("\n", style="white")
+        
+        # Update the widget with the text
+        self.update(text)
+        
+        # Auto-scroll to bottom to show latest message
+        # Find the ScrollableContainer parent and scroll it
+        try:
+            def scroll_to_bottom():
+                try:
+                    # Find the scroll container parent
+                    parent = self.parent
+                    # Look for ScrollableContainer (might be parent or grandparent)
+                    while parent:
+                        if hasattr(parent, 'scroll_end'):
+                            parent.scroll_end(animate=False)
+                            break
+                        elif hasattr(parent, 'scroll_y') and hasattr(parent, 'max_scroll_y'):
+                            max_y = parent.max_scroll_y
+                            if max_y > 0:
+                                parent.scroll_y = max_y
+                            break
+                        parent = getattr(parent, 'parent', None)
+                except Exception:
+                    pass  # Silently fail if scrolling doesn't work
+            # Use a small delay to ensure content is rendered
+            self.set_timer(0.1, scroll_to_bottom)
+        except Exception:
+            pass  # Silently fail if timer doesn't work

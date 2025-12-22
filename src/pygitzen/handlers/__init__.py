@@ -11,8 +11,16 @@ Unlike services, handlers have UI dependencies and are aware of the app context.
 """
 
 from .branch_actions import BranchActionHandler
+from .commit_actions import CommitActionHandler
+from .file_actions import FileActionHandler
+from .stash_actions import StashActionHandler
+from .sync_actions import SyncActionHandler
 
 __all__ = [
     "BranchActionHandler",
+    "CommitActionHandler",
+    "FileActionHandler",
+    "StashActionHandler",
+    "SyncActionHandler",
 ]
 

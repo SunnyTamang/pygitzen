@@ -437,19 +437,46 @@ class GitWatcher:
     
     # Git command helpers
     def _get_current_branch(self) -> Optional[str]:
-        """Get current branch name."""
+        """Get the name of the currently checked-out branch.
+        
+        This method determines the current branch by querying git. It uses
+        symbolic-ref first as it works reliably in empty repositories, then
+        falls back to branch --show-current if needed. Returns None if the
+        repository is in a detached HEAD state.
+        """
+        # Try symbolic-ref first - reliable even when no commits exist
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                ["git", "symbolic-ref", "--short", "HEAD"],
                 capture_output=True,
                 text=True,
                 timeout=1.0,
                 cwd=str(self.repo_path)
             )
             if result.returncode == 0:
-                return result.stdout.strip()
+                branch = result.stdout.strip()
+                # Filter out detached HEAD states
+                if branch and branch != "HEAD":
+                    return branch
         except Exception:
             pass
+        
+        # Fallback method for edge cases where symbolic-ref might not work
+        try:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+                timeout=1.0,
+                cwd=str(self.repo_path)
+            )
+            if result.returncode == 0:
+                branch = result.stdout.strip()
+                if branch:
+                    return branch
+        except Exception:
+            pass
+        
         return None
     
     def _get_head_sha(self) -> Optional[str]:

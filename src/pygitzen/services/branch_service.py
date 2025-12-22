@@ -110,13 +110,14 @@ class BranchService:
         return sync_status_map
 
     def create_branch(
-        self, name: str, base: str | None = None, git_service: Optional[GitService] = None
+        self, name: str, base: str | None = None, no_track: bool = False, git_service: Optional[GitService] = None
     ) -> dict:
         """Create a new branch.
         
         Args:
             name: Name of the new branch.
             base: Base branch to create from (None = current branch).
+            no_track: If True, create branch without tracking upstream (--no-track flag).
             git_service: GitService instance (optional, uses self.git if not provided).
         
         Returns:
@@ -126,10 +127,18 @@ class BranchService:
         repo_path_str = str(self.repo_path)
 
         try:
+            cmd = ["git", "checkout", "-b", name]
+            
             if base:
-                cmd = ["git", "checkout", "-b", name, base]
-            else:
-                cmd = ["git", "checkout", "-b", name]
+                # Format base branch as refs/heads/<base> if not already in refs/ format
+                if not base.startswith("refs/"):
+                    base_ref = f"refs/heads/{base}"
+                else:
+                    base_ref = base
+                cmd.append(base_ref)
+            
+            if no_track:
+                cmd.append("--no-track")
 
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=10, cwd=repo_path_str
@@ -413,7 +422,17 @@ class BranchService:
             if result.returncode == 0:
                 return {"success": True, "error": None}
             else:
-                error_msg = result.stderr.strip() or "Unknown error"
+                error_output = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                # Extract just the fatal error line (remove git hints)
+                # Git outputs: "fatal: ..." followed by multiple "hint: ..." lines
+                error_lines = error_output.split('\n')
+                fatal_lines = [line for line in error_lines if line.startswith('fatal:')]
+                if fatal_lines:
+                    # Use the first fatal line (main error)
+                    error_msg = fatal_lines[0]
+                else:
+                    # Fallback: use first line if no fatal line found
+                    error_msg = error_lines[0] if error_lines else error_output
                 return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": str(e)}

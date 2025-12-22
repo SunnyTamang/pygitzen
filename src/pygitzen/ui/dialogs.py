@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem
+from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem, TextArea
 from textual.containers import Container, Horizontal, Vertical
 from textual.binding import Binding
 from rich.text import Text
@@ -116,6 +116,172 @@ class RenameBranchDialog(MinimalDialog):
         title = f"Rename branch: {current_name}"
         placeholder = "New branch name"
         super().__init__(title=title, placeholder=placeholder, initial_value=current_name)
+
+
+class StashRenameDialog(ModalScreen[str | None]):
+    """Dialog for renaming a stash entry with full stash details."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+        Binding("ctrl+j", "submit", "Rename", show=False),
+        Binding("ctrl+enter", "submit", "Rename", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    StashRenameDialog {
+        align: center middle;
+    }
+
+    StashRenameDialog #stash-rename-dialog {
+        width: 75%;
+        min-width: 60;
+        max-width: 85;
+        height: auto;
+        min-height: 12;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    StashRenameDialog #stash-rename-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    StashRenameDialog #stash-rename-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-input-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-input-label {
+        color: $text;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    StashRenameDialog #stash-rename-input {
+        width: 100%;
+        height: 3;
+        border: solid $primary;
+        background: $surface;
+        margin-bottom: 1;
+    }
+
+    StashRenameDialog #stash-rename-input:focus {
+        border: solid $accent;
+    }
+
+    StashRenameDialog #stash-rename-info {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+    }
+
+    StashRenameDialog #cancel-button {
+        margin-right: 1;
+    }
+
+    StashRenameDialog #rename-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self, stash_details: str, current_message: str) -> None:
+        """Initialize stash rename dialog.
+        
+        Args:
+            stash_details: Full stash details (e.g., "stash@{0}: On branch: message").
+            current_message: Current stash message only (for fallback).
+        """
+        super().__init__()
+        self.stash_details = stash_details
+        self.current_message = current_message
+        # Use full stash details as initial value (everything after "stash@{X}: ")
+        # Extract the part after "stash@{index}: " for editing
+        import re
+        match = re.match(r'stash@\{\d+\}:\s*(.+)', stash_details)
+        if match:
+            self.initial_editable_text = match.group(1).strip()
+        else:
+            # Fallback to just message if parsing fails
+            self.initial_editable_text = current_message
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="stash-rename-dialog"):
+            yield Static("Rename stash", id="stash-rename-header")
+            yield Static(self.stash_details, id="stash-rename-subtitle")
+            
+            with Container(id="stash-rename-input-section"):
+                yield Label("Edit stash details:", id="stash-rename-input-label")
+                yield Input(
+                    value=self.initial_editable_text,
+                    placeholder="Edit stash details (e.g., 'On branch: message' or just 'message')",
+                    id="stash-rename-input"
+                )
+            
+            yield Static("Press Ctrl+Enter to rename, or Escape to cancel", id="stash-rename-info")
+            
+            with Container(id="stash-rename-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Rename ✓", id="rename-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus input when dialog is mounted."""
+        input_widget = self.query_one("#stash-rename-input", Input)
+        input_widget.focus()
+        # Select all text so user can easily replace it
+        input_widget.action_select_all()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key press in input field."""
+        self.action_submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "rename-button":
+            self.action_submit()
+        else:
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        """Submit rename when Ctrl+J or Ctrl+Enter is pressed or Rename button is clicked."""
+        input_widget = self.query_one("#stash-rename-input", Input)
+        value = input_widget.value.strip()
+        if not value:
+            # Don't allow empty message
+            return
+        self.dismiss(value)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
 
 
 class DeleteBranchDialog(ModalScreen[str | None]):
@@ -488,17 +654,261 @@ class DeleteBranchDialog(ModalScreen[str | None]):
 
 
 class SetUpstreamDialog(MinimalDialog):
-    """Dialog for setting upstream branch."""
+    """Dialog for setting upstream branch.
+    
+    Format: "remote branch-name" (e.g., "origin main")
+    Matches Lazygit's upstream prompt format.
+    """
 
-    def __init__(self, branch_name: str) -> None:
+    def __init__(self, branch_name: str, initial_value: str = "") -> None:
         """Initialize set upstream dialog.
         
         Args:
             branch_name: Local branch name.
+            initial_value: Initial upstream value (e.g., "origin branch-name").
         """
-        title = f"Set upstream for '{branch_name}'"
-        placeholder = "Upstream branch (e.g., origin/main)"
-        super().__init__(title=title, placeholder=placeholder)
+        title = "Enter upstream"
+        placeholder = "Upstream (e.g., origin main)"
+        super().__init__(title=title, placeholder=placeholder, initial_value=initial_value)
+
+
+class CommitDialog(ModalScreen[tuple[str, str] | None]):
+    """Dialog for creating a commit with summary and description."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+        Binding("ctrl+j", "submit", "Commit", show=False),
+        Binding("ctrl+enter", "submit", "Commit", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    CommitDialog {
+        align: center middle;
+    }
+    
+    CommitDialog #new-commit-dialog {
+        width: 75%;
+        min-width: 60;
+        max-width: 85;
+        height: auto;
+        min-height: 20;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+    
+    CommitDialog #new-commit-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+    
+    CommitDialog #new-commit-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #summary-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #summary-label-container {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        margin-bottom: 1;
+    }
+    
+    CommitDialog #summary-label {
+        color: $text;
+        text-style: bold;
+    }
+    
+    CommitDialog #summary-required {
+        color: $error;
+        margin-left: 1;
+    }
+    
+    CommitDialog #summary-input {
+        width: 100%;
+        height: 3;
+        border: solid $primary;
+        background: $surface;
+    }
+    
+    CommitDialog #summary-input:focus {
+        border: solid $accent;
+    }
+    
+    CommitDialog #description-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+    
+    CommitDialog #description-label-container {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        margin-bottom: 1;
+    }
+    
+    CommitDialog #description-label {
+        color: $text;
+        text-style: bold;
+    }
+    
+    CommitDialog #description-optional {
+        color: $text-muted;
+        margin-left: 1;
+    }
+    
+    CommitDialog #description-input {
+        width: 100%;
+        height: 10;
+        border: solid $primary;
+        background: $surface;
+    }
+    
+    CommitDialog #description-input:focus {
+        border: solid $accent;
+    }
+    
+    CommitDialog #info-bar {
+        width: 100%;
+        height: auto;
+        padding: 1;
+        margin-bottom: 2;
+        border: solid $primary 30%;
+        background: $surface-lighten-1;
+        text-align: center;
+        color: $text-muted;
+    }
+    
+    CommitDialog #button-container {
+        width: 100%;
+        layout: horizontal;
+        align: right middle;
+        height: auto;
+    }
+    
+    CommitDialog #cancel-button {
+        margin-right: 1;
+    }
+    
+    CommitDialog #commit-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self, initial_summary: str = "", initial_description: str = "", staged_files_count: int = 0) -> None:
+        """Initialize commit dialog.
+        
+        Args:
+            initial_summary: Initial commit summary text.
+            initial_description: Initial commit description text.
+            staged_files_count: Number of staged files to display.
+        """
+        super().__init__()
+        self.initial_summary = initial_summary
+        self.initial_description = initial_description
+        self.staged_files_count = staged_files_count
+
+    def compose(self):
+        """Compose dialog widgets."""
+        from rich.text import Text
+        
+        with Container(id="new-commit-dialog"):
+            # Header
+            yield Label("Commit Changes", id="new-commit-header")
+            yield Label("Create a new commit with staged files", id="new-commit-subtitle")
+            
+            # Summary section
+            with Container(id="summary-section"):
+                with Container(id="summary-label-container"):
+                    yield Label("Summary", id="summary-label")
+                    yield Label("*", id="summary-required")
+                yield Input(
+                    value=self.initial_summary,
+                    placeholder="Enter commit message (e.g., Add feature: user authentication)",
+                    id="summary-input"
+                )
+            
+            # Description section
+            with Container(id="description-section"):
+                with Container(id="description-label-container"):
+                    yield Label("Description", id="description-label")
+                    yield Label("(optional)", id="description-optional")
+                yield TextArea(
+                    text=self.initial_description,
+                    placeholder="Provide additional details about this commit...\n\nExample:\n- Implemented login/logout functionality\n- Added password validation\n- Updated user model",
+                    id="description-input"
+                )
+            
+            # Info bar
+            info_text = Text()
+            # info_text.append("ℹ️  ", style="cyan")
+            info_text.append(f"{self.staged_files_count} file", style="white")
+            if self.staged_files_count != 1:
+                info_text.append("s", style="white")
+            info_text.append(" staged", style="white")
+            info_text.append(" • Press ", style="dim")
+            info_text.append("Ctrl+Enter", style="cyan bold")
+            info_text.append(" to commit", style="dim")
+            
+            yield Static(info_text, id="info-bar")
+            
+            # Buttons
+            with Container(id="button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Commit ✓", id="commit-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus summary input when dialog is mounted."""
+        self.query_one("#summary-input", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "commit-button":
+            self.action_submit()
+        else:
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        """Submit commit when Ctrl+J or Ctrl+Enter is pressed or Commit button is clicked."""
+        summary_input = self.query_one("#summary-input", Input)
+        description_input = self.query_one("#description-input", TextArea)
+        
+        summary = summary_input.value.strip()
+        description = description_input.text.strip()
+        
+        if not summary:
+            # Show warning but don't dismiss
+            self.app.notify(
+                "Commit message cannot be empty",
+                severity="warning",
+                timeout=2.0
+            )
+            return
+        
+        self.dismiss((summary, description))
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
 
 
 class ConfirmDialog(ModalScreen[bool]):
@@ -890,4 +1300,612 @@ class AboutModal(ModalScreen[None]):
     def action_dismiss(self) -> None:
         """Dismiss the modal."""
         self.dismiss(None)
+
+
+class StashMessageDialog(ModalScreen[str | None]):
+    """Dialog for entering stash message."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+        Binding("ctrl+j", "submit", "Stash", show=False),
+        Binding("ctrl+enter", "submit", "Stash", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    StashMessageDialog {
+        align: center middle;
+    }
+
+    StashMessageDialog #stash-dialog {
+        width: 75%;
+        min-width: 60;
+        max-width: 85;
+        height: auto;
+        min-height: 15;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    StashMessageDialog #stash-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    StashMessageDialog #stash-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashMessageDialog #stash-input-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+
+    StashMessageDialog #stash-input-label {
+        color: $text;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    StashMessageDialog #stash-input {
+        width: 100%;
+        height: 3;
+        border: solid $primary;
+        background: $surface;
+        margin-bottom: 1;
+    }
+
+    StashMessageDialog #stash-input:focus {
+        border: solid $accent;
+    }
+
+    StashMessageDialog #stash-info {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashMessageDialog #stash-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+    }
+
+    StashMessageDialog #cancel-button {
+        margin-right: 1;
+    }
+
+    StashMessageDialog #stash-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self, title: str = "Stash changes", placeholder: str = "Enter stash message (optional)") -> None:
+        """Initialize stash message dialog.
+        
+        Args:
+            title: Dialog title.
+            placeholder: Placeholder text for input.
+        """
+        super().__init__()
+        self.title_text = title
+        self.placeholder_text = placeholder
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="stash-dialog"):
+            yield Static(self.title_text, id="stash-header")
+            yield Static("Enter a message to describe your stashed changes", id="stash-subtitle")
+            
+            with Container(id="stash-input-section"):
+                yield Label("Stash message:", id="stash-input-label")
+                yield Input(
+                    placeholder=self.placeholder_text,
+                    id="stash-input"
+                )
+            
+            yield Static("Press Ctrl+Enter to stash, or Escape to cancel", id="stash-info")
+            
+            with Container(id="stash-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Stash ✓", id="stash-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus input when dialog is mounted."""
+        self.query_one("#stash-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key press in input field."""
+        self.action_submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "stash-button":
+            self.action_submit()
+        else:
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        """Submit stash when Ctrl+J or Ctrl+Enter is pressed or Stash button is clicked."""
+        input_widget = self.query_one("#stash-input", Input)
+        value = input_widget.value.strip()
+        # Allow empty input (stash message is optional)
+        self.dismiss(value)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
+
+
+class StashOptionsMenuDialog(ModalScreen[str | None]):
+    """Menu dialog for stash options with radio button interface."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+        Binding("enter", "confirm", "Confirm", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    StashOptionsMenuDialog {
+        align: center middle;
+    }
+
+    StashOptionsMenuDialog #stash-options-dialog {
+        width: 70%;
+        min-width: 60;
+        max-width: 80;
+        height: auto;
+        min-height: 16;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    StashOptionsMenuDialog #stash-options-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    StashOptionsMenuDialog #stash-options-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashOptionsMenuDialog #radio-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        border: solid $primary 30%;
+    }
+
+    StashOptionsMenuDialog .radio-option {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 0;
+        border: none;
+        background: $surface;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    StashOptionsMenuDialog .radio-option:focus {
+        background: $primary 10%;
+    }
+
+    StashOptionsMenuDialog .radio-option:hover {
+        background: $primary 10%;
+    }
+
+    StashOptionsMenuDialog .radio-option.selected {
+        background: $primary 15%;
+    }
+
+    StashOptionsMenuDialog .radio-option.selected:focus {
+        background: $primary 20%;
+    }
+
+    StashOptionsMenuDialog .radio-option-row {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    StashOptionsMenuDialog .radio-indicator {
+        width: 3;
+        height: 1;
+        margin-right: 1;
+        text-align: center;
+        content-align: center middle;
+    }
+
+    StashOptionsMenuDialog .radio-indicator.selected {
+        color: $primary;
+    }
+
+    StashOptionsMenuDialog .radio-label {
+        width: 1fr;
+        color: $text;
+        text-style: bold;
+    }
+
+    StashOptionsMenuDialog .radio-description {
+        width: 1fr;
+        color: $text-muted;
+        margin-left: 1;
+    }
+
+    StashOptionsMenuDialog #stash-options-info {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashOptionsMenuDialog #stash-options-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+    }
+
+    StashOptionsMenuDialog #cancel-button {
+        margin-right: 1;
+    }
+
+    StashOptionsMenuDialog #confirm-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self) -> None:
+        """Initialize stash options menu dialog."""
+        super().__init__()
+        self.selected_option: str | None = None
+        self.options = [
+            ("all", "Stash all changes", "Stash all modified and staged files"),
+            ("keep-index", "Stash all changes (keep index)", "Stash changes but keep staged files staged"),
+            ("untracked", "Stash including untracked files", "Stash all changes including untracked files"),
+            ("staged", "Stash staged changes only", "Stash only files that are currently staged"),
+            ("unstaged", "Stash unstaged changes only", "Stash only files with unstaged changes"),
+        ]
+
+    def compose(self):
+        """Compose the menu."""
+        with Container(id="stash-options-dialog"):
+            yield Static("Stash Options", id="stash-options-header")
+            yield Static("Select a stash option", id="stash-options-subtitle")
+            
+            with Container(id="radio-container"):
+                for option_id, label, description in self.options:
+                    with Container(classes="radio-option", id=f"option-{option_id}") as option_container:
+                        option_container.can_focus = True
+                        yield Static("○", classes="radio-indicator", id=f"indicator-{option_id}")
+                        yield Static(label, classes="radio-label", id=f"label-{option_id}")
+                        yield Static(f"  •  {description}", classes="radio-description")
+            
+            yield Static("Use ↑↓ to navigate, Enter to confirm, or Escape to cancel", id="stash-options-info")
+            
+            with Container(id="stash-options-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Confirm", id="confirm-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus the first option when mounted."""
+        # Select first option by default
+        self._select_option("all")
+        # Focus the first option container
+        try:
+            first_option = self.query_one("#option-all")
+            first_option.focus()
+        except Exception:
+            pass
+
+    def on_key(self, event) -> None:
+        """Handle keyboard navigation."""
+        if event.key == "up":
+            self._navigate(-1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down":
+            self._navigate(1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "enter" or event.key == " ":
+            if self.selected_option:
+                self.dismiss(self.selected_option)
+            event.prevent_default()
+            event.stop()
+
+    def _navigate(self, direction: int) -> None:
+        """Navigate between options."""
+        current_index = 0
+        if self.selected_option:
+            for i, (option_id, _, _) in enumerate(self.options):
+                if option_id == self.selected_option:
+                    current_index = i
+                    break
+        
+        new_index = (current_index + direction) % len(self.options)
+        new_option_id = self.options[new_index][0]
+        self._select_option(new_option_id)
+        try:
+            new_option = self.query_one(f"#option-{new_option_id}")
+            new_option.focus()
+        except Exception:
+            pass
+
+    def _select_option(self, option_id: str) -> None:
+        """Select an option."""
+        # Deselect previous
+        if self.selected_option:
+            try:
+                prev_option = self.query_one(f"#option-{self.selected_option}")
+                prev_indicator = self.query_one(f"#indicator-{self.selected_option}")
+                prev_option.remove_class("selected")
+                prev_indicator.remove_class("selected")
+                prev_indicator.update("○")
+            except Exception:
+                pass
+        
+        # Select new
+        self.selected_option = option_id
+        try:
+            option = self.query_one(f"#option-{option_id}")
+            indicator = self.query_one(f"#indicator-{option_id}")
+            option.add_class("selected")
+            indicator.add_class("selected")
+            indicator.update("●")
+        except Exception:
+            pass
+
+    def on_click(self, event) -> None:
+        """Handle click on option."""
+        # Check if click is within the dialog
+        try:
+            dialog = self.query_one("#stash-options-dialog")
+            dialog_region = dialog.region
+            
+            # If click is outside dialog, just ignore it
+            if not (dialog_region.x <= event.x < dialog_region.x + dialog_region.width and
+                    dialog_region.y <= event.y < dialog_region.y + dialog_region.height):
+                return
+            
+            # Get the widget at the click coordinates
+            clicked_widget = self.screen.get_widget_at(event.x, event.y)
+            if clicked_widget is None:
+                return
+            
+            # Find the option container by traversing up the DOM
+            current = clicked_widget
+            while current and current != self:
+                if hasattr(current, 'has_class') and current.has_class("radio-option"):
+                    if hasattr(current, 'id') and current.id:
+                        option_id = current.id.replace("option-", "")
+                        self._select_option(option_id)
+                        current.focus()
+                        return
+                current = getattr(current, 'parent', None)
+        except Exception:
+            # If we can't determine what was clicked, just ignore
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "confirm-button":
+            if self.selected_option:
+                self.dismiss(self.selected_option)
+        else:
+            self.dismiss(None)
+
+    def action_confirm(self) -> None:
+        """Confirm selection."""
+        if self.selected_option:
+            self.dismiss(self.selected_option)
+
+    def action_dismiss(self) -> None:
+        """Dismiss the menu."""
+        self.dismiss(None)
+
+
+class StashConfirmDialog(ModalScreen[bool]):
+    """Stash-specific confirmation dialog with professional styling."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    StashConfirmDialog {
+        align: center middle;
+    }
+
+    StashConfirmDialog #stash-confirm-dialog {
+        width: 70%;
+        min-width: 55;
+        max-width: 80;
+        height: auto;
+        min-height: 12;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    StashConfirmDialog #stash-confirm-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    StashConfirmDialog #stash-confirm-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashConfirmDialog #stash-confirm-message-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        padding: 1;
+        border: solid $primary;
+        background: $panel;
+    }
+
+    StashConfirmDialog #stash-confirm-message {
+        width: 100%;
+        height: auto;
+        color: $text;
+        text-align: center;
+    }
+
+    StashConfirmDialog #stash-confirm-stash-info {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        background: $background;
+        border: solid $primary;
+        border-title-align: left;
+        border-title-color: $accent;
+    }
+
+    StashConfirmDialog #stash-confirm-stash-name {
+        width: 100%;
+        height: auto;
+        color: $accent;
+        text-style: bold;
+        text-align: center;
+        margin-bottom: 1;
+    }
+
+    StashConfirmDialog #stash-confirm-warning {
+        width: 100%;
+        height: auto;
+        color: $warning;
+        text-align: center;
+        margin-top: 1;
+        text-style: italic;
+    }
+
+    StashConfirmDialog #stash-confirm-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+
+    StashConfirmDialog #cancel-button {
+        margin-right: 1;
+        min-width: 12;
+    }
+
+    StashConfirmDialog #confirm-button {
+        min-width: 12;
+    }
+    """
+
+    def __init__(
+        self, 
+        title: str, 
+        message: str, 
+        stash_name: str | None = None,
+        warning: str | None = None,
+        confirm_text: str = "Confirm", 
+        cancel_text: str = "Cancel"
+    ) -> None:
+        """Initialize stash confirmation dialog.
+        
+        Args:
+            title: Dialog title.
+            message: Confirmation message.
+            stash_name: Optional stash name/details to display prominently.
+            warning: Optional warning message to display.
+            confirm_text: Text for confirm button.
+            cancel_text: Text for cancel button.
+        """
+        super().__init__()
+        self.title_text = title
+        self.message_text = message
+        self.stash_name = stash_name
+        self.warning = warning
+        self.confirm_text = confirm_text
+        self.cancel_text = cancel_text
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="stash-confirm-dialog"):
+            yield Static(self.title_text, id="stash-confirm-header")
+            yield Static("Please confirm this action", id="stash-confirm-subtitle")
+            
+            with Container(id="stash-confirm-message-container"):
+                yield Static(self.message_text, id="stash-confirm-message")
+                
+                if self.stash_name:
+                    with Container(id="stash-confirm-stash-info"):
+                        yield Static(self.stash_name, id="stash-confirm-stash-name")
+                
+                if self.warning:
+                    yield Static(self.warning, id="stash-confirm-warning")
+            
+            with Container(id="stash-confirm-button-container"):
+                yield Button(self.cancel_text, id="cancel-button", variant="default")
+                yield Button(self.confirm_text, id="confirm-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus confirm button when mounted."""
+        try:
+            self.query_one("#confirm-button", Button).focus()
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "confirm-button":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(False)
 
