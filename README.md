@@ -7,6 +7,7 @@
 [![Downloads](https://img.shields.io/pypi/dm/pygitzen.svg?color=brightgreen)](https://pypi.org/project/pygitzen/)
 [![Build](https://img.shields.io/github/actions/workflow/status/SunnyTamang/pygitzen/publish-pypi.yml?label=build&logo=github)](https://github.com/SunnyTamang/pygitzen/actions)
 [![Status](https://img.shields.io/pypi/status/pygitzen.svg)](https://pypi.org/project/pygitzen/)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pygitzen?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pygitzen)
 
 
 **A Python-native Terminal-Based Git Client** - Navigate and manage your Git repositories with a beautiful TUI interface inspired by LazyGit.
