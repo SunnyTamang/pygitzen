@@ -75,7 +75,6 @@ class KeybindingConfig:
                 Binding("p", "pull", "Pull"),
                 Binding("P", "push", "Push"),
                 Binding("f", "fetch", "Fetch"),
-                Binding("shift+p", "force_push", "Force Push"),
             ],
             "branches": [
                 Binding("c", "checkout", "Checkout"),

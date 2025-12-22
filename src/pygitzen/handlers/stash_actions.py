@@ -219,7 +219,10 @@ class StashActionHandler:
         
         dialog = StashConfirmDialog(
             title="Stash apply",
-            message=f"Are you sure you want to apply this stash entry?\n\n{stash.message}"
+            message="Are you sure you want to apply this stash entry?",
+            stash_name=stash.name,
+            confirm_text="Apply",
+            cancel_text="Cancel"
         )
         self.app.push_screen(dialog, callback=on_confirm)
     
@@ -281,7 +284,10 @@ class StashActionHandler:
         
         dialog = StashConfirmDialog(
             title="Stash pop",
-            message=f"Are you sure you want to pop this stash entry?\n\n{stash.message}"
+            message="Are you sure you want to pop this stash entry?",
+            stash_name=stash.name,
+            confirm_text="Pop",
+            cancel_text="Cancel"
         )
         self.app.push_screen(dialog, callback=on_confirm)
     
@@ -342,7 +348,11 @@ class StashActionHandler:
         
         dialog = StashConfirmDialog(
             title="Stash drop",
-            message=f"Are you sure you want to drop this stash entry?\n\n{stash.message}\n\nThis action cannot be undone."
+            message="Are you sure you want to drop this stash entry?",
+            stash_name=stash.name,
+            warning="This action cannot be undone.",
+            confirm_text="Drop",
+            cancel_text="Cancel"
         )
         self.app.push_screen(dialog, callback=on_confirm)
     
@@ -370,21 +380,47 @@ class StashActionHandler:
         
         stash = stashes[selected_index]
         
-        # Show dialog to get new message
-        from ..ui.dialogs import MinimalDialog
+        # Build full stash details string (matching lazygit format: stash@{index}: name)
+        # Use the exact name from git stash list to preserve original format
+        stash_details = f"stash@{{{stash.index}}}: {stash.name}"
         
-        def on_dialog_result(new_message: str | None) -> None:
+        # Show dialog to get new message
+        from ..ui.dialogs import StashRenameDialog
+        
+        def on_dialog_result(edited_text: str | None) -> None:
             """Handle dialog result."""
-            if not new_message:
+            if not edited_text:
                 # User cancelled
                 return
             
-            new_message = new_message.strip()
+            edited_text = edited_text.strip()
+            if not edited_text:
+                self.app.notify("Stash details cannot be empty", severity="warning")
+                return
+            
+            # Extract message from edited text
+            # User can edit: "On branch: message" or just "message"
+            # We need to extract just the message part (everything after "On branch: " or just use the whole thing)
+            # import re
+            # # Try to match "On branch: message" format
+            # match = re.match(r'(?:On |O |WIP on )?[^:]+:\s*(.+)', edited_text)
+            # if match:
+            #     # Has branch prefix, extract message
+            #     new_message = match.group(1).strip()
+            # else:
+            #     # No branch prefix, use entire text as message
+            #     new_message = edited_text.strip()
+            
+            # TEMPORARY: Use entire edited text as message (regex commented out for testing)
+            new_message = edited_text.strip()
+            
             if not new_message:
                 self.app.notify("Stash message cannot be empty", severity="warning")
                 return
             
             # Rename stash
+            # Note: We use stash.index (the actual git stash index) not selected_index
+            # because after rename, indices shift and we need the correct one
             result = self.app.stash_service.rename_stash(stash.index, new_message)
             
             if result["success"]:
@@ -395,8 +431,25 @@ class StashActionHandler:
                 )
                 self.app.command_log_pane.update_log(f"Renamed stash@{stash.index}: {new_message}")
                 
-                # Refresh UI
-                self.app.load_stashes_background()
+                # Refresh stash list synchronously to ensure UI updates immediately
+                # After rename, the renamed stash becomes stash@{0}, so we need to refresh
+                # and reselect it to update the diff pane
+                try:
+                    stashes = self.app.stash_service.load_stashes()
+                    self.app.stashes = stashes
+                    self.app.stash_pane.set_stashes(stashes)
+                    
+                    # Reselect stash at index 0 (renamed stash becomes the most recent)
+                    if stashes:
+                        self.app.stash_pane.index = 0
+                        # Explicitly refresh the diff pane with the updated stash
+                        self.app.show_stash_diff(0)
+                except Exception as e:
+                    # If synchronous refresh fails, fall back to background refresh
+                    self.app.load_stashes_background()
+                
+                # Also refresh file status in case anything changed
+                self.app.load_file_status_background()
             else:
                 error_msg = result.get("error", "Unknown error")
                 error_message = f"Failed to rename stash: {error_msg}"
@@ -407,11 +460,11 @@ class StashActionHandler:
                 )
                 self.app.command_log_pane.update_log(error_message)
         
-        # Show dialog with current message as initial value
-        dialog = MinimalDialog(
-            title="Rename stash",
-            placeholder="Enter new stash message",
-            initial_value=stash.message
+        # Show dialog with full stash details
+        # The editable part is the stash.name (everything after "stash@{X}: ")
+        dialog = StashRenameDialog(
+            stash_details=stash_details,
+            current_message=stash.name  # Pass the full stash name (editable part)
         )
         self.app.push_screen(dialog, callback=on_dialog_result)
 

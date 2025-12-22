@@ -118,6 +118,172 @@ class RenameBranchDialog(MinimalDialog):
         super().__init__(title=title, placeholder=placeholder, initial_value=current_name)
 
 
+class StashRenameDialog(ModalScreen[str | None]):
+    """Dialog for renaming a stash entry with full stash details."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+        Binding("ctrl+j", "submit", "Rename", show=False),
+        Binding("ctrl+enter", "submit", "Rename", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    StashRenameDialog {
+        align: center middle;
+    }
+
+    StashRenameDialog #stash-rename-dialog {
+        width: 75%;
+        min-width: 60;
+        max-width: 85;
+        height: auto;
+        min-height: 12;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    StashRenameDialog #stash-rename-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    StashRenameDialog #stash-rename-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-input-section {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-input-label {
+        color: $text;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+
+    StashRenameDialog #stash-rename-input {
+        width: 100%;
+        height: 3;
+        border: solid $primary;
+        background: $surface;
+        margin-bottom: 1;
+    }
+
+    StashRenameDialog #stash-rename-input:focus {
+        border: solid $accent;
+    }
+
+    StashRenameDialog #stash-rename-info {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashRenameDialog #stash-rename-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+    }
+
+    StashRenameDialog #cancel-button {
+        margin-right: 1;
+    }
+
+    StashRenameDialog #rename-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self, stash_details: str, current_message: str) -> None:
+        """Initialize stash rename dialog.
+        
+        Args:
+            stash_details: Full stash details (e.g., "stash@{0}: On branch: message").
+            current_message: Current stash message only (for fallback).
+        """
+        super().__init__()
+        self.stash_details = stash_details
+        self.current_message = current_message
+        # Use full stash details as initial value (everything after "stash@{X}: ")
+        # Extract the part after "stash@{index}: " for editing
+        import re
+        match = re.match(r'stash@\{\d+\}:\s*(.+)', stash_details)
+        if match:
+            self.initial_editable_text = match.group(1).strip()
+        else:
+            # Fallback to just message if parsing fails
+            self.initial_editable_text = current_message
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="stash-rename-dialog"):
+            yield Static("Rename stash", id="stash-rename-header")
+            yield Static(self.stash_details, id="stash-rename-subtitle")
+            
+            with Container(id="stash-rename-input-section"):
+                yield Label("Edit stash details:", id="stash-rename-input-label")
+                yield Input(
+                    value=self.initial_editable_text,
+                    placeholder="Edit stash details (e.g., 'On branch: message' or just 'message')",
+                    id="stash-rename-input"
+                )
+            
+            yield Static("Press Ctrl+Enter to rename, or Escape to cancel", id="stash-rename-info")
+            
+            with Container(id="stash-rename-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Rename ✓", id="rename-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus input when dialog is mounted."""
+        input_widget = self.query_one("#stash-rename-input", Input)
+        input_widget.focus()
+        # Select all text so user can easily replace it
+        input_widget.action_select_all()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter key press in input field."""
+        self.action_submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "rename-button":
+            self.action_submit()
+        else:
+            self.dismiss(None)
+
+    def action_submit(self) -> None:
+        """Submit rename when Ctrl+J or Ctrl+Enter is pressed or Rename button is clicked."""
+        input_widget = self.query_one("#stash-rename-input", Input)
+        value = input_widget.value.strip()
+        if not value:
+            # Don't allow empty message
+            return
+        self.dismiss(value)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(None)
+
+
 class DeleteBranchDialog(ModalScreen[str | None]):
     """Confirmation dialog for deleting a branch with multiple options (like lazygit)."""
 
@@ -1572,71 +1738,174 @@ class StashOptionsMenuDialog(ModalScreen[str | None]):
 
 
 class StashConfirmDialog(ModalScreen[bool]):
-    """Stash-specific confirmation dialog."""
+    """Stash-specific confirmation dialog with professional styling."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+    ]
 
     DEFAULT_CSS = """
     StashConfirmDialog {
         align: center middle;
     }
 
-    StashConfirmDialog #dialog {
-        width: 50;
+    StashConfirmDialog #stash-confirm-dialog {
+        width: 70%;
+        min-width: 55;
+        max-width: 80;
         height: auto;
-        min-height: 8;
+        min-height: 12;
         background: $surface;
-        border: solid $primary;
+        border: thick $primary;
         layout: vertical;
-        padding: 1;
+        padding: 2;
     }
 
-    StashConfirmDialog #title {
+    StashConfirmDialog #stash-confirm-header {
+        width: 100%;
+        height: auto;
         text-align: center;
         text-style: bold;
         color: $text;
-        margin-bottom: 1;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
     }
 
-    StashConfirmDialog #message {
+    StashConfirmDialog #stash-confirm-subtitle {
+        width: 100%;
+        height: auto;
         text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    StashConfirmDialog #stash-confirm-message-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        padding: 1;
+        border: solid $primary;
+        background: $panel;
+    }
+
+    StashConfirmDialog #stash-confirm-message {
+        width: 100%;
+        height: auto;
         color: $text;
+        text-align: center;
+    }
+
+    StashConfirmDialog #stash-confirm-stash-info {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        background: $background;
+        border: solid $primary;
+        border-title-align: left;
+        border-title-color: $accent;
+    }
+
+    StashConfirmDialog #stash-confirm-stash-name {
+        width: 100%;
+        height: auto;
+        color: $accent;
+        text-style: bold;
+        text-align: center;
         margin-bottom: 1;
     }
 
-    StashConfirmDialog #button-container {
+    StashConfirmDialog #stash-confirm-warning {
+        width: 100%;
+        height: auto;
+        color: $warning;
+        text-align: center;
+        margin-top: 1;
+        text-style: italic;
+    }
+
+    StashConfirmDialog #stash-confirm-button-container {
         width: 100%;
         layout: horizontal;
+        align: center middle;
+        height: auto;
         margin-top: 1;
+    }
+
+    StashConfirmDialog #cancel-button {
+        margin-right: 1;
+        min-width: 12;
+    }
+
+    StashConfirmDialog #confirm-button {
+        min-width: 12;
     }
     """
 
-    def __init__(self, title: str, message: str, confirm_text: str = "Confirm", cancel_text: str = "Cancel") -> None:
+    def __init__(
+        self, 
+        title: str, 
+        message: str, 
+        stash_name: str | None = None,
+        warning: str | None = None,
+        confirm_text: str = "Confirm", 
+        cancel_text: str = "Cancel"
+    ) -> None:
         """Initialize stash confirmation dialog.
         
         Args:
             title: Dialog title.
             message: Confirmation message.
+            stash_name: Optional stash name/details to display prominently.
+            warning: Optional warning message to display.
             confirm_text: Text for confirm button.
             cancel_text: Text for cancel button.
         """
         super().__init__()
         self.title_text = title
         self.message_text = message
+        self.stash_name = stash_name
+        self.warning = warning
         self.confirm_text = confirm_text
         self.cancel_text = cancel_text
 
     def compose(self):
         """Compose dialog widgets."""
-        with Container(id="dialog"):
-            yield Label(self.title_text, id="title")
-            yield Label(self.message_text, id="message")
-            with Container(id="button-container"):
-                yield Button(self.cancel_text, id="cancel", variant="default")
-                yield Button(self.confirm_text, id="confirm", variant="primary")
+        with Container(id="stash-confirm-dialog"):
+            yield Static(self.title_text, id="stash-confirm-header")
+            yield Static("Please confirm this action", id="stash-confirm-subtitle")
+            
+            with Container(id="stash-confirm-message-container"):
+                yield Static(self.message_text, id="stash-confirm-message")
+                
+                if self.stash_name:
+                    with Container(id="stash-confirm-stash-info"):
+                        yield Static(self.stash_name, id="stash-confirm-stash-name")
+                
+                if self.warning:
+                    yield Static(self.warning, id="stash-confirm-warning")
+            
+            with Container(id="stash-confirm-button-container"):
+                yield Button(self.cancel_text, id="cancel-button", variant="default")
+                yield Button(self.confirm_text, id="confirm-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus confirm button when mounted."""
+        try:
+            self.query_one("#confirm-button", Button).focus()
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press."""
-        if event.button.id == "confirm":
+        if event.button.id == "confirm-button":
             self.dismiss(True)
         else:
             self.dismiss(False)
+    
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(False)
 

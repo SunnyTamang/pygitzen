@@ -37,6 +37,7 @@ _BRANCHES_BINDINGS = _keybinding_config.get_bindings("branches")
 _COMMITS_BINDINGS = _keybinding_config.get_bindings("commits")
 _STAGED_BINDINGS = _keybinding_config.get_bindings("staged")
 _CHANGES_BINDINGS = _keybinding_config.get_bindings("changes")
+_STASH_BINDINGS = _keybinding_config.get_bindings("stash")
 
 # Helper functions
 # Helper function to format time recency (e.g., "18h", "1d", "1w")
@@ -1090,6 +1091,8 @@ class CommitsPane(ListView):
 class StashPane(ListView):
     """Stash pane showing stashed changes."""
     
+    BINDINGS = _STASH_BINDINGS
+    
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Stash"
@@ -1128,22 +1131,20 @@ class StashPane(ListView):
             if recency:
                 text.append(f"{recency} ", style="dim white")
             
-            # Format: stash@{index}: branch: message
+            # Format: stash@{index}: name (matching lazygit format)
             text.append(f"stash@{{{stash.index}}}", style="cyan")
             text.append(": ", style="white")
-            text.append(f"{stash.branch}", style="yellow")
-            text.append(": ", style="white")
             
-            # Show full message, wrap if too long
-            message = stash.message
+            # Show full stash name (preserves original format from git stash list)
+            stash_name = stash.name
             max_line_length = 50  # Maximum characters per line (adjusted for recency)
             
-            if len(message) <= max_line_length:
-                # Short message, show on one line
-                text.append(message, style="white")
+            if len(stash_name) <= max_line_length:
+                # Short name, show on one line
+                text.append(stash_name, style="white")
             else:
-                # Long message, wrap to multiple lines
-                words = message.split()
+                # Long name, wrap to multiple lines
+                words = stash_name.split()
                 current_line = ""
                 lines = []
                 
@@ -2831,9 +2832,10 @@ class PatchPane(Static):
 
         from rich.text import Text
 
-        # Create stash header (matching commit format)
+        # Create stash header (matching lazygit format: stash@{index}: name)
+        # Use the exact name from git stash list to preserve original format
         full_content = Text()
-        full_content.append(f"stash@{stash.index}: On {stash.branch}: {stash.message}\n", style="yellow")
+        full_content.append(f"stash@{{{stash.index}}}: {stash.name}\n", style="yellow")
         full_content.append("\n", style="white")
         
         # Strip ANSI codes from both stat and diff

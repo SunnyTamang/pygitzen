@@ -38,8 +38,9 @@ class FileStatus:
 @dataclass
 class StashInfo:
     index: int  # Stash index (0 = most recent)
-    branch: str  # Branch where stash was created
-    message: str  # Stash message
+    branch: str  # Branch where stash was created (for backward compatibility)
+    message: str  # Stash message (for backward compatibility)
+    name: str  # Full stash name as it appears in git stash list (e.g., "On branch: message" or "O branch: message" or just "message")
     sha: str  # Stash commit SHA
     timestamp: int = 0  # Unix timestamp of stash creation (0 if not available)
 
@@ -1349,47 +1350,73 @@ class GitService:
             
             if result.returncode == 0 and result.stdout.strip():
                 # Parse each line
+                # Match lazygit's approach: preserve the exact stash name from git stash list
+                # Format: stash@{index}: name
                 for line in result.stdout.strip().split('\n'):
                     if not line.strip():
                         continue
                     
-                    # Parse format: stash@{index}: [WIP on ]branch: message
-                    # Example: "stash@{0}: WIP on feature/stash-display-and-keybindings: message here"
-                    # Or: "stash@{0}: On feature/stash-display-and-keybindings: message here"
-                    # Handle both "WIP on branch: message" and "On branch: message" formats
-                    match = re.match(r'stash@\{(\d+)\}:\s*(?:WIP on |On )?([^:]+?):\s*(.+)', line)
-                    if match:
-                        index = int(match.group(1))
-                        branch = match.group(2).strip()
-                        message = match.group(3).strip()
-                        
-                        # Get timestamp for this stash using git show
-                        timestamp = 0
+                    # Parse format: stash@{index}: name
+                    # Extract index and the full name (everything after "stash@{index}: ")
+                    match = re.match(r'stash@\{(\d+)\}:\s*(.+)', line)
+                    if not match:
+                        continue
+                    
+                    index = int(match.group(1))
+                    full_name = match.group(2).strip()  # Full stash name as it appears in git stash list
+                    
+                    # Parse branch and message for backward compatibility
+                    # Try to extract branch and message from the full name
+                    branch = "unknown"
+                    message = full_name
+                    
+                    # Try to match formats: "On branch: message", "O branch: message", "WIP on branch: message"
+                    branch_match = re.match(r'(?:On |O |WIP on )?([^:]+?):\s*(.+)', full_name)
+                    if branch_match:
+                        branch = branch_match.group(1).strip()
+                        message = branch_match.group(2).strip()
+                    else:
+                        # No branch prefix, try to get current branch as fallback
                         try:
-                            timestamp_result = subprocess.run(
-                                ['git', 'show', '-s', '--format=%at', f'stash@{{{index}}}'],
+                            branch_result = subprocess.run(
+                                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
                                 capture_output=True,
                                 text=True,
                                 timeout=2,
                                 cwd=str(repo_path)
                             )
-                            if timestamp_result.returncode == 0 and timestamp_result.stdout.strip():
-                                timestamp_str = timestamp_result.stdout.strip()
-                                if timestamp_str.isdigit():
-                                    timestamp = int(timestamp_str)
+                            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
                         except Exception:
-                            # If timestamp fetch fails, continue with 0
                             pass
-                        
-                        # Don't fetch SHA here - it's expensive and only needed when showing details
-                        # SHA will be fetched lazily if needed
-                        stashes.append(StashInfo(
-                            index=index,
-                            branch=branch,
-                            message=message,
-                            sha="",  # Empty SHA - can be fetched later if needed
-                            timestamp=timestamp
-                        ))
+                    
+                    # Get timestamp for this stash using git show
+                    timestamp = 0
+                    try:
+                        timestamp_result = subprocess.run(
+                            ['git', 'show', '-s', '--format=%at', f'stash@{{{index}}}'],
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                            cwd=str(repo_path)
+                        )
+                        if timestamp_result.returncode == 0 and timestamp_result.stdout.strip():
+                            timestamp_str = timestamp_result.stdout.strip()
+                            if timestamp_str.isdigit():
+                                timestamp = int(timestamp_str)
+                    except Exception:
+                        # If timestamp fetch fails, continue with 0
+                        pass
+                    
+                    # Don't fetch SHA here - it's expensive and only needed when showing details
+                    # SHA will be fetched lazily if needed
+                    stashes.append(StashInfo(
+                        index=index,
+                        branch=branch,  # For backward compatibility
+                        message=message,  # For backward compatibility
+                        name=full_name,  # Full stash name (matching lazygit's Name field)
+                        sha="",  # Empty SHA - can be fetched later if needed
+                        timestamp=timestamp
+                    ))
         except Exception:
             # If git command fails, return empty list
             pass

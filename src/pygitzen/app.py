@@ -934,14 +934,6 @@ class PygitzenApp(App):
         """
         self.sync_actions.fetch()
     
-    def action_force_push(self) -> None:
-        """Force push current branch to remote.
-        
-        This action is triggered when 'shift+P' is pressed.
-        Delegates to SyncActionHandler for the actual implementation.
-        """
-        self.sync_actions.force_push()
-    
     def action_stash(self) -> None:
         """Stash all changes.
         
