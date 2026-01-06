@@ -97,4 +97,25 @@ class FileActionHandler:
             # Update command log with error
             if hasattr(self.app, 'command_log_pane'):
                 self.app.command_log_pane.update_log(f"Error unstaging '{file_path}': {str(e)}")
+    
+    def show_file_diff(self, file_path: str, staged: bool = False, untracked: bool = False) -> None:
+        """Show file diff in patch pane.
+        
+        Args:
+            file_path: Path to the file.
+            staged: Whether to show staged diff (True) or unstaged diff (False).
+            untracked: Whether the file is untracked.
+        """
+        if not hasattr(self.app, 'file_service'):
+            self.app.notify("File service not available", severity="error", timeout=2.0)
+            return
+        
+        # Get file diff from service
+        diff_text, stat_text = self.app.file_service.get_file_diff(file_path, staged=staged, untracked=untracked)
+        
+        # Show in patch pane
+        if hasattr(self.app, 'patch_pane') and hasattr(self.app.patch_pane, 'show_file_info'):
+            self.app.patch_pane.show_file_info(file_path, diff_text, stat_text, staged=staged, untracked=untracked)
+        else:
+            self.app.notify("Patch pane not available", severity="error", timeout=2.0)
 

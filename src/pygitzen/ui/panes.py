@@ -312,6 +312,29 @@ class StagedPane(ListView):
         app = self.app
         if app and hasattr(app, 'stash_actions'):
             app.stash_actions.stash_options()
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes and auto-show file diff."""
+        if index is not None and 0 <= index < len(self._files):
+            file_status = self._files[index]
+            file_path = file_status.path
+            
+            # Determine if file is staged and untracked
+            staged = file_status.staged
+            untracked = file_status.status == "untracked"
+            
+            # Get app instance and show file diff
+            app = self.app
+            if app and hasattr(app, 'file_actions'):
+                # Switch to patch view
+                if hasattr(app, '_view_mode'):
+                    app._view_mode = "patch"
+                if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                    app.patch_pane.styles.display = "block"
+                    app.log_pane.styles.display = "none"
+                
+                # Show file diff
+                app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
 
 
 
@@ -417,6 +440,29 @@ class ChangesPane(ListView):
         app = self.app
         if app and hasattr(app, 'stash_actions'):
             app.stash_actions.stash_options()
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes and auto-show file diff."""
+        if index is not None and 0 <= index < len(self._files):
+            file_status = self._files[index]
+            file_path = file_status.path
+            
+            # Determine if file is staged and untracked
+            staged = file_status.staged
+            untracked = file_status.status == "untracked"
+            
+            # Get app instance and show file diff
+            app = self.app
+            if app and hasattr(app, 'file_actions'):
+                # Switch to patch view
+                if hasattr(app, '_view_mode'):
+                    app._view_mode = "patch"
+                if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                    app.patch_pane.styles.display = "block"
+                    app.log_pane.styles.display = "none"
+                
+                # Show file diff
+                app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
 
 
 
@@ -2928,6 +2974,108 @@ class PatchPane(Static):
         else:
             # No diff available
             full_content.append("No diff available\n", style="dim white")
+        
+        self.update(full_content)
+    
+    def show_file_info(self, file_path: str, diff_text: str, stat_text: str = "", staged: bool = False, untracked: bool = False) -> None:
+        """Show file diff in the patch pane with proper color coding.
+        
+        Args:
+            file_path: Path to the file.
+            diff_text: Git diff output for the file.
+            stat_text: Git diff stat output (optional).
+            staged: Whether this is a staged diff.
+            untracked: Whether the file is untracked.
+        """
+        import re
+        from rich.text import Text
+        
+        # Create file header
+        full_content = Text()
+        
+        # Determine status label
+        if untracked:
+            status_label = "Untracked"
+        elif staged:
+            status_label = "Staged Changes"
+        else:
+            status_label = "Unstaged Changes"
+        
+        # File header: file_path (Status)
+        full_content.append(f"{file_path} ({status_label})\n", style="yellow")
+        full_content.append("\n", style="white")
+        
+        # Strip ANSI codes from stat and diff
+        stat_text_clean = re.sub(r'\x1b\[[0-9;]*m', '', stat_text) if stat_text else ""
+        diff_text_clean = re.sub(r'\x1b\[[0-9;]*m', '', diff_text) if diff_text else ""
+        
+        # Add stat summary if available
+        if stat_text_clean:
+            stat_lines = stat_text_clean.split('\n')
+            for line in stat_lines:
+                cleaned_line = line.lstrip()
+                if not cleaned_line:
+                    full_content.append("\n", style="white")
+                    continue
+                
+                # Check if this is a diffstat file line
+                if '|' in cleaned_line and ('+' in cleaned_line or '-' in cleaned_line):
+                    # Extract file name and stats
+                    parts = cleaned_line.split('|')
+                    if len(parts) >= 2:
+                        filename = parts[0].strip()
+                        stats = parts[1].strip()
+                        full_content.append(f"{filename} |", style="cyan")
+                        # Color code the stats
+                        if '+' in stats:
+                            full_content.append(f" {stats}\n", style="green")
+                        elif '-' in stats:
+                            full_content.append(f" {stats}\n", style="red")
+                        else:
+                            full_content.append(f" {stats}\n", style="white")
+                elif cleaned_line.startswith(" ") and ('file' in cleaned_line.lower() and 'changed' in cleaned_line.lower()):
+                    # Summary line like " 3 files changed, 5 insertions(+), 2 deletions(-)"
+                    full_content.append(f"{cleaned_line}\n", style="dim white")
+                else:
+                    full_content.append(f"{cleaned_line}\n", style="white")
+            
+            full_content.append("\n", style="white")
+        
+        # Add diff content with proper color coding
+        if diff_text_clean:
+            diff_lines = diff_text_clean.split('\n')
+            for line in diff_lines:
+                if not line:
+                    full_content.append("\n", style="white")
+                    continue
+                
+                # Color code diff lines
+                if line.startswith('+++') or line.startswith('---'):
+                    full_content.append(line + '\n', style="cyan")
+                elif line.startswith('@@'):
+                    # Hunk header
+                    full_content.append(line + '\n', style="blue")
+                elif line.startswith('+') and not line.startswith('+++'):
+                    # Added line
+                    full_content.append(line + '\n', style="green")
+                elif line.startswith('-') and not line.startswith('---'):
+                    # Removed line
+                    full_content.append(line + '\n', style="red")
+                elif line.startswith('diff --git'):
+                    full_content.append(line + '\n', style="cyan")
+                elif line.startswith('index '):
+                    full_content.append(line + '\n', style="dim white")
+                elif line.startswith('new file mode') or line.startswith('deleted file mode'):
+                    full_content.append(line + '\n', style="dim white")
+                else:
+                    # Context line
+                    full_content.append(line + '\n', style="white")
+        else:
+            # No diff available
+            if untracked:
+                full_content.append("New file (no diff available)\n", style="dim white")
+            else:
+                full_content.append("No diff available\n", style="dim white")
         
         self.update(full_content)
 

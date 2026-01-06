@@ -24,7 +24,7 @@ from .config import KeybindingConfig
 from .git_service import (BranchInfo, CommitInfo, FileStatus, GitService,
                           StashInfo, TagInfo)
 from .handlers import BranchActionHandler, CommitActionHandler, FileActionHandler, StashActionHandler, SyncActionHandler
-from .services import BranchService, CommitService, StashService, SyncService, TagService
+from .services import BranchService, CommitService, FileService, StashService, SyncService, TagService
 # Helper functions moved to ui/panes.py
 # Import them if needed for backward compatibility
 # Note: These are used internally in app.py, imported directly from panes module
@@ -150,6 +150,7 @@ class PygitzenApp(App):
             self.repo_path = Path(repo_dir) if isinstance(repo_dir, str) else repo_dir
             self.branch_service = BranchService(self.git, self.repo_path)
             self.commit_service = CommitService(self.git, self.repo_path)
+            self.file_service = FileService(self.repo_path)
             self.sync_service = SyncService(self.git, self.repo_path)
             self.tag_service = TagService(self.git)
             self.stash_service = StashService(self.git)
