@@ -399,6 +399,42 @@ Static {
     color: #ffffff;
 }
 
+/* Selected/highlighted item styling for remotes pane */
+#remotes-pane ListItem.highlighted-remote {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#remotes-pane ListItem.highlighted-remote:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#remotes-pane ListItem.highlighted-remote > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
+/* Selected/highlighted item styling for tags pane */
+#tags-pane ListItem.highlighted-tag {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#tags-pane ListItem.highlighted-tag:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#tags-pane ListItem.highlighted-tag > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
 /* Selected/highlighted item styling for delete branch dialog */
 #delete-branch-dialog #options-list ListItem.--highlight {
     background: #357ABD; /* blue for strong contrast */

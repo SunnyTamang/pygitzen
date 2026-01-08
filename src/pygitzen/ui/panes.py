@@ -853,25 +853,52 @@ class RemotesPane(ListView):
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) to update visual highlighting."""
-        if highlighted is not None:
-            # Remove highlight from previous item
-            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
-                try:
-                    item = self.children[self._last_highlighted]
-                    if isinstance(item, ListItem):
-                        item.remove_class("highlighted-remote")
-                except:
-                    pass
-            
-            # Add highlight to current item
-            if highlighted < len(self.children):
-                try:
-                    item = self.children[highlighted]
-                    if isinstance(item, ListItem):
-                        item.add_class("highlighted-remote")
-                        self._last_highlighted = highlighted
-                except:
-                    pass
+        # Update highlighting
+        self._update_highlighting(highlighted)
+        
+        # Scroll to highlighted item to ensure it's visible
+        try:
+            if highlighted is not None and highlighted < len(self.children):
+                item = self.children[highlighted]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes to update visual highlighting."""
+        # Update highlighting for mouse clicks
+        self._update_highlighting(index)
+        
+        # Scroll to selected item to ensure it's visible
+        try:
+            if index is not None and index < len(self.children):
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-remote")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-remote")
+                    self._last_highlighted = index
+            except:
+                pass
     
     def set_on_render_to_main(self, callback: callable) -> None:
         """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
@@ -880,6 +907,7 @@ class RemotesPane(ListView):
     def set_remotes(self, remotes: list[BranchInfo]) -> None:
         self.clear()
         self._remotes = remotes  # Store remotes for selection access
+        self._last_highlighted = None  # Reset highlighting when remotes are updated
         
         for remote in remotes:
             from rich.text import Text
@@ -935,25 +963,52 @@ class TagsPane(ListView):
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) to update visual highlighting."""
-        if highlighted is not None:
-            # Remove highlight from previous item
-            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
-                try:
-                    item = self.children[self._last_highlighted]
-                    if isinstance(item, ListItem):
-                        item.remove_class("highlighted-tag")
-                except:
-                    pass
-            
-            # Add highlight to current item
-            if highlighted < len(self.children):
-                try:
-                    item = self.children[highlighted]
-                    if isinstance(item, ListItem):
-                        item.add_class("highlighted-tag")
-                        self._last_highlighted = highlighted
-                except:
-                    pass
+        # Update highlighting
+        self._update_highlighting(highlighted)
+        
+        # Scroll to highlighted item to ensure it's visible
+        try:
+            if highlighted is not None and highlighted < len(self.children):
+                item = self.children[highlighted]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes to update visual highlighting."""
+        # Update highlighting for mouse clicks
+        self._update_highlighting(index)
+        
+        # Scroll to selected item to ensure it's visible
+        try:
+            if index is not None and index < len(self.children):
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-tag")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-tag")
+                    self._last_highlighted = index
+            except:
+                pass
     
     def set_on_render_to_main(self, callback: callable) -> None:
         """Set callback for automatic patch updates (lazygit GetOnRenderToMain pattern)."""
@@ -970,6 +1025,7 @@ class TagsPane(ListView):
         if not append:
             self.clear()
             self._tags = []
+            self._last_highlighted = None  # Reset highlighting when tags are updated
             self._loaded_tags_count = 0
             self._rendered_count = 0  # Reset rendered count on initial load
             # Store initial tags and set total count
