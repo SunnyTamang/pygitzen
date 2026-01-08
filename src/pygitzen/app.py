@@ -1058,10 +1058,14 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    # Ensure BranchesPane ListView selection matches (set after list is populated)
-                    self.branches_pane.index = branch_index
-                    self.branches_pane.highlighted = branch_index
+                    checked_out_branch = self._get_current_branch_name()
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=checked_out_branch)
+                    # Only set index/highlighted if pane has focus
+                    if self.branches_pane.has_focus:
+                        self.branches_pane.index = branch_index
+                        self.branches_pane.highlighted = branch_index
+                        if hasattr(self.branches_pane, '_update_highlighting'):
+                            self.branches_pane._update_highlighting(branch_index)
                 else:
                     # Branch was deleted, fall back to the actual current branch if available,
                     # otherwise use the first branch in the list.
@@ -1072,9 +1076,14 @@ class PygitzenApp(App):
                     else:
                         self.active_branch = self.branches[0].name
                         branch_index = 0
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    self.branches_pane.index = branch_index
-                    self.branches_pane.highlighted = branch_index
+                    checked_out_branch = self._get_current_branch_name()
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=checked_out_branch)
+                    # Only set index/highlighted if pane has focus
+                    if self.branches_pane.has_focus:
+                        self.branches_pane.index = branch_index
+                        self.branches_pane.highlighted = branch_index
+                        if hasattr(self.branches_pane, '_update_highlighting'):
+                            self.branches_pane._update_highlighting(branch_index)
             else:
                 # No previous branch, pick the actual current branch if we can,
                 # otherwise fall back to the first branch (existing behavior).
@@ -1085,9 +1094,14 @@ class PygitzenApp(App):
                 else:
                     self.active_branch = self.branches[0].name
                     branch_index = 0
-                self.branches_pane.set_branches(self.branches, self.active_branch)
-                self.branches_pane.index = branch_index
-                self.branches_pane.highlighted = branch_index
+                checked_out_branch = self._get_current_branch_name()
+                self.branches_pane.set_branches(self.branches, self.active_branch, checked_out_branch=checked_out_branch)
+                # Only set index/highlighted if pane has focus
+                if self.branches_pane.has_focus:
+                    self.branches_pane.index = branch_index
+                    self.branches_pane.highlighted = branch_index
+                    if hasattr(self.branches_pane, '_update_highlighting'):
+                        self.branches_pane._update_highlighting(branch_index)
 
             # Load commits for commits pane (left side) - shows all commits from all branches
             commits_load_start = time.perf_counter()
@@ -1171,10 +1185,14 @@ class PygitzenApp(App):
                     self.active_branch = previous_branch
                     # Update BranchesPane selection to match
                     branch_index = branch_names.index(previous_branch)
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    # Ensure BranchesPane ListView selection matches (set after list is populated)
-                    self.branches_pane.index = branch_index
-                    self.branches_pane.highlighted = branch_index
+                    checked_out_branch = self._get_current_branch_name()
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=checked_out_branch)
+                    # Only set index/highlighted if pane has focus
+                    if self.branches_pane.has_focus:
+                        self.branches_pane.index = branch_index
+                        self.branches_pane.highlighted = branch_index
+                        if hasattr(self.branches_pane, '_update_highlighting'):
+                            self.branches_pane._update_highlighting(branch_index)
                 else:
                     # Branch was deleted, fall back to the actual current branch if available,
                     # otherwise use the first branch.
@@ -1185,9 +1203,14 @@ class PygitzenApp(App):
                     else:
                         self.active_branch = self.branches[0].name
                         branch_index = 0
-                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
-                    self.branches_pane.index = branch_index
-                    self.branches_pane.highlighted = branch_index
+                    checked_out_branch = self._get_current_branch_name()
+                    self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=checked_out_branch)
+                    # Only set index/highlighted if pane has focus
+                    if self.branches_pane.has_focus:
+                        self.branches_pane.index = branch_index
+                        self.branches_pane.highlighted = branch_index
+                        if hasattr(self.branches_pane, '_update_highlighting'):
+                            self.branches_pane._update_highlighting(branch_index)
             else:
                 # No previous branch, prefer the actual current branch if we know it.
                 branch_names = [b.name for b in self.branches]
@@ -1197,7 +1220,7 @@ class PygitzenApp(App):
                 else:
                     self.active_branch = self.branches[0].name
                     branch_index = 0
-                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
+                self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=self._get_current_branch_name())
                 self.branches_pane.index = branch_index
                 self.branches_pane.highlighted = branch_index
 
@@ -1229,8 +1252,7 @@ class PygitzenApp(App):
                         lambda: self.branches_pane.set_branches(
                             self.branches, 
                             self.active_branch, 
-                            self._branch_sync_status_cache
-                        )
+                            self._branch_sync_status_cache, checked_out_branch=self._get_current_branch_name())
                     )
                     # Also update status pane - use checked-out branch, not selected branch
                     checked_out_branch = self._get_current_branch_name()
@@ -1276,8 +1298,7 @@ class PygitzenApp(App):
                         lambda: self.branches_pane.set_branches(
                             self.branches, 
                             self.active_branch, 
-                            self._branch_sync_status_cache
-                        )
+                            self._branch_sync_status_cache, checked_out_branch=self._get_current_branch_name())
                     )
             except Exception:
                 pass  # Silently fail if calculation errors
@@ -1317,7 +1338,7 @@ class PygitzenApp(App):
         
         # Update branches pane with sync status (will be updated again when sync status is calculated)
         if self.branches:
-            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache)
+            self.branches_pane.set_branches(self.branches, self.active_branch, self._branch_sync_status_cache, checked_out_branch=self._get_current_branch_name())
         
         # Stashes are loaded in background (not here to avoid blocking)
         

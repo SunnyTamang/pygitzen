@@ -682,6 +682,7 @@ class BranchesPane(ListView):
         super().__init__(*args, **kwargs)
         self.border_title = "Local branches"
         self._last_highlighted: int | None = None  # Track highlighted changes
+        self._pending_highlight_index: int | None = None  # Store index to highlight after update
     
     def action_new_branch(self) -> None:
         """Delegate new_branch action to the app.
@@ -746,24 +747,49 @@ class BranchesPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
-        # Remove highlight from previous item
-        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
-            try:
-                item = self.children[self._last_highlighted]
-                if isinstance(item, ListItem):
-                    item.remove_class("highlighted-branch")
-            except:
-                pass
+        # If index is being set (mouse click or keyboard), always show highlighting
+        # Mouse clicks should give focus, so we show highlighting even if focus check temporarily fails
+        if index is not None:
+            # If we have an index but no focus, try to get focus (mouse click should give focus)
+            if not self.has_focus:
+                try:
+                    self.focus()
+                except:
+                    pass
+            
+            # Always show highlighting when index is set (mouse click or keyboard navigation)
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-branch")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if index < len(self.children):
+                try:
+                    item = self.children[index]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-branch")
+                        self._last_highlighted = index
+                except:
+                    pass
+            return
         
-        # Add highlight to current item
-        if index is not None and index < len(self.children):
-            try:
-                item = self.children[index]
-                if isinstance(item, ListItem):
-                    item.add_class("highlighted-branch")
-                    self._last_highlighted = index
-            except:
-                pass
+        # If index is None and no focus, remove highlighting
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-branch")
+                except:
+                    pass
+            self._last_highlighted = None
+            return
 
     def action_select(self) -> None:
         """Handle select action (Enter/Space) for branch selection.
@@ -776,26 +802,40 @@ class BranchesPane(ListView):
         if app and hasattr(app, 'action_select'):
             app.action_select()
     
-    def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None) -> None:
+    def set_branches(self, branches: list[BranchInfo], current_branch: str, sync_status: dict[str, dict] | None = None, checked_out_branch: str | None = None) -> None:
         """Set branches with optional sync status indicators.
         
         Args:
             branches: List of branch info
-            current_branch: Name of current branch
+            current_branch: Name of currently selected/active branch (for UI)
             sync_status: Optional dict mapping branch name to sync status dict with keys:
                 'behind', 'ahead', 'synced', 'upstream'
+            checked_out_branch: Name of actually checked-out branch (for '*' indicator)
         """
+        # Preserve current index before clearing (to restore highlighting after update)
+        current_index = self.index if hasattr(self, 'index') else None
+        current_highlighted = self.highlighted if hasattr(self, 'highlighted') else None
+        preserve_index = current_index if current_index is not None else current_highlighted
+        
         self.clear()
-        self._last_highlighted = None  # Reset highlighting when branches are updated
+        
+        # Restore highlighting after update if we had a selection
+        if preserve_index is not None:
+            self._pending_highlight_index = preserve_index
+        else:
+            self._last_highlighted = None  # Reset highlighting when branches are updated
         if sync_status is None:
             sync_status = {}
+        
+        # Use checked_out_branch for '*' indicator if provided, otherwise fall back to current_branch
+        branch_for_indicator = checked_out_branch if checked_out_branch else current_branch
         
         for branch in branches:
             from rich.text import Text
             text = Text()
             
-            # Current branch indicator
-            if branch.name == current_branch:
+            # Current branch indicator - only show '*' for actually checked-out branch
+            if branch.name == branch_for_indicator:
                 text.append("* ", style="green")
             else:
                 text.append("  ", style="white")
@@ -835,6 +875,26 @@ class BranchesPane(ListView):
             if branch.name == current_branch:
                 item.add_class("current-branch")
             self.append(item)
+        
+        # Restore highlight position if pending (after set_branches update)
+        if self._pending_highlight_index is not None:
+            target_index = self._pending_highlight_index
+            # If target index is out of bounds, use the last item or 0
+            if target_index >= len(branches):
+                target_index = max(0, len(branches) - 1) if branches else None
+            if target_index is not None and target_index < len(branches):
+                # Set index and highlight after a brief delay to ensure UI is updated
+                def restore_highlight():
+                    self.index = target_index
+                    self.highlighted = target_index
+                    self._update_highlighting(target_index)
+                # Use call_later to ensure UI is ready
+                if hasattr(self.app, 'set_timer'):
+                    self.app.set_timer(0.1, restore_highlight)
+                else:
+                    # Fallback: set immediately
+                    restore_highlight()
+            self._pending_highlight_index = None
 
 
 

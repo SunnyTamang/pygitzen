@@ -68,6 +68,25 @@ class BranchActionHandler:
             # Refresh UI to reflect the checkout
             # This will update branches, status, commits, etc.
             self.app.refresh_data_fast()
+            
+            # Update branches pane selection to highlight the checked-out branch
+            def update_selection():
+                """Update selection to the checked-out branch."""
+                try:
+                    # Find the checked-out branch in the list and select it
+                    for i, branch in enumerate(self.app.branches):
+                        if branch.name == branch_to_checkout:
+                            self.app.branches_pane.index = i
+                            self.app.branches_pane.highlighted = i
+                            # Apply highlighting CSS class
+                            if hasattr(self.app.branches_pane, '_update_highlighting'):
+                                self.app.branches_pane._update_highlighting(i)
+                            break
+                except (AttributeError, IndexError):
+                    pass
+            
+            # Schedule selection update after a short delay to ensure refresh completes
+            self.app.set_timer(0.1, update_selection)
         else:
             # Show error notification
             error_msg = result.get("error", "Unknown error")
