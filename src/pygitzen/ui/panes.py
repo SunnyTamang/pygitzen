@@ -423,6 +423,7 @@ class ChangesPane(ListView):
         self.show_cursor = False
         self._files: list[FileStatus] = []  # Store files for access by index
         self._last_highlighted: int | None = None  # Track highlighted changes
+        self._pending_highlight_index: int | None = None  # Store index to highlight after update
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the unstaged files list."""
@@ -440,7 +441,27 @@ class ChangesPane(ListView):
         
         # Store filtered files for access by index
         self._files = unstaged_files
-        self._last_highlighted = None  # Reset highlighting when files are updated
+        
+        # Restore highlight position if pending (after staging a file)
+        if self._pending_highlight_index is not None:
+            target_index = self._pending_highlight_index
+            # If target index is out of bounds, use the last item or 0
+            if target_index >= len(unstaged_files):
+                target_index = max(0, len(unstaged_files) - 1) if unstaged_files else None
+            if target_index is not None and target_index < len(unstaged_files):
+                # Set index and highlight after a brief delay to ensure UI is updated
+                def restore_highlight():
+                    self.index = target_index
+                    self._update_highlighting(target_index)
+                # Use call_later to ensure UI is ready
+                if hasattr(self.app, 'set_timer'):
+                    self.app.set_timer(0.1, restore_highlight)
+                else:
+                    # Fallback: set immediately
+                    restore_highlight()
+            self._pending_highlight_index = None
+        else:
+            self._last_highlighted = None  # Reset highlighting when files are updated
         
         if not unstaged_files:
             from rich.text import Text
@@ -482,6 +503,11 @@ class ChangesPane(ListView):
         # Get the file to stage
         file_status = self._files[selected_index]
         file_path = file_status.path
+        
+        # Store the current index to restore highlight after staging
+        # If we're at the last item, stay at the last item (which will be the previous one after staging)
+        # Otherwise, stay at the same index (which will be the next item after staging)
+        self._pending_highlight_index = selected_index
         
         # Get app instance and delegate to handler
         app = self.app
@@ -2630,6 +2656,9 @@ class PatchPane(Static):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Patch"
+        self._current_file_path: str | None = None  # Track currently displayed file
+        self._current_file_staged: bool = False  # Track if current file is staged
+        self._current_file_untracked: bool = False  # Track if current file is untracked
     
     def show_commit_info(self, commit: CommitInfo, diff_text: str, git_service=None) -> None:
         """
@@ -3206,7 +3235,7 @@ class PatchPane(Static):
     
     def show_file_info(self, file_path: str, diff_text: str, stat_text: str = "", staged: bool = False, untracked: bool = False) -> None:
         """Show file diff in the patch pane with proper color coding.
-        
+
         Args:
             file_path: Path to the file.
             diff_text: Git diff output for the file.
@@ -3214,9 +3243,14 @@ class PatchPane(Static):
             staged: Whether this is a staged diff.
             untracked: Whether the file is untracked.
         """
+        # Track current file for auto-update on stage/unstage
+        self._current_file_path = file_path
+        self._current_file_staged = staged
+        self._current_file_untracked = untracked
+        
         import re
         from rich.text import Text
-        
+
         # Create file header
         full_content = Text()
         

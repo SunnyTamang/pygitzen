@@ -43,6 +43,16 @@ class FileActionHandler:
             )
             
             if result.returncode == 0:
+                # Update patch pane if this file is currently displayed
+                if (hasattr(self.app, 'patch_pane') and 
+                    hasattr(self.app.patch_pane, '_current_file_path') and
+                    self.app.patch_pane._current_file_path == file_path and
+                    not self.app.patch_pane._current_file_staged):
+                    # File is currently shown and was unstaged, now it's staged - update patch pane
+                    if hasattr(self.app, 'file_service'):
+                        diff_text, stat_text = self.app.file_service.get_file_diff(file_path, staged=True, untracked=False)
+                        self.app.patch_pane.show_file_info(file_path, diff_text, stat_text, staged=True, untracked=False)
+                
                 # Refresh file status
                 self.app.load_file_status_background()
                 # Show notification
@@ -79,6 +89,20 @@ class FileActionHandler:
             )
             
             if result.returncode == 0:
+                # Update patch pane if this file is currently displayed
+                if (hasattr(self.app, 'patch_pane') and 
+                    hasattr(self.app.patch_pane, '_current_file_path') and
+                    self.app.patch_pane._current_file_path == file_path and
+                    self.app.patch_pane._current_file_staged):
+                    # File is currently shown and was staged, now it's unstaged - update patch pane
+                    if hasattr(self.app, 'file_service'):
+                        # Check if file is untracked
+                        files = self.app.git.get_file_status()
+                        file_status = next((f for f in files if f.path == file_path), None)
+                        untracked = file_status.status == "untracked" if file_status else False
+                        diff_text, stat_text = self.app.file_service.get_file_diff(file_path, staged=False, untracked=untracked)
+                        self.app.patch_pane.show_file_info(file_path, diff_text, stat_text, staged=False, untracked=untracked)
+                
                 # Refresh file status
                 self.app.load_file_status_background()
                 # Show notification
