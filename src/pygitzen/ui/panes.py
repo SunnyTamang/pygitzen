@@ -223,6 +223,7 @@ class StagedPane(ListView):
         self.show_cursor = False
         self._files: list[FileStatus] = []  # Store files for access by index
         self._last_highlighted: int | None = None  # Track highlighted changes
+        self._pending_highlight_index: int | None = None  # Store index to highlight after update
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the staged files list."""
@@ -236,7 +237,27 @@ class StagedPane(ListView):
         
         # Store filtered files for access by index
         self._files = staged_files
-        self._last_highlighted = None  # Reset highlighting when files are updated
+        
+        # Restore highlight position if pending (after unstaging a file)
+        if self._pending_highlight_index is not None:
+            target_index = self._pending_highlight_index
+            # If target index is out of bounds, use the last item or 0
+            if target_index >= len(staged_files):
+                target_index = max(0, len(staged_files) - 1) if staged_files else None
+            if target_index is not None and target_index < len(staged_files):
+                # Set index and highlight after a brief delay to ensure UI is updated
+                def restore_highlight():
+                    self.index = target_index
+                    self._update_highlighting(target_index)
+                # Use call_later to ensure UI is ready
+                if hasattr(self.app, 'set_timer'):
+                    self.app.set_timer(0.1, restore_highlight)
+                else:
+                    # Fallback: set immediately
+                    restore_highlight()
+            self._pending_highlight_index = None
+        else:
+            self._last_highlighted = None  # Reset highlighting when files are updated
         
         if not staged_files:
             from rich.text import Text
@@ -282,6 +303,11 @@ class StagedPane(ListView):
         # Get the file to unstage
         file_status = self._files[selected_index]
         file_path = file_status.path
+        
+        # Store the current index to restore highlight after unstaging
+        # If we're at the last item, stay at the last item (which will be the previous one after unstaging)
+        # Otherwise, stay at the same index (which will be the next item after unstaging)
+        self._pending_highlight_index = selected_index
         
         # Get app instance and delegate to handler
         app = self.app
