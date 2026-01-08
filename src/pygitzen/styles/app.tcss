@@ -274,6 +274,18 @@ ListItem {
     text-style: bold;
 }
 
+#branches-pane ListItem.highlighted-branch {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#branches-pane ListItem.highlighted-branch:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
 /* Selected/highlighted item styling for stash pane */
 #stash-pane ListItem.--highlight {
     background: #357ABD; /* blue for strong contrast */
@@ -314,6 +326,31 @@ ListItem {
     color: white;
 }
 
+/* Highlighted file styling for staged and changes panes */
+#staged-pane ListItem.highlighted-file {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#staged-pane ListItem.highlighted-file:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#changes-pane ListItem.highlighted-file {
+    background: #357ABD;
+    color: #ffffff;
+    text-style: bold;
+}
+
+#changes-pane ListItem.highlighted-file:focus {
+    background: #2f6aa3;
+    color: #ffffff;
+    text-style: bold;
+}
+
 Panel {
     padding: 1;
     background: #1e1e1e;
@@ -338,11 +375,26 @@ Static {
     background: transparent;
     color: #ffffff;
 }
+
+#branches-pane ListItem.highlighted-branch > Static {
+    background: transparent;
+    color: #ffffff;
+}
 #stash-pane ListItem.--highlight > Static {
     background: transparent;
     color: #ffffff;
 }
 #stash-pane ListItem.highlighted-stash > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
+#staged-pane ListItem.highlighted-file > Static {
+    background: transparent;
+    color: #ffffff;
+}
+
+#changes-pane ListItem.highlighted-file > Static {
     background: transparent;
     color: #ffffff;
 }

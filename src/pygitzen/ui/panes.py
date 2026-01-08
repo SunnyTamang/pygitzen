@@ -222,6 +222,7 @@ class StagedPane(ListView):
         self.border_title = "Staged Changes"
         self.show_cursor = False
         self._files: list[FileStatus] = []  # Store files for access by index
+        self._last_highlighted: int | None = None  # Track highlighted changes
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the staged files list."""
@@ -235,6 +236,7 @@ class StagedPane(ListView):
         
         # Store filtered files for access by index
         self._files = staged_files
+        self._last_highlighted = None  # Reset highlighting when files are updated
         
         if not staged_files:
             from rich.text import Text
@@ -315,12 +317,15 @@ class StagedPane(ListView):
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""
+        # Update highlighting for mouse clicks
+        self._update_highlighting(index)
+        
         if index is not None and 0 <= index < len(self._files):
             file_status = self._files[index]
             file_path = file_status.path
             
-            # Determine if file is staged and untracked
-            staged = file_status.staged
+            # For StagedPane, all files are staged
+            staged = True
             untracked = file_status.status == "untracked"
             
             # Get app instance and show file diff
@@ -335,6 +340,73 @@ class StagedPane(ListView):
                 
                 # Show file diff
                 app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
+            
+            # Scroll to selected item to ensure it's visible
+            try:
+                if index < len(self.children):
+                    item = self.children[index]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) and auto-show file diff."""
+        # Update highlighting
+        self._update_highlighting(highlighted)
+        
+        # Arrow keys update highlighted, update patch
+        if highlighted is not None and 0 <= highlighted < len(self._files):
+            file_status = self._files[highlighted]
+            file_path = file_status.path
+            
+            # For StagedPane, all files are staged
+            staged = True
+            untracked = file_status.status == "untracked"
+            
+            # Get app instance and show file diff
+            app = self.app
+            if app and hasattr(app, 'file_actions'):
+                # Switch to patch view
+                if hasattr(app, '_view_mode'):
+                    app._view_mode = "patch"
+                if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                    app.patch_pane.styles.display = "block"
+                    app.log_pane.styles.display = "none"
+                
+                # Show file diff
+                app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
+            
+            # Scroll to highlighted item to ensure it's visible
+            try:
+                if highlighted < len(self.children):
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-file")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-file")
+                    self._last_highlighted = index
+            except:
+                pass
+
 
 
 
@@ -350,6 +422,7 @@ class ChangesPane(ListView):
         self.border_title = "Changes"
         self.show_cursor = False
         self._files: list[FileStatus] = []  # Store files for access by index
+        self._last_highlighted: int | None = None  # Track highlighted changes
     
     def update_files(self, files: list[FileStatus]) -> None:
         """Update the unstaged files list."""
@@ -367,6 +440,7 @@ class ChangesPane(ListView):
         
         # Store filtered files for access by index
         self._files = unstaged_files
+        self._last_highlighted = None  # Reset highlighting when files are updated
         
         if not unstaged_files:
             from rich.text import Text
@@ -443,12 +517,15 @@ class ChangesPane(ListView):
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""
+        # Update highlighting for mouse clicks
+        self._update_highlighting(index)
+        
         if index is not None and 0 <= index < len(self._files):
             file_status = self._files[index]
             file_path = file_status.path
             
-            # Determine if file is staged and untracked
-            staged = file_status.staged
+            # For ChangesPane, files are unstaged (show unstaged diff by default)
+            staged = False
             untracked = file_status.status == "untracked"
             
             # Get app instance and show file diff
@@ -463,8 +540,72 @@ class ChangesPane(ListView):
                 
                 # Show file diff
                 app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
-
-
+            
+            # Scroll to selected item to ensure it's visible
+            try:
+                if index < len(self.children):
+                    item = self.children[index]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) and auto-show file diff."""
+        # Update highlighting
+        self._update_highlighting(highlighted)
+        
+        # Arrow keys update highlighted, update patch
+        if highlighted is not None and 0 <= highlighted < len(self._files):
+            file_status = self._files[highlighted]
+            file_path = file_status.path
+            
+            # For ChangesPane, files are unstaged (show unstaged diff by default)
+            staged = False
+            untracked = file_status.status == "untracked"
+            
+            # Get app instance and show file diff
+            app = self.app
+            if app and hasattr(app, 'file_actions'):
+                # Switch to patch view
+                if hasattr(app, '_view_mode'):
+                    app._view_mode = "patch"
+                if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                    app.patch_pane.styles.display = "block"
+                    app.log_pane.styles.display = "none"
+                
+                # Show file diff
+                app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
+            
+            # Scroll to highlighted item to ensure it's visible
+            try:
+                if highlighted < len(self.children):
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-file")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-file")
+                    self._last_highlighted = index
+            except:
+                pass
 
 
 # BranchesPane
@@ -488,6 +629,7 @@ class BranchesPane(ListView):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.border_title = "Local branches"
+        self._last_highlighted: int | None = None  # Track highlighted changes
     
     def action_new_branch(self) -> None:
         """Delegate new_branch action to the app.
@@ -521,6 +663,55 @@ class BranchesPane(ListView):
         app = self.app
         if app and hasattr(app, 'action_rename_branch'):
             app.action_rename_branch()
+    
+    def watch_highlighted(self, highlighted: int | None) -> None:
+        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        # Update highlighting
+        self._update_highlighting(highlighted)
+        
+        # Scroll to highlighted item to ensure it's visible
+        try:
+            if highlighted is not None and highlighted < len(self.children):
+                item = self.children[highlighted]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def watch_index(self, index: int | None) -> None:
+        """Watch for index changes to update visual highlighting."""
+        # Update highlighting for mouse clicks
+        self._update_highlighting(index)
+        
+        # Scroll to selected item to ensure it's visible
+        try:
+            if index is not None and index < len(self.children):
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
+    
+    def _update_highlighting(self, index: int | None) -> None:
+        """Update visual highlighting by adding/removing classes."""
+        # Remove highlight from previous item
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-branch")
+            except:
+                pass
+        
+        # Add highlight to current item
+        if index is not None and index < len(self.children):
+            try:
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    item.add_class("highlighted-branch")
+                    self._last_highlighted = index
+            except:
+                pass
 
     def action_select(self) -> None:
         """Handle select action (Enter/Space) for branch selection.
@@ -543,6 +734,7 @@ class BranchesPane(ListView):
                 'behind', 'ahead', 'synced', 'upstream'
         """
         self.clear()
+        self._last_highlighted = None  # Reset highlighting when branches are updated
         if sync_status is None:
             sync_status = {}
         
@@ -858,6 +1050,15 @@ class CommitsPane(ListView):
         """Watch for index changes and auto-update patch panel."""
         self._update_patch_for_index(index)
         self._update_highlighting(index)
+        
+        # Scroll to selected item to ensure it's visible
+        try:
+            if index is not None and index < len(self.children):
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
@@ -865,6 +1066,14 @@ class CommitsPane(ListView):
         if highlighted is not None:
             self._update_patch_for_index(highlighted)
             self._update_highlighting(highlighted)
+            # Scroll to highlighted item to ensure it's visible
+            try:
+                if highlighted < len(self.children):
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
@@ -896,6 +1105,7 @@ class CommitsPane(ListView):
     
     def set_commits(self, commits: list[CommitInfo]) -> None:
         self.clear()
+        self._last_highlighted = None  # Reset highlighting when commits are updated
         self._last_highlighted = None  # Reset highlighting tracker
         
         # Store commit SHAs and commit info for in-place updates
@@ -1217,6 +1427,15 @@ class StashPane(ListView):
         """Watch for index changes and auto-update patch panel."""
         self._update_patch_for_index(index)
         self._update_highlighting(index)
+        
+        # Scroll to selected item to ensure it's visible
+        try:
+            if index is not None and index < len(self.children):
+                item = self.children[index]
+                if isinstance(item, ListItem):
+                    self.scroll_to_widget(item, animate=False)
+        except Exception:
+            pass
     
     def watch_highlighted(self, highlighted: int | None) -> None:
         """Watch for highlighted changes (arrow keys) and auto-update patch panel."""
@@ -1224,6 +1443,14 @@ class StashPane(ListView):
         if highlighted is not None:
             self._update_patch_for_index(highlighted)
             self._update_highlighting(highlighted)
+            # Scroll to highlighted item to ensure it's visible
+            try:
+                if highlighted < len(self.children):
+                    item = self.children[highlighted]
+                    if isinstance(item, ListItem):
+                        self.scroll_to_widget(item, animate=False)
+            except Exception:
+                pass
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
