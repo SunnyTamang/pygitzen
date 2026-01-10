@@ -1236,7 +1236,7 @@ class CommitsPane(ListView):
             self._update_highlighting(highlighted)
             # Scroll to highlighted item to ensure it's visible
             try:
-                if highlighted < len(self.children):
+                if highlighted is not None and 0 <= highlighted < len(self.children):
                     item = self.children[highlighted]
                     if isinstance(item, ListItem):
                         self.scroll_to_widget(item, animate=False)
@@ -1267,9 +1267,11 @@ class CommitsPane(ListView):
     def _update_patch_for_index(self, index: int | None) -> None:
         """Update patch panel for the given index."""
         if index is not None and index != self._last_index and self._parent_app:
-            self._last_index = index
-            self._parent_app.selected_commit_index = index
-            self._parent_app.show_commit_diff(index)
+            # Only show patch if pane has focus (user is navigating, not initial load)
+            if self.has_focus:
+                self._last_index = index
+                self._parent_app.selected_commit_index = index
+                self._parent_app.show_commit_diff(index)
     
     def set_commits(self, commits: list[CommitInfo]) -> None:
         self.clear()

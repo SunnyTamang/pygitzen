@@ -3242,6 +3242,10 @@ class PygitzenApp(App):
 
     def show_commit_diff(self, index: int) -> None:
         if 0 <= index < len(self.commits):
+             # Switch to patch view when commit is selected
+            self._view_mode = "patch"
+            self.log_pane.styles.display = "none"
+            self.patch_pane.styles.display = "block"
             import sys
             diff_start = time.perf_counter()
             ci = self.commits[index]
