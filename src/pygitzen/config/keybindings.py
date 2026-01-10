@@ -113,12 +113,14 @@ class KeybindingConfig:
                 Binding("c", "commit", "Commit"),
                 Binding("s", "stash", "Stash"),
                 Binding("S", "stash_options", "Stash Options"),
+                Binding("d", "discard_file", "Discard"),
             ],
             "changes": [
                 Binding("space", "toggle_stage", "Stage"),
                 Binding("c", "commit", "Commit"),
                 Binding("s", "stash", "Stash"),
                 Binding("S", "stash_options", "Stash Options"),
+                Binding("d", "discard_file", "Discard"),
             ],
         }
 

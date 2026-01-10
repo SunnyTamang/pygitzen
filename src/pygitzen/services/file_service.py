@@ -82,4 +82,55 @@ class FileService:
             return (diff_text, stat_text)
         except Exception:
             return ("", "")
+    
+    def discard_file_changes(self, file_path: str, staged: bool = False, untracked: bool = False) -> dict:
+        """Discard changes for a file.
+        
+        Args:
+            file_path: Path to the file.
+            staged: Whether to discard staged changes (True) or unstaged changes (False).
+            untracked: Whether the file is untracked.
+        
+        Returns:
+            Dictionary with 'success' (bool) and 'error' (str) keys.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            # For untracked files, remove the file
+            if untracked:
+                from pathlib import Path
+                full_path = self.repo_path / file_path
+                if full_path.exists():
+                    full_path.unlink()
+                    return {"success": True, "error": ""}
+                else:
+                    return {"success": False, "error": "File does not exist"}
+            
+            # For staged changes, use git reset
+            if staged:
+                result = subprocess.run(
+                    ["git", "reset", "--", file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=repo_path_str,
+                )
+            else:
+                # For unstaged changes, use git checkout
+                result = subprocess.run(
+                    ["git", "checkout", "--", file_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    cwd=repo_path_str,
+                )
+            
+            if result.returncode == 0:
+                return {"success": True, "error": ""}
+            else:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": error_msg}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 

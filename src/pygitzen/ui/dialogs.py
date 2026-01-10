@@ -1909,3 +1909,179 @@ class StashConfirmDialog(ModalScreen[bool]):
         """Dismiss the dialog when Escape is pressed."""
         self.dismiss(False)
 
+
+class DiscardFileDialog(ModalScreen[bool]):
+    """Confirmation dialog for discarding file changes."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    DiscardFileDialog {
+        align: center middle;
+    }
+
+    DiscardFileDialog #discard-file-dialog {
+        width: 70%;
+        min-width: 55;
+        max-width: 80;
+        height: auto;
+        min-height: 12;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    DiscardFileDialog #discard-file-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    DiscardFileDialog #discard-file-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    DiscardFileDialog #discard-file-message-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        padding: 1;
+        border: solid $primary;
+        background: $panel;
+    }
+
+    DiscardFileDialog #discard-file-message {
+        width: 100%;
+        height: auto;
+        color: $text;
+        text-align: center;
+    }
+
+    DiscardFileDialog #discard-file-info {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        background: $background;
+        border: solid $primary;
+        border-title-align: left;
+        border-title-color: $accent;
+    }
+
+    DiscardFileDialog #discard-file-name {
+        width: 100%;
+        height: auto;
+        color: $accent;
+        text-style: bold;
+        text-align: center;
+        margin-bottom: 1;
+    }
+
+    DiscardFileDialog #discard-file-warning {
+        width: 100%;
+        height: auto;
+        color: $warning;
+        text-align: center;
+        margin-top: 1;
+        text-style: italic;
+    }
+
+    DiscardFileDialog #discard-file-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+
+    DiscardFileDialog #cancel-button {
+        margin-right: 1;
+        min-width: 12;
+    }
+
+    DiscardFileDialog #discard-button {
+        margin-left: 1;
+        min-width: 12;
+    }
+    """
+
+    def __init__(
+        self,
+        file_path: str,
+        change_type: str = "changes",
+        title: str = "Discard Changes",
+    ) -> None:
+        """Initialize discard file confirmation dialog.
+        
+        Args:
+            file_path: Path to the file.
+            change_type: Type of changes ("staged", "unstaged", "untracked", or "changes").
+            title: Dialog title.
+        """
+        super().__init__()
+        self.file_path = file_path
+        self.change_type = change_type
+        self.title_text = title
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="discard-file-dialog"):
+            yield Static(self.title_text, id="discard-file-header")
+            yield Static("Please confirm this action", id="discard-file-subtitle")
+            
+            with Container(id="discard-file-message-container"):
+                change_desc = {
+                    "staged": "staged changes",
+                    "unstaged": "unstaged changes",
+                    "untracked": "untracked file",
+                    "changes": "changes"
+                }.get(self.change_type, "changes")
+                
+                yield Static(
+                    f"Are you sure you want to discard {change_desc} for this file?",
+                    id="discard-file-message"
+                )
+                
+                with Container(id="discard-file-info"):
+                    yield Static(self.file_path, id="discard-file-name")
+                
+                yield Static(
+                    "This action cannot be undone.",
+                    id="discard-file-warning"
+                )
+            
+            with Container(id="discard-file-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Discard", id="discard-button", variant="error")
+
+    def on_mount(self) -> None:
+        """Focus discard button when mounted."""
+        try:
+            self.query_one("#discard-button", Button).focus()
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses."""
+        if event.button.id == "discard-button":
+            self.dismiss(True)
+        elif event.button.id == "cancel-button":
+            self.dismiss(False)
+
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(False)
+

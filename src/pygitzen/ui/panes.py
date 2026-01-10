@@ -341,6 +341,35 @@ class StagedPane(ListView):
         if app and hasattr(app, 'stash_actions'):
             app.stash_actions.stash_options()
     
+    def action_discard_file(self) -> None:
+        """Discard changes for the selected file.
+        
+        Shows confirmation dialog before discarding.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to discard
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # For StagedPane, files are staged
+        change_type = "staged"
+        
+        # Get app instance and show confirmation dialog
+        app = self.app
+        if app:
+            from ..ui.dialogs import DiscardFileDialog
+            dialog = DiscardFileDialog(file_path, change_type=change_type, title="Discard Staged Changes")
+            
+            def handle_discard(confirmed: bool) -> None:
+                if confirmed and hasattr(app, 'file_actions'):
+                    app.file_actions.discard_file(file_path, staged=True, untracked=False)
+            
+            app.push_screen(dialog, handle_discard)
+    
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""
         # Update highlighting for mouse clicks
@@ -566,6 +595,36 @@ class ChangesPane(ListView):
         app = self.app
         if app and hasattr(app, 'stash_actions'):
             app.stash_actions.stash_options()
+    
+    def action_discard_file(self) -> None:
+        """Discard changes for the selected file.
+        
+        Shows confirmation dialog before discarding.
+        """
+        # Get selected file index
+        selected_index = self.index
+        if selected_index is None or selected_index < 0 or selected_index >= len(self._files):
+            return
+        
+        # Get the file to discard
+        file_status = self._files[selected_index]
+        file_path = file_status.path
+        
+        # For ChangesPane, files are unstaged or untracked
+        change_type = "untracked" if file_status.status == "untracked" else "unstaged"
+        
+        # Get app instance and show confirmation dialog
+        app = self.app
+        if app:
+            from ..ui.dialogs import DiscardFileDialog
+            dialog = DiscardFileDialog(file_path, change_type=change_type, title="Discard Changes")
+            
+            def handle_discard(confirmed: bool) -> None:
+                if confirmed and hasattr(app, 'file_actions'):
+                    untracked = file_status.status == "untracked"
+                    app.file_actions.discard_file(file_path, staged=False, untracked=untracked)
+            
+            app.push_screen(dialog, handle_discard)
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""

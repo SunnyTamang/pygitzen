@@ -142,4 +142,75 @@ class FileActionHandler:
             self.app.patch_pane.show_file_info(file_path, diff_text, stat_text, staged=staged, untracked=untracked)
         else:
             self.app.notify("Patch pane not available", severity="error", timeout=2.0)
+    
+    def discard_file(self, file_path: str, staged: bool = False, untracked: bool = False) -> None:
+        """Discard changes for a file.
+        
+        Args:
+            file_path: Path to the file.
+            staged: Whether to discard staged changes (True) or unstaged changes (False).
+            untracked: Whether the file is untracked.
+        """
+        if not hasattr(self.app, 'file_service'):
+            self.app.notify("File service not available", severity="error", timeout=2.0)
+            return
+        
+        # Get file status to determine what to discard
+        files = self.app.git.get_file_status()
+        file_status = next((f for f in files if f.path == file_path), None)
+        
+        if not file_status:
+            self.app.notify(f"File '{file_path}' not found", severity="error", timeout=2.0)
+            return
+        
+        # Check if file has both staged and unstaged changes
+        # If discarding from StagedPane, only discard staged
+        # If discarding from ChangesPane, discard unstaged (and staged if both exist)
+        is_untracked = file_status.status == "untracked"
+        
+        # For files with both staged and unstaged changes, we need to handle both
+        # Check if file appears in both staged and changes lists
+        has_staged_changes = any(f.path == file_path and f.status in ["staged", "added", "deleted", "renamed", "copied"] for f in files)
+        has_unstaged_changes = any(f.path == file_path and f.status in ["modified", "deleted", "untracked"] for f in files)
+        
+        success = True
+        errors = []
+        
+        # If discarding staged changes, unstage first (git reset)
+        if staged and has_staged_changes:
+            result = self.app.file_service.discard_file_changes(file_path, staged=True, untracked=False)
+            if not result["success"]:
+                success = False
+                errors.append(result.get("error", "Unknown error"))
+        
+        # If discarding unstaged changes (or if file has both and we're discarding from ChangesPane)
+        if (not staged or (has_unstaged_changes and not staged)) and (has_unstaged_changes or is_untracked):
+            result = self.app.file_service.discard_file_changes(file_path, staged=False, untracked=is_untracked)
+            if not result["success"]:
+                success = False
+                errors.append(result.get("error", "Unknown error"))
+        
+        if success:
+            # Clear patch pane if this file is currently displayed
+            if (hasattr(self.app, 'patch_pane') and 
+                hasattr(self.app.patch_pane, '_current_file_path') and
+                self.app.patch_pane._current_file_path == file_path):
+                # Clear the patch pane since file changes are discarded
+                from rich.text import Text
+                self.app.patch_pane.update(Text(f"{file_path} - Changes discarded", style="dim"))
+            
+            # Refresh file status
+            self.app.load_file_status_background()
+            # Show notification
+            change_type = "staged" if staged else "unstaged" if has_unstaged_changes else "untracked"
+            self.app.notify(f"Discarded {change_type} changes: {file_path}", severity="success", timeout=2.0)
+            # Update command log
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Discarded {change_type} changes: {file_path}")
+        else:
+            error_msg = "; ".join(errors) if errors else "Unknown error"
+            self.app.notify(f"Failed to discard changes for '{file_path}': {error_msg}", severity="error", timeout=3.0)
+            # Update command log with error
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Failed to discard changes for '{file_path}': {error_msg}")
 
