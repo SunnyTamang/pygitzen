@@ -170,8 +170,10 @@ class FileActionHandler:
         
         # For files with both staged and unstaged changes, we need to handle both
         # Check if file appears in both staged and changes lists
-        has_staged_changes = any(f.path == file_path and f.status in ["staged", "added", "deleted", "renamed", "copied"] for f in files)
-        has_unstaged_changes = any(f.path == file_path and f.status in ["modified", "deleted", "untracked"] for f in files)
+        # Use the unstaged flag, not just status string, as files with both changes
+        # might have status="staged" but unstaged=True
+        has_staged_changes = any(f.path == file_path and f.staged for f in files)
+        has_unstaged_changes = any(f.path == file_path and (f.unstaged or f.status == "untracked") for f in files)
         
         success = True
         errors = []
@@ -183,8 +185,8 @@ class FileActionHandler:
                 success = False
                 errors.append(result.get("error", "Unknown error"))
         
-        # If discarding unstaged changes (or if file has both and we're discarding from ChangesPane)
-        if (not staged or (has_unstaged_changes and not staged)) and (has_unstaged_changes or is_untracked):
+        # If discarding unstaged changes (from ChangesPane)
+        if not staged and (has_unstaged_changes or is_untracked):
             result = self.app.file_service.discard_file_changes(file_path, staged=False, untracked=is_untracked)
             if not result["success"]:
                 success = False
@@ -201,8 +203,15 @@ class FileActionHandler:
             
             # Refresh file status
             self.app.load_file_status_background()
-            # Show notification
-            change_type = "staged" if staged else "unstaged" if has_unstaged_changes else "untracked"
+            # Show notification - use file_status directly for accurate change type
+            if staged:
+                change_type = "staged"
+            elif is_untracked:
+                change_type = "untracked"
+            elif file_status.unstaged:
+                change_type = "unstaged"
+            else:
+                change_type = "unstaged"  # Default fallback
             self.app.notify(f"Discarded {change_type} changes: {file_path}", severity="success", timeout=2.0)
             # Update command log
             if hasattr(self.app, 'command_log_pane'):
