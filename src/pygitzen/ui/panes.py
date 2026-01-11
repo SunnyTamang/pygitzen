@@ -238,6 +238,9 @@ class StagedPane(ListView):
         # Store filtered files for access by index
         self._files = staged_files
         
+        # Store original files list to check for files in both panes
+        self._all_files = files
+        
         # Restore highlight position if pending (after unstaging a file)
         if self._pending_highlight_index is not None:
             target_index = self._pending_highlight_index
@@ -288,6 +291,22 @@ class StagedPane(ListView):
             
             # Add file path
             text.append(file_status.path, style="white")
+            
+            # Check if this file also has unstaged changes (appears in both panes)
+            try:
+                # Check original files list to see if this file also has unstaged changes
+                if hasattr(self, '_all_files') and self._all_files:
+                    # Find the file in the original list
+                    for f in self._all_files:
+                        if f.path == file_status.path:
+                            # Check if it has unstaged changes
+                            if f.unstaged or (not f.staged and f.status in ["modified", "deleted"]):
+                                text.append(" [±]", style="dim white")
+                            break
+            except Exception:
+                # Silently ignore errors - don't break existing functionality
+                pass
+            
             self.append(ListItem(Static(text)))
     
     def action_toggle_stage(self) -> None:
@@ -497,6 +516,9 @@ class ChangesPane(ListView):
         # Store filtered files for access by index
         self._files = unstaged_files
         
+        # Store original files list to check for files in both panes
+        self._all_files = files
+        
         # Restore highlight position if pending (after staging a file)
         if self._pending_highlight_index is not None:
             target_index = self._pending_highlight_index
@@ -530,19 +552,38 @@ class ChangesPane(ListView):
             text = Text()
             
             # Add status indicator based on Git standard status letters
-            if file_status.status == "modified":
-                text.append("M ", style="yellow")  # Modified but not staged
-            elif file_status.status == "untracked":
+            # Check unstaged flag first, as files with both staged and unstaged changes
+            # might have status="staged" but still need "M" indicator
+            if file_status.status == "untracked":
                 text.append("U ", style="cyan")  # Untracked
             elif file_status.status == "deleted":
                 text.append("D ", style="red")  # Deleted but not staged
             elif file_status.status == "ignored":
                 text.append("! ", style="magenta")  # Ignored
+            elif file_status.unstaged or file_status.status == "modified":
+                # Show "M" for files with unstaged changes (including those with both staged and unstaged)
+                text.append("M ", style="yellow")  # Modified but not staged (or has unstaged changes)
             else:
                 text.append("  ", style="white")
             
             # Add file path
             text.append(file_status.path, style="white")
+            
+            # Check if this file also has staged changes (appears in both panes)
+            try:
+                # Check original files list to see if this file also has staged changes
+                if hasattr(self, '_all_files') and self._all_files:
+                    # Find the file in the original list
+                    for f in self._all_files:
+                        if f.path == file_status.path:
+                            # Check if it has staged changes
+                            if f.staged and f.status in ["modified", "staged", "deleted", "renamed", "copied", "submodule"]:
+                                text.append(" [±]", style="dim white")
+                            break
+            except Exception:
+                # Silently ignore errors - don't break existing functionality
+                pass
+            
             self.append(ListItem(Static(text)))
     
     def action_toggle_stage(self) -> None:
