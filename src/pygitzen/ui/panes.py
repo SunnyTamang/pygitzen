@@ -2218,7 +2218,19 @@ class StashPane(ListView):
             
             # Auto-show stash diff for the highlighted item
             if 0 <= current_index < len(self._stashes):
-                self._update_patch_for_index(current_index)
+                # Explicitly show stash diff (similar to how changes pane shows file diff)
+                # This ensures the diff is shown even if _last_index is the same
+                if self._parent_app:
+                    # Switch to patch view
+                    if hasattr(self._parent_app, '_view_mode'):
+                        self._parent_app._view_mode = "patch"
+                    if hasattr(self._parent_app, 'patch_pane') and hasattr(self._parent_app, 'log_pane'):
+                        self._parent_app.patch_pane.styles.display = "block"
+                        self._parent_app.log_pane.styles.display = "none"
+                    # Show stash diff directly
+                    self._parent_app.show_stash_diff(current_index)
+                    # Update _last_index to track that we've shown this stash
+                    self._last_index = current_index
     
     def on_blur(self) -> None:
         """Handle pane losing focus - remove highlighting (but preserve _last_highlighted)."""
