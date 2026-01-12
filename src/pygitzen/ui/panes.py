@@ -363,7 +363,7 @@ class StagedPane(ListView):
     def action_discard_file(self) -> None:
         """Discard changes for the selected file.
         
-        Shows confirmation dialog before discarding.
+        Shows options dialog with discard choices.
         """
         # Get selected file index
         selected_index = self.index
@@ -374,20 +374,69 @@ class StagedPane(ListView):
         file_status = self._files[selected_index]
         file_path = file_status.path
         
-        # For StagedPane, files are staged
-        change_type = "staged"
-        
-        # Get app instance and show confirmation dialog
+        # Get app instance and show options dialog
         app = self.app
         if app:
-            from ..ui.dialogs import DiscardFileDialog
-            dialog = DiscardFileDialog(file_path, change_type=change_type, title="Discard Staged Changes")
+            from ..ui.dialogs import DiscardOptionsDialog, DiscardAllConfirmDialog, DiscardFileDialog
+            # Check if there are both staged and unstaged files
+            files = app.git.get_file_status()
+            has_staged = any(f.staged for f in files)
+            has_unstaged = any(f.unstaged or f.status == "untracked" for f in files)
+            dialog = DiscardOptionsDialog(file_path, pane_type="staged", has_staged=has_staged, has_unstaged=has_unstaged)
             
-            def handle_discard(confirmed: bool) -> None:
-                if confirmed and hasattr(app, 'file_actions'):
-                    app.file_actions.discard_file(file_path, staged=True, untracked=False)
+            def handle_option(option: str | None) -> None:
+                if not option or not hasattr(app, 'file_actions'):
+                    return
+                
+                if option == "file_staged":
+                    # Single file, staged only - use existing simple confirmation
+                    confirm_dialog = DiscardFileDialog(file_path, change_type="staged", title="Discard Staged Changes")
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_file(file_path, staged=True, untracked=False)
+                    app.push_screen(confirm_dialog, handle_confirm)
+                
+                elif option == "all_staged":
+                    # All staged files - show confirmation with file list
+                    files = app.git.get_file_status()
+                    staged_files = [f for f in files if f.staged]
+                    if not staged_files:
+                        app.notify("No staged changes to discard", severity="warning", timeout=2.0)
+                        return
+                    
+                    file_paths = [f.path for f in staged_files]
+                    confirm_dialog = DiscardAllConfirmDialog(
+                        title="Discard All Staged Changes",
+                        message=f"Are you sure you want to discard staged changes for {len(staged_files)} file(s)?",
+                        file_list=file_paths,
+                        file_count=len(staged_files)
+                    )
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_all_staged_changes()
+                    app.push_screen(confirm_dialog, handle_confirm)
+                
+                elif option == "all_both":
+                    # All staged and unstaged files - show confirmation with file list
+                    files = app.git.get_file_status()
+                    all_changed_files = [f for f in files if f.staged or f.unstaged or f.status in ["modified", "untracked", "deleted"]]
+                    if not all_changed_files:
+                        app.notify("No changes to discard", severity="warning", timeout=2.0)
+                        return
+                    
+                    file_paths = [f.path for f in all_changed_files]
+                    confirm_dialog = DiscardAllConfirmDialog(
+                        title="Discard All Changes",
+                        message=f"Are you sure you want to discard ALL changes (staged and unstaged) for {len(all_changed_files)} file(s)?",
+                        file_list=file_paths,
+                        file_count=len(all_changed_files)
+                    )
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_all_changes()
+                    app.push_screen(confirm_dialog, handle_confirm)
             
-            app.push_screen(dialog, handle_discard)
+            app.push_screen(dialog, handle_option)
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""
@@ -640,7 +689,7 @@ class ChangesPane(ListView):
     def action_discard_file(self) -> None:
         """Discard changes for the selected file.
         
-        Shows confirmation dialog before discarding.
+        Shows options dialog with discard choices.
         """
         # Get selected file index
         selected_index = self.index
@@ -651,21 +700,71 @@ class ChangesPane(ListView):
         file_status = self._files[selected_index]
         file_path = file_status.path
         
-        # For ChangesPane, files are unstaged or untracked
-        change_type = "untracked" if file_status.status == "untracked" else "unstaged"
-        
-        # Get app instance and show confirmation dialog
+        # Get app instance and show options dialog
         app = self.app
         if app:
-            from ..ui.dialogs import DiscardFileDialog
-            dialog = DiscardFileDialog(file_path, change_type=change_type, title="Discard Changes")
+            from ..ui.dialogs import DiscardOptionsDialog, DiscardAllConfirmDialog, DiscardFileDialog
+            # Check if there are both staged and unstaged files
+            files = app.git.get_file_status()
+            has_staged = any(f.staged for f in files)
+            has_unstaged = any(f.unstaged or f.status == "untracked" for f in files)
+            dialog = DiscardOptionsDialog(file_path, pane_type="changes", has_staged=has_staged, has_unstaged=has_unstaged)
             
-            def handle_discard(confirmed: bool) -> None:
-                if confirmed and hasattr(app, 'file_actions'):
+            def handle_option(option: str | None) -> None:
+                if not option or not hasattr(app, 'file_actions'):
+                    return
+                
+                if option == "file_unstaged":
+                    # Single file, unstaged only - use existing simple confirmation
                     untracked = file_status.status == "untracked"
-                    app.file_actions.discard_file(file_path, staged=False, untracked=untracked)
+                    change_type = "untracked" if untracked else "unstaged"
+                    confirm_dialog = DiscardFileDialog(file_path, change_type=change_type, title="Discard Changes")
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_file(file_path, staged=False, untracked=untracked)
+                    app.push_screen(confirm_dialog, handle_confirm)
+                
+                elif option == "all_unstaged":
+                    # All unstaged files - show confirmation with file list
+                    files = app.git.get_file_status()
+                    unstaged_files = [f for f in files if f.unstaged or (not f.staged and f.status in ["modified", "untracked", "deleted"])]
+                    if not unstaged_files:
+                        app.notify("No unstaged changes to discard", severity="warning", timeout=2.0)
+                        return
+                    
+                    file_paths = [f.path for f in unstaged_files]
+                    confirm_dialog = DiscardAllConfirmDialog(
+                        title="Discard All Unstaged Changes",
+                        message=f"Are you sure you want to discard unstaged changes for {len(unstaged_files)} file(s)?",
+                        file_list=file_paths,
+                        file_count=len(unstaged_files)
+                    )
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_all_unstaged_changes()
+                    app.push_screen(confirm_dialog, handle_confirm)
+                
+                elif option == "all_both":
+                    # All staged and unstaged files - show confirmation with file list
+                    files = app.git.get_file_status()
+                    all_changed_files = [f for f in files if f.staged or f.unstaged or f.status in ["modified", "untracked", "deleted"]]
+                    if not all_changed_files:
+                        app.notify("No changes to discard", severity="warning", timeout=2.0)
+                        return
+                    
+                    file_paths = [f.path for f in all_changed_files]
+                    confirm_dialog = DiscardAllConfirmDialog(
+                        title="Discard All Changes",
+                        message=f"Are you sure you want to discard ALL changes (staged and unstaged) for {len(all_changed_files)} file(s)?",
+                        file_list=file_paths,
+                        file_count=len(all_changed_files)
+                    )
+                    def handle_confirm(confirmed: bool) -> None:
+                        if confirmed:
+                            app.file_actions.discard_all_changes()
+                    app.push_screen(confirm_dialog, handle_confirm)
             
-            app.push_screen(dialog, handle_discard)
+            app.push_screen(dialog, handle_option)
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes and auto-show file diff."""

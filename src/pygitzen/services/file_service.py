@@ -133,4 +133,139 @@ class FileService:
                 return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    def discard_all_staged_changes(self) -> dict:
+        """Discard all staged changes in the repository.
+        
+        Returns:
+            Dictionary with 'success' (bool) and 'error' (str) keys.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            result = subprocess.run(
+                ["git", "reset", "--"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if result.returncode == 0:
+                return {"success": True, "error": ""}
+            else:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": error_msg}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def discard_all_unstaged_changes(self) -> dict:
+        """Discard all unstaged changes in the repository.
+        
+        This includes:
+        - Modified tracked files (restored to HEAD)
+        - Deleted tracked files (restored)
+        - Untracked files (removed)
+        
+        Returns:
+            Dictionary with 'success' (bool) and 'error' (str) keys.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            # First, restore tracked files to HEAD state
+            result = subprocess.run(
+                ["git", "checkout", "--", "."],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": error_msg}
+            
+            # Then, remove untracked files and directories
+            clean_result = subprocess.run(
+                ["git", "clean", "-fd"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if clean_result.returncode == 0:
+                return {"success": True, "error": ""}
+            else:
+                # If clean fails but checkout succeeded, still report success
+                # but include warning about untracked files
+                error_msg = clean_result.stderr.strip() or clean_result.stdout.strip() or ""
+                if error_msg:
+                    return {"success": True, "error": f"Untracked files cleanup warning: {error_msg}"}
+                return {"success": True, "error": ""}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def discard_all_changes(self) -> dict:
+        """Discard all staged and unstaged changes in the repository.
+        
+        This includes:
+        - Staged changes (unstaged via git reset)
+        - Modified tracked files (restored to HEAD)
+        - Deleted tracked files (restored)
+        - Untracked files (removed)
+        
+        Returns:
+            Dictionary with 'success' (bool) and 'error' (str) keys.
+        """
+        repo_path_str = str(self.repo_path)
+        
+        try:
+            # First discard staged changes
+            reset_result = subprocess.run(
+                ["git", "reset", "--"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if reset_result.returncode != 0:
+                error_msg = reset_result.stderr.strip() or reset_result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": f"Failed to discard staged changes: {error_msg}"}
+            
+            # Then discard unstaged changes (restore tracked files to HEAD)
+            checkout_result = subprocess.run(
+                ["git", "checkout", "--", "."],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if checkout_result.returncode != 0:
+                error_msg = checkout_result.stderr.strip() or checkout_result.stdout.strip() or "Unknown error"
+                return {"success": False, "error": f"Failed to discard unstaged changes: {error_msg}"}
+            
+            # Finally, remove untracked files and directories
+            clean_result = subprocess.run(
+                ["git", "clean", "-fd"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=repo_path_str,
+            )
+            
+            if clean_result.returncode == 0:
+                return {"success": True, "error": ""}
+            else:
+                # If clean fails but reset/checkout succeeded, still report success
+                # but include warning about untracked files
+                error_msg = clean_result.stderr.strip() or clean_result.stdout.strip() or ""
+                if error_msg:
+                    return {"success": True, "error": f"Untracked files cleanup warning: {error_msg}"}
+                return {"success": True, "error": ""}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 

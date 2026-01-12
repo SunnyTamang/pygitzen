@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from rich import style
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Button, Static, Link, ListView, ListItem, TextArea
 from textual.containers import Container, Horizontal, Vertical
@@ -2085,3 +2086,508 @@ class DiscardFileDialog(ModalScreen[bool]):
         """Dismiss the dialog when Escape is pressed."""
         self.dismiss(False)
 
+
+class DiscardOptionsDialog(ModalScreen[str | None]):
+    """Menu dialog for discard options with radio button interface."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close", show=False),
+        Binding("enter", "confirm", "Confirm", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    DiscardOptionsDialog {
+        align: center middle;
+    }
+
+    DiscardOptionsDialog #discard-options-dialog {
+        width: 75%;
+        min-width: 65;
+        max-width: 85;
+        height: auto;
+        min-height: 18;
+        background: $surface;
+        border: thick $primary;
+        layout: vertical;
+        padding: 2;
+    }
+
+    DiscardOptionsDialog #discard-options-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $text;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $primary;
+    }
+
+    DiscardOptionsDialog #discard-options-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    DiscardOptionsDialog #radio-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        border: solid $primary 30%;
+    }
+
+    DiscardOptionsDialog .radio-option {
+        width: 100%;
+        height: auto;
+        padding: 0 1;
+        margin-bottom: 0;
+        border: none;
+        background: $surface;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    DiscardOptionsDialog .radio-option:focus {
+        background: $primary 10%;
+    }
+
+    DiscardOptionsDialog .radio-option:hover {
+        background: $primary 10%;
+    }
+
+    DiscardOptionsDialog .radio-option.selected {
+        background: $primary 15%;
+    }
+
+    DiscardOptionsDialog .radio-option.selected:focus {
+        background: $primary 20%;
+    }
+
+    DiscardOptionsDialog .radio-option-row {
+        width: 100%;
+        height: auto;
+        layout: horizontal;
+        align: left middle;
+    }
+
+    DiscardOptionsDialog .radio-indicator {
+        width: 3;
+        height: 1;
+        margin-right: 1;
+        text-align: center;
+        content-align: center middle;
+    }
+
+    DiscardOptionsDialog .radio-indicator.selected {
+        color: $primary;
+    }
+
+    DiscardOptionsDialog .radio-label {
+        width: 1fr;
+        color: $text;
+        text-style: bold;
+    }
+
+    DiscardOptionsDialog .radio-label.warning {
+        color: $warning;
+    }
+
+    DiscardOptionsDialog .radio-description {
+        width: 1fr;
+        color: $text-muted;
+        margin-left: 1;
+    }
+
+    DiscardOptionsDialog .radio-description.warning {
+        color: $warning;
+    }
+
+    DiscardOptionsDialog #discard-options-info {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    DiscardOptionsDialog #discard-options-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+    }
+
+    DiscardOptionsDialog #cancel-button {
+        margin-right: 1;
+    }
+
+    DiscardOptionsDialog #confirm-button {
+        min-width: 15;
+    }
+    """
+
+    def __init__(self, file_path: str, pane_type: str, has_staged: bool = False, has_unstaged: bool = False) -> None:
+        """Initialize discard options dialog.
+        
+        Args:
+            file_path: Path to the selected file.
+            pane_type: Either "staged" or "changes" to determine which options to show.
+            has_staged: Whether there are any staged files in the repository.
+            has_unstaged: Whether there are any unstaged files in the repository.
+        """
+        super().__init__()
+        self.file_path = file_path
+        self.pane_type = pane_type
+        self.selected_option: str | None = None
+        
+        # Build options based on pane type
+        if pane_type == "staged":
+            self.options = [
+                ("file_staged", f"Discard staged changes in {file_path}", "Discard only staged changes for this file"),
+                ("all_staged", "Discard all staged changes", "Discard staged changes for ALL files"),
+            ]
+            # Only show "discard all" option if there are both staged and unstaged files
+            if has_staged and has_unstaged:
+                self.options.append(("all_both", "Discard all staged and unstaged changes", "Discard ALL changes for ALL files"))
+        else:  # changes pane
+            self.options = [
+                ("file_unstaged", f"Discard unstaged changes in {file_path}", "Discard only unstaged changes for this file"),
+                ("all_unstaged", "Discard all unstaged changes", "Discard unstaged changes for ALL files"),
+            ]
+            # Only show "discard all" option if there are both staged and unstaged files
+            if has_staged and has_unstaged:
+                self.options.append(("all_both", "Discard all staged and unstaged changes", "Discard ALL changes for ALL files"))
+
+    def compose(self):
+        """Compose the menu."""
+        with Container(id="discard-options-dialog"):
+            yield Static("Discard Options", id="discard-options-header")
+            yield Static("Select a discard option", id="discard-options-subtitle")
+            
+            with Container(id="radio-container"):
+                for option_id, label, description in self.options:
+                    is_warning = option_id in ["all_staged", "all_unstaged", "all_both"]
+                    with Container(classes="radio-option", id=f"option-{option_id}") as option_container:
+                        option_container.can_focus = True
+                        yield Static("○", classes="radio-indicator", id=f"indicator-{option_id}")
+                        label_widget = Static(label, classes="radio-label", id=f"label-{option_id}")
+                        if is_warning:
+                            label_widget.add_class("warning")
+                        yield label_widget
+                        desc_widget = Static(f"  •  {description}", classes="radio-description")
+                        if is_warning:
+                            desc_widget.add_class("warning")
+                        yield desc_widget
+            
+            yield Static("Use ↑↓ to navigate, Enter to confirm, or Escape to cancel", id="discard-options-info")
+            
+            with Container(id="discard-options-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Confirm", id="confirm-button", variant="primary")
+
+    def on_mount(self) -> None:
+        """Focus the first option when mounted."""
+        # Select first option by default
+        if self.options:
+            self._select_option(self.options[0][0])
+            # Focus the first option container
+            try:
+                first_option = self.query_one(f"#option-{self.options[0][0]}")
+                first_option.focus()
+            except Exception:
+                pass
+
+    def on_key(self, event) -> None:
+        """Handle keyboard navigation."""
+        if event.key == "up":
+            self._navigate(-1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "down":
+            self._navigate(1)
+            event.prevent_default()
+            event.stop()
+        elif event.key == "enter" or event.key == " ":
+            if self.selected_option:
+                self.dismiss(self.selected_option)
+            event.prevent_default()
+            event.stop()
+
+    def _navigate(self, direction: int) -> None:
+        """Navigate between options."""
+        current_index = 0
+        if self.selected_option:
+            for i, (option_id, _, _) in enumerate(self.options):
+                if option_id == self.selected_option:
+                    current_index = i
+                    break
+        
+        new_index = (current_index + direction) % len(self.options)
+        new_option_id = self.options[new_index][0]
+        self._select_option(new_option_id)
+        
+        try:
+            option = self.query_one(f"#option-{new_option_id}")
+            option.focus()
+        except Exception:
+            pass
+
+    def _select_option(self, option_id: str) -> None:
+        """Select an option."""
+        # Deselect previous
+        if self.selected_option:
+            try:
+                prev_option = self.query_one(f"#option-{self.selected_option}")
+                prev_indicator = self.query_one(f"#indicator-{self.selected_option}")
+                prev_option.remove_class("selected")
+                prev_indicator.remove_class("selected")
+                prev_indicator.update("○")
+            except Exception:
+                pass
+        
+        # Select new
+        self.selected_option = option_id
+        try:
+            option = self.query_one(f"#option-{option_id}")
+            indicator = self.query_one(f"#indicator-{option_id}")
+            option.add_class("selected")
+            indicator.add_class("selected")
+            indicator.update("●")
+        except Exception:
+            pass
+
+    def on_click(self, event) -> None:
+        """Handle click on option."""
+        # Check if click is within the dialog
+        try:
+            dialog = self.query_one("#discard-options-dialog")
+            dialog_region = dialog.region
+            
+            # If click is outside dialog, just ignore it
+            if not (dialog_region.x <= event.x < dialog_region.x + dialog_region.width and
+                    dialog_region.y <= event.y < dialog_region.y + dialog_region.height):
+                return
+            
+            # Get the widget at the click coordinates
+            clicked_widget = self.screen.get_widget_at(event.x, event.y)
+            if clicked_widget is None:
+                return
+            
+            # Find the option container by traversing up the DOM
+            current = clicked_widget
+            while current and current != self:
+                if hasattr(current, 'has_class') and current.has_class("radio-option"):
+                    if hasattr(current, 'id') and current.id:
+                        option_id = current.id.replace("option-", "")
+                        self._select_option(option_id)
+                        current.focus()
+                        return
+                current = getattr(current, 'parent', None)
+        except Exception:
+            # If we can't determine what was clicked, just ignore
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press."""
+        if event.button.id == "confirm-button":
+            if self.selected_option:
+                self.dismiss(self.selected_option)
+        else:
+            self.dismiss(None)
+
+    def action_confirm(self) -> None:
+        """Confirm selection when Enter is pressed."""
+        if self.selected_option:
+            self.dismiss(self.selected_option)
+
+    def action_dismiss(self) -> None:
+        """Dismiss the modal."""
+        self.dismiss(None)
+
+
+class DiscardAllConfirmDialog(ModalScreen[bool]):
+    """Confirmation dialog for discarding all changes with file list."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Cancel", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    DiscardAllConfirmDialog {
+        align: center middle;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-dialog {
+        width: 75%;
+        min-width: 65;
+        max-width: 85;
+        height: auto;
+        min-height: 20;
+        max-height: 80%;
+        background: $surface;
+        border: thick $warning;
+        layout: vertical;
+        padding: 2;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-header {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        text-style: bold;
+        color: $warning;
+        margin-bottom: 2;
+        padding-bottom: 1;
+        border-bottom: solid $warning;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-subtitle {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 2;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-message-container {
+        width: 100%;
+        height: auto;
+        layout: vertical;
+        margin-bottom: 2;
+        padding: 1;
+        border: solid $warning;
+        background: $panel;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-message {
+        width: 100%;
+        height: auto;
+        color: $text;
+        text-align: center;
+        margin-bottom: 1;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-file-count {
+        width: 100%;
+        height: auto;
+        color: $accent;
+        text-style: bold;
+        text-align: center;
+        margin-bottom: 1;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-file-list {
+        width: 100%;
+        height: auto;
+        max-height: 20;
+        overflow-y: auto;
+        padding: 1;
+        background: $background;
+        border: solid $primary;
+        border-title-align: left;
+        border-title-color: $accent;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-warning {
+        width: 100%;
+        height: auto;
+        color: $warning;
+        text-align: center;
+        margin-top: 1;
+        text-style: italic;
+        text-style: bold;
+    }
+
+    DiscardAllConfirmDialog #discard-all-confirm-button-container {
+        width: 100%;
+        layout: horizontal;
+        align: center middle;
+        height: auto;
+        margin-top: 1;
+    }
+
+    DiscardAllConfirmDialog #cancel-button {
+        margin-right: 1;
+        min-width: 12;
+    }
+
+    DiscardAllConfirmDialog #discard-button {
+        margin-left: 1;
+        min-width: 12;
+    }
+    """
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        file_list: list[str],
+        file_count: int,
+    ) -> None:
+        """Initialize discard all confirmation dialog.
+        
+        Args:
+            title: Dialog title.
+            message: Confirmation message.
+            file_list: List of file paths that will be affected.
+            file_count: Total number of files.
+        """
+        super().__init__()
+        self.title_text = title
+        self.message_text = message
+        self.file_list = file_list
+        self.file_count = file_count
+
+    def compose(self):
+        """Compose dialog widgets."""
+        with Container(id="discard-all-confirm-dialog"):
+            yield Static(self.title_text, id="discard-all-confirm-header")
+            yield Static("Please confirm this action", id="discard-all-confirm-subtitle")
+            
+            with Container(id="discard-all-confirm-message-container"):
+                yield Static(self.message_text, id="discard-all-confirm-message")
+                yield Static(f"Affected files: {self.file_count}", id="discard-all-confirm-file-count")
+                
+                if self.file_list:
+                    with Container(id="discard-all-confirm-file-list") as file_list_container:
+                        file_list_container.border_title = "Files to be affected"
+                        # Show file list (limit to first 20 for display)
+                        display_files = self.file_list[:20]
+                        for file_path in display_files:
+                            from rich.text import Text
+                            file_text = Text(f"  • {file_path}", style="dim white")
+                            yield Static(file_text)
+                        if len(self.file_list) > 20:
+                            from rich.text import Text
+                            more_text = Text(f"  ... and {len(self.file_list) - 20} more file(s)", style="dim white")
+                            yield Static(more_text)
+                
+                yield Static(
+                    "Warning: This action cannot be undone.",
+                    id="discard-all-confirm-warning"
+                )
+            
+            with Container(id="discard-all-confirm-button-container"):
+                yield Button("Cancel", id="cancel-button", variant="default")
+                yield Button("Discard All", id="discard-button", variant="error")
+
+    def on_mount(self) -> None:
+        """Focus discard button when mounted."""
+        try:
+            self.query_one("#discard-button", Button).focus()
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses."""
+        if event.button.id == "discard-button":
+            self.dismiss(True)
+        elif event.button.id == "cancel-button":
+            self.dismiss(False)
+
+    def action_dismiss(self) -> None:
+        """Dismiss the dialog when Escape is pressed."""
+        self.dismiss(False)

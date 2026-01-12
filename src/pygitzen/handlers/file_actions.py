@@ -222,4 +222,108 @@ class FileActionHandler:
             # Update command log with error
             if hasattr(self.app, 'command_log_pane'):
                 self.app.command_log_pane.update_log(f"Failed to discard changes for '{file_path}': {error_msg}")
+    
+    def discard_all_staged_changes(self) -> None:
+        """Discard all staged changes in the repository."""
+        if not hasattr(self.app, 'file_service'):
+            self.app.notify("File service not available", severity="error", timeout=2.0)
+            return
+        
+        # Get list of staged files for confirmation
+        files = self.app.git.get_file_status()
+        staged_files = [f for f in files if f.staged]
+        
+        if not staged_files:
+            self.app.notify("No staged changes to discard", severity="warning", timeout=2.0)
+            return
+        
+        # Discard all staged changes
+        result = self.app.file_service.discard_all_staged_changes()
+        
+        if result["success"]:
+            # Refresh file status
+            self.app.load_file_status_background()
+            # Show notification
+            file_count = len(staged_files)
+            self.app.notify(f"Discarded staged changes for {file_count} file(s)", severity="success", timeout=2.0)
+            # Update command log
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Discarded staged changes for {file_count} file(s)")
+        else:
+            error_msg = result.get("error", "Unknown error")
+            self.app.notify(f"Failed to discard all staged changes: {error_msg}", severity="error", timeout=3.0)
+            # Update command log with error
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Failed to discard all staged changes: {error_msg}")
+    
+    def discard_all_unstaged_changes(self) -> None:
+        """Discard all unstaged changes in the repository."""
+        if not hasattr(self.app, 'file_service'):
+            self.app.notify("File service not available", severity="error", timeout=2.0)
+            return
+        
+        # Get list of unstaged files for confirmation
+        files = self.app.git.get_file_status()
+        unstaged_files = [f for f in files if f.unstaged or (not f.staged and f.status in ["modified", "untracked", "deleted"])]
+        
+        if not unstaged_files:
+            self.app.notify("No unstaged changes to discard", severity="warning", timeout=2.0)
+            return
+        
+        # Discard all unstaged changes
+        result = self.app.file_service.discard_all_unstaged_changes()
+        
+        if result["success"]:
+            # Refresh file status
+            self.app.load_file_status_background()
+            # Show notification
+            file_count = len(unstaged_files)
+            self.app.notify(f"Discarded unstaged changes for {file_count} file(s)", severity="success", timeout=2.0)
+            # Update command log
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Discarded unstaged changes for {file_count} file(s)")
+        else:
+            error_msg = result.get("error", "Unknown error")
+            self.app.notify(f"Failed to discard all unstaged changes: {error_msg}", severity="error", timeout=3.0)
+            # Update command log with error
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Failed to discard all unstaged changes: {error_msg}")
+    
+    def discard_all_changes(self) -> None:
+        """Discard all staged and unstaged changes in the repository."""
+        if not hasattr(self.app, 'file_service'):
+            self.app.notify("File service not available", severity="error", timeout=2.0)
+            return
+        
+        # Get list of all files with changes for confirmation
+        files = self.app.git.get_file_status()
+        all_changed_files = [f for f in files if f.staged or f.unstaged or f.status in ["modified", "untracked", "deleted"]]
+        
+        if not all_changed_files:
+            self.app.notify("No changes to discard", severity="warning", timeout=2.0)
+            return
+        
+        # Discard all changes
+        result = self.app.file_service.discard_all_changes()
+        
+        if result["success"]:
+            # Clear patch pane
+            if hasattr(self.app, 'patch_pane'):
+                from rich.text import Text
+                self.app.patch_pane.update(Text("All changes discarded", style="dim"))
+            
+            # Refresh file status
+            self.app.load_file_status_background()
+            # Show notification
+            file_count = len(all_changed_files)
+            self.app.notify(f"Discarded all changes for {file_count} file(s)", severity="success", timeout=2.0)
+            # Update command log
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Discarded all changes for {file_count} file(s)")
+        else:
+            error_msg = result.get("error", "Unknown error")
+            self.app.notify(f"Failed to discard all changes: {error_msg}", severity="error", timeout=3.0)
+            # Update command log with error
+            if hasattr(self.app, 'command_log_pane'):
+                self.app.command_log_pane.update_log(f"Failed to discard all changes: {error_msg}")
 
