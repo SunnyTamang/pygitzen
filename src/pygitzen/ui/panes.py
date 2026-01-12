@@ -511,6 +511,18 @@ class StagedPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-file")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -529,6 +541,61 @@ class StagedPane(ListView):
                     self._last_highlighted = index
             except:
                 pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting and auto-show file diff."""
+        # Restore highlighting if we have a highlighted item
+        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
+        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(self._files) > 0:
+            current_index = 0
+        
+        # Set both highlighted and index to ensure ListView knows which item is selected
+        if current_index is not None:
+            self.highlighted = current_index
+            self.index = current_index
+            # Update _last_highlighted to preserve selection
+            self._last_highlighted = current_index
+            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
+            try:
+                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
+            except:
+                # Fallback: call directly if timer not available
+                self._update_highlighting(current_index)
+            
+            # Auto-show file diff for the highlighted item
+            if 0 <= current_index < len(self._files):
+                file_status = self._files[current_index]
+                file_path = file_status.path
+                staged = True
+                untracked = file_status.status == "untracked"
+                
+                app = self.app
+                if app and hasattr(app, 'file_actions'):
+                    # Switch to patch view
+                    if hasattr(app, '_view_mode'):
+                        app._view_mode = "patch"
+                    if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                        app.patch_pane.styles.display = "block"
+                        app.log_pane.styles.display = "none"
+                    
+                    # Show file diff
+                    app.file_actions.show_file_diff(file_path, staged=staged, untracked=untracked)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting (but preserve _last_highlighted)."""
+        # Only remove visual highlighting, don't reset _last_highlighted
+        # This preserves the selection so it can be restored when focus returns
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-file")
+            except:
+                pass
+        # Don't reset _last_highlighted - we want to preserve it for when focus returns
 
 
 
@@ -839,6 +906,18 @@ class ChangesPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-file")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -857,6 +936,63 @@ class ChangesPane(ListView):
                     self._last_highlighted = index
             except:
                 pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting and auto-show file diff."""
+        # Restore highlighting if we have a highlighted item
+        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
+        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(self._files) > 0:
+            current_index = 0
+        
+        # Set both highlighted and index to ensure ListView knows which item is selected
+        if current_index is not None:
+            self.highlighted = current_index
+            self.index = current_index
+            # Update _last_highlighted to preserve selection
+            self._last_highlighted = current_index
+            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
+            try:
+                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
+            except:
+                # Fallback: call directly if timer not available
+                self._update_highlighting(current_index)
+            
+            # Auto-show file diff for the highlighted item
+            if 0 <= current_index < len(self._files):
+                file_status = self._files[current_index]
+                file_path = file_status.path
+                # For ChangesPane, files are unstaged (unless they have both)
+                staged = file_status.staged
+                unstaged = file_status.unstaged or file_status.status in ["modified", "untracked", "deleted"]
+                untracked = file_status.status == "untracked"
+                
+                app = self.app
+                if app and hasattr(app, 'file_actions'):
+                    # Switch to patch view
+                    if hasattr(app, '_view_mode'):
+                        app._view_mode = "patch"
+                    if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                        app.patch_pane.styles.display = "block"
+                        app.log_pane.styles.display = "none"
+                    
+                    # Show file diff (unstaged changes)
+                    app.file_actions.show_file_diff(file_path, staged=False, untracked=untracked)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting (but preserve _last_highlighted)."""
+        # Only remove visual highlighting, don't reset _last_highlighted
+        # This preserves the selection so it can be restored when focus returns
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-file")
+            except:
+                pass
+        # Don't reset _last_highlighted - we want to preserve it for when focus returns
 
 
 # BranchesPane
@@ -917,9 +1053,18 @@ class BranchesPane(ListView):
             app.action_rename_branch()
     
     def watch_highlighted(self, highlighted: int | None) -> None:
-        """Watch for highlighted changes (arrow keys) to update visual highlighting."""
+        """Watch for highlighted changes (arrow keys) to update visual highlighting and show branch logs."""
         # Update highlighting
         self._update_highlighting(highlighted)
+        
+        # Auto-show branch logs when branch is highlighted
+        if highlighted is not None and hasattr(self, '_branches') and 0 <= highlighted < len(self._branches):
+            branch = self._branches[highlighted]
+            app = self.app
+            if app and hasattr(app, 'load_commits'):
+                # Load commits for the highlighted branch
+                app.active_branch = branch.name
+                app.load_commits(branch.name)
         
         # Scroll to highlighted item to ensure it's visible
         try:
@@ -929,6 +1074,55 @@ class BranchesPane(ListView):
                     self.scroll_to_widget(item, animate=False)
         except Exception:
             pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting and auto-show branch logs."""
+        # Restore highlighting if we have a highlighted item
+        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
+        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and hasattr(self, '_branches') and len(self._branches) > 0:
+            current_index = 0
+        
+        # Set both highlighted and index to ensure ListView knows which item is selected
+        if current_index is not None:
+            self.highlighted = current_index
+            self.index = current_index
+            # Update _last_highlighted to preserve selection
+            self._last_highlighted = current_index
+            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
+            try:
+                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
+            except:
+                # Fallback: call directly if timer not available
+                self._update_highlighting(current_index)
+            
+            # Auto-show branch logs for the highlighted branch
+            if hasattr(self, '_branches') and 0 <= current_index < len(self._branches):
+                branch = self._branches[current_index]
+                app = self.app
+                if app and hasattr(app, 'load_commits') and hasattr(app, 'load_commits_for_log'):
+                    # Load commits for the highlighted branch
+                    app.active_branch = branch.name
+                    # Switch to log view (not patch view) when branches pane is focused
+                    if hasattr(app, '_view_mode'):
+                        app._view_mode = "log"
+                    if hasattr(app, 'patch_pane') and hasattr(app, 'log_pane'):
+                        app.patch_pane.styles.display = "none"
+                        app.log_pane.styles.display = "block"
+                    # Load commits for log view (shows git log --graph)
+                    app.load_commits_for_log(branch.name)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting."""
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-branch")
+            except:
+                pass
     
     def watch_index(self, index: int | None) -> None:
         """Watch for index changes to update visual highlighting."""
@@ -1017,6 +1211,9 @@ class BranchesPane(ListView):
         preserve_index = current_index if current_index is not None else current_highlighted
         
         self.clear()
+        
+        # Store branches for access by index
+        self._branches = branches
         
         # Restore highlighting after update if we had a selection
         if preserve_index is not None:
@@ -1140,6 +1337,18 @@ class RemotesPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-remote")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -1156,6 +1365,30 @@ class RemotesPane(ListView):
                 if isinstance(item, ListItem):
                     item.add_class("highlighted-remote")
                     self._last_highlighted = index
+            except:
+                pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting."""
+        # Restore highlighting if we have a highlighted item
+        current_index = self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else self._last_highlighted
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(self._remotes) > 0:
+            current_index = 0
+            self.highlighted = 0
+        
+        # Update highlighting
+        if current_index is not None:
+            self._update_highlighting(current_index)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting."""
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-remote")
             except:
                 pass
     
@@ -1250,6 +1483,18 @@ class TagsPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-tag")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -1266,6 +1511,30 @@ class TagsPane(ListView):
                 if isinstance(item, ListItem):
                     item.add_class("highlighted-tag")
                     self._last_highlighted = index
+            except:
+                pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting."""
+        # Restore highlighting if we have a highlighted item
+        current_index = self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else self._last_highlighted
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(self._tags) > 0:
+            current_index = 0
+            self.highlighted = 0
+        
+        # Update highlighting
+        if current_index is not None:
+            self._update_highlighting(current_index)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting."""
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-tag")
             except:
                 pass
     
@@ -1444,6 +1713,18 @@ class CommitsPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-commit")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -1462,6 +1743,64 @@ class CommitsPane(ListView):
                     self._last_highlighted = index
             except:
                 pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting and auto-show commit patch."""
+        # Restore highlighting if we have a highlighted item
+        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
+        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        
+        # Get commits from parent app
+        commits = []
+        if self._parent_app and hasattr(self._parent_app, 'commits'):
+            commits = self._parent_app.commits
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(commits) > 0:
+            current_index = 0
+        
+        # Set both highlighted and index to ensure ListView knows which item is selected
+        if current_index is not None:
+            self.highlighted = current_index
+            self.index = current_index
+            # Update _last_highlighted to preserve selection
+            self._last_highlighted = current_index
+            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
+            try:
+                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
+            except:
+                # Fallback: call directly if timer not available
+                self._update_highlighting(current_index)
+            
+            # Auto-show commit patch for the highlighted item
+            if 0 <= current_index < len(commits):
+                # Explicitly show commit diff (similar to how changes pane shows file diff)
+                # This ensures the patch is shown even if _last_index is the same
+                if self._parent_app:
+                    # Switch to patch view
+                    if hasattr(self._parent_app, '_view_mode'):
+                        self._parent_app._view_mode = "patch"
+                    if hasattr(self._parent_app, 'patch_pane') and hasattr(self._parent_app, 'log_pane'):
+                        self._parent_app.patch_pane.styles.display = "block"
+                        self._parent_app.log_pane.styles.display = "none"
+                    # Show commit diff directly
+                    self._parent_app.selected_commit_index = current_index
+                    self._parent_app.show_commit_diff(current_index)
+                    # Update _last_index to track that we've shown this commit
+                    self._last_index = current_index
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting (but preserve _last_highlighted)."""
+        # Only remove visual highlighting, don't reset _last_highlighted
+        # This preserves the selection so it can be restored when focus returns
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-commit")
+            except:
+                pass
+        # Don't reset _last_highlighted - we want to preserve it for when focus returns
     
     def _update_patch_for_index(self, index: int | None) -> None:
         """Update patch panel for the given index."""
@@ -1823,6 +2162,18 @@ class StashPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
+        # Only show highlighting when pane has focus
+        if not self.has_focus:
+            # Remove all highlighting when pane loses focus
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-stash")
+                except:
+                    pass
+            return
+        
         # Remove highlight from previous item
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
@@ -1841,6 +2192,46 @@ class StashPane(ListView):
                     self._last_highlighted = index
             except:
                 pass
+    
+    def on_focus(self) -> None:
+        """Handle pane gaining focus - restore highlighting and auto-show stash diff."""
+        # Restore highlighting if we have a highlighted item
+        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
+        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        
+        # If no item is highlighted and pane has items, highlight the first one
+        if current_index is None and len(self._stashes) > 0:
+            current_index = 0
+        
+        # Set both highlighted and index to ensure ListView knows which item is selected
+        if current_index is not None:
+            self.highlighted = current_index
+            self.index = current_index
+            # Update _last_highlighted to preserve selection
+            self._last_highlighted = current_index
+            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
+            try:
+                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
+            except:
+                # Fallback: call directly if timer not available
+                self._update_highlighting(current_index)
+            
+            # Auto-show stash diff for the highlighted item
+            if 0 <= current_index < len(self._stashes):
+                self._update_patch_for_index(current_index)
+    
+    def on_blur(self) -> None:
+        """Handle pane losing focus - remove highlighting (but preserve _last_highlighted)."""
+        # Only remove visual highlighting, don't reset _last_highlighted
+        # This preserves the selection so it can be restored when focus returns
+        if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+            try:
+                item = self.children[self._last_highlighted]
+                if isinstance(item, ListItem):
+                    item.remove_class("highlighted-stash")
+            except:
+                pass
+        # Don't reset _last_highlighted - we want to preserve it for when focus returns
     
     def _update_patch_for_index(self, index: int | None) -> None:
         """Update patch panel for the given index."""
