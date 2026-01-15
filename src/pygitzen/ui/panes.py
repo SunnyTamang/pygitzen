@@ -2162,7 +2162,38 @@ class StashPane(ListView):
     
     def _update_highlighting(self, index: int | None) -> None:
         """Update visual highlighting by adding/removing classes."""
-        # Only show highlighting when pane has focus
+        # If index is being set (mouse click or keyboard), always show highlighting
+        # Mouse clicks should give focus, so we show highlighting even if focus check temporarily fails
+        if index is not None:
+            # If we have an index but no focus, try to get focus (mouse click should give focus)
+            if not self.has_focus:
+                try:
+                    self.focus()
+                except:
+                    pass
+            
+            # Always show highlighting when index is set (mouse click or keyboard navigation)
+            # Remove highlight from previous item
+            if self._last_highlighted is not None and self._last_highlighted < len(self.children):
+                try:
+                    item = self.children[self._last_highlighted]
+                    if isinstance(item, ListItem):
+                        item.remove_class("highlighted-stash")
+                except:
+                    pass
+            
+            # Add highlight to current item
+            if index < len(self.children):
+                try:
+                    item = self.children[index]
+                    if isinstance(item, ListItem):
+                        item.add_class("highlighted-stash")
+                        self._last_highlighted = index
+                except:
+                    pass
+            return
+        
+        # If index is None and no focus, remove highlighting
         if not self.has_focus:
             # Remove all highlighting when pane loses focus
             if self._last_highlighted is not None and self._last_highlighted < len(self.children):
@@ -2174,7 +2205,7 @@ class StashPane(ListView):
                     pass
             return
         
-        # Remove highlight from previous item
+        # Remove highlight from previous item (fallback for when index is None but pane has focus)
         if self._last_highlighted is not None and self._last_highlighted < len(self.children):
             try:
                 item = self.children[self._last_highlighted]
@@ -2182,25 +2213,25 @@ class StashPane(ListView):
                     item.remove_class("highlighted-stash")
             except:
                 pass
-        
-        # Add highlight to current item
-        if index is not None and index < len(self.children):
-            try:
-                item = self.children[index]
-                if isinstance(item, ListItem):
-                    item.add_class("highlighted-stash")
-                    self._last_highlighted = index
-            except:
-                pass
     
     def on_focus(self) -> None:
         """Handle pane gaining focus - restore highlighting and auto-show stash diff."""
         # Restore highlighting if we have a highlighted item
-        # Prefer _last_highlighted over highlighted to preserve selection across focus changes
-        current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
+        # Priority: self.index (set by Textual on click) > _last_highlighted > highlighted
+        # This ensures mouse clicks are respected even if on_focus() runs before watch_index()
+        current_index = None
+        if hasattr(self, 'index') and self.index is not None:
+            current_index = self.index
+        elif self._last_highlighted is not None:
+            current_index = self._last_highlighted
+        elif hasattr(self, 'highlighted') and self.highlighted is not None:
+            current_index = self.highlighted
+        
+        # Check if we're defaulting to 0 (no valid index found)
+        is_defaulting_to_zero = current_index is None and len(self._stashes) > 0
         
         # If no item is highlighted and pane has items, highlight the first one
-        if current_index is None and len(self._stashes) > 0:
+        if is_defaulting_to_zero:
             current_index = 0
         
         # Set both highlighted and index to ensure ListView knows which item is selected
@@ -2209,11 +2240,27 @@ class StashPane(ListView):
             self.index = current_index
             # Update _last_highlighted to preserve selection
             self._last_highlighted = current_index
-            # Use set_timer with minimal delay to ensure highlighting happens after focus is fully established
-            try:
-                self.set_timer(0.01, lambda: self._update_highlighting(current_index))
-            except:
-                # Fallback: call directly if timer not available
+            
+            # If we're defaulting to 0, delay highlighting slightly to let watch_index() run first
+            # This prevents the flash of item 0 when clicking on a different item
+            if is_defaulting_to_zero:
+                # Use a small delay to let watch_index() run first if user clicked an item
+                # Store the intended index to check if it's still valid when timer fires
+                intended_index = current_index
+                def delayed_highlight():
+                    # Only highlight if watch_index() hasn't already set a different index
+                    # Check if _last_highlighted matches our intended index (0)
+                    # If watch_index() ran, _last_highlighted will be different
+                    if self._last_highlighted == intended_index:
+                        self._update_highlighting(intended_index)
+                
+                try:
+                    self.set_timer(0.01, delayed_highlight)
+                except:
+                    # Fallback: call directly if timer not available
+                    self._update_highlighting(current_index)
+            else:
+                # Apply highlighting immediately for existing selections
                 self._update_highlighting(current_index)
             
             # Auto-show stash diff for the highlighted item
