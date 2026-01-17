@@ -288,6 +288,10 @@ class PygitzenApp(App):
         self._view_mode = "log"  # Default to log view (branch view)
         # self.refresh_data()
         self.refresh_data_fast()
+
+        # well, textual focuses the first focusable widget
+        # in compose order. Hence, we are making this explicit call to focus on local branches on app load.
+        self.branches_pane.focus()
         
         # Print Cython status to console for debugging (not shown in UI)
         version_info = " (Cython)" if self._using_cython else " (Python)"

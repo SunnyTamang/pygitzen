@@ -1811,11 +1811,11 @@ class CommitsPane(ListView):
         # Mouse clicks should give focus, so we show highlighting even if focus check temporarily fails
         if index is not None:
             # If we have an index but no focus, try to get focus (mouse click should give focus)
-            if not self.has_focus:
-                try:
-                    self.focus()
-                except:
-                    pass
+            # if not self.has_focus:
+            #     try:
+            #         self.focus()
+            #     except:
+            #         pass
             
             # Always show highlighting when index is set (mouse click or keyboard navigation)
             # Remove highlight from previous item
