@@ -1176,8 +1176,19 @@ class BranchesPane(ListView):
         current_index = self._last_highlighted if self._last_highlighted is not None else (self.highlighted if hasattr(self, 'highlighted') and self.highlighted is not None else None)
         
         # If no item is highlighted and pane has items, highlight the first one
+        # if current_index is None and hasattr(self, '_branches') and len(self._branches) > 0:
+        #     current_index = 0
+        # If no item is highlighted and pane has items, highlight the checked-out branch if available
         if current_index is None and hasattr(self, '_branches') and len(self._branches) > 0:
-            current_index = 0
+            # Try to find the checked-out branch first
+            if hasattr(self, '_checked_out_branch') and self._checked_out_branch:
+                branch_names = [b.name for b in self._branches]
+                if self._checked_out_branch in branch_names:
+                    current_index = branch_names.index(self._checked_out_branch)
+                else:
+                    current_index = 0  # Fallback to first branch if checked-out branch not found
+            else:
+                current_index = 0  # Fallback to first branch if no checked-out branch info
         
         # Set both highlighted and index to ensure ListView knows which item is selected
         if current_index is not None:
@@ -1308,6 +1319,9 @@ class BranchesPane(ListView):
         
         # Store branches for access by index
         self._branches = branches
+
+        # Store checkout-branch for use in on_focus() call 
+        self._checked_out_branch = checked_out_branch
         
         # Restore highlighting after update if we had a selection
         if preserve_index is not None:
